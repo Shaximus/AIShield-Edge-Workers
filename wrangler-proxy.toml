@@ -1,0 +1,8 @@
+name = "ai-shield-proxy"
+main = "ai-shield-proxy-worker.js"
+compatibility_date = "2024-01-01"
+account_id = "929a618e8151ad00591bbf3a321008a7"
+
+routes = [
+  { pattern = "api.reflexionsoftware.com/*", zone_name = "reflexionsoftware.com" }
+]

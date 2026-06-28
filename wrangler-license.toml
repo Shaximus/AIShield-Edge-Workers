@@ -1,0 +1,10 @@
+name = "ai-shield-license"
+main = "ai-shield-license-updated.js"
+compatibility_date = "2024-01-01"
+account_id = "929a618e8151ad00591bbf3a321008a7"
+
+[[kv_namespaces]]
+binding = "LICENSES"
+id = "cb18b94f9a69445e9f66640fddc50836"
+
+# STRIPE_SECRET_KEY set via wrangler secret

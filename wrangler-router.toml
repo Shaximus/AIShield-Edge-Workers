@@ -1,0 +1,31 @@
+name = "moe-precognition-router"
+main = "moe-precognition-router.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = [ "nodejs_compat" ]
+account_id = "929a618e8151ad00591bbf3a321008a7"
+
+[[kv_namespaces]]
+binding = "MOE_ROUTES"
+id = "ca0f14a0d4254174bba289eae1040b0d"
+
+[[d1_databases]]
+binding = "AURIS_LOGS"
+database_name = "auris-logs"
+database_id = "7f77cdba-95bd-4458-aebf-83e9a978415f"
+
+
+[[services]]
+binding = "moe_draft"
+service = "moe-draft"
+
+[[services]]
+binding = "moe_verifier"
+service = "moe-verifier"
+
+[[services]]
+binding = "moe_telemetry"
+service = "moe-precog"
+
+[[services]]
+binding = "moe_admin"
+service = "moe-admin"
