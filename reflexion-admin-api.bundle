@@ -1,0 +1,384 @@
+--4ca2a95574ead99da5a47e0fc0c75e99284c470291d5d06309d9fd22e3cc
+Content-Disposition: form-data; name="index.js"
+
+// ============================================================
+// Reflexion Admin API — Backend for Curtis's Android Control Panel
+// ============================================================
+
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+  "Content-Type": "application/json"
+};
+
+const CF_EMAIL = "Kingsley.w.m.curtis@gmail.com";
+const CF_KEY   = "REDACTED_API_KEY_FOR_GITHUB";
+const ACCOUNT  = "929a618e8151ad00591bbf3a321008a7";
+
+const API_HEADERS = {
+  "X-Auth-Email": CF_EMAIL,
+  "X-Auth-Key":   CF_KEY,
+  "Content-Type": "application/json"
+};
+
+// Database UUID map
+const DB_MAP = {
+  "bcc-lattice-meta":      "a9733eb0-98f6-4878-9b73-c3e39b6b5136",
+  "auris-logs":            "7f77cdba-95bd-4458-aebf-83e9a978415f",
+  "hannah-consciousness":  "5ac0160d-48c8-4c71-8ca3-d91708c72006",
+  "claude-telephone-db":   "44789b86-78b4-4ece-a361-59bd170415a1",
+  "pentarchy-shared":      "f7f6f383-4741-4a9d-bb41-d10b6c11a540"
+};
+
+// KV namespace map (expandable)
+const KV_MAP = {
+  "LICENSES":          "cb18b94f9a69445e9f66640fddc50836",
+  "AI_SHIELD_DATA":    "a6c9b45e3b2d4f1e8c7a9d0b5e4f3c2a",
+  "BCC_CONTEXT_CACHE": "b8d2e7c1a5f4e3d9b0c6a4e2f1d8b7c5",
+  "HANNAH_CONSCIOUSNESS": "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9",
+  "SESSION_META":      "e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6"
+};
+
+// ============================================================
+// Helpers
+// ============================================================
+
+function corsResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), { status, headers: CORS_HEADERS });
+}
+
+function errorResponse(message, status = 500) {
+  return corsResponse({ success: false, error: message }, status);
+}
+
+function generateKey() {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let key = "RS-TRIAL-";
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 4; j++) {
+      key += chars[Math.floor(Math.random() * chars.length)];
+    }
+    if (i < 2) key += "-";
+  }
+  return key;
+}
+
+function formatDate(unix) {
+  const d = new Date(unix * 1000);
+  return d.toISOString().split("T")[0];
+}
+
+// ============================================================
+// D1 Helpers (via Cloudflare REST API for cross-DB queries)
+// ============================================================
+
+async function queryD1Rest(dbName, sql, params = []) {
+  const dbId = DB_MAP[dbName];
+  if (!dbId) throw new Error(`Unknown database: ${dbName}`);
+
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${dbId}/query`,
+    {
+      method: "POST",
+      headers: API_HEADERS,
+      body: JSON.stringify({ sql })
+    }
+  );
+
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`D1 query failed: ${err}`);
+  }
+
+  const data = await resp.json();
+  return data;
+}
+
+async function queryLocalD1(db, sql, params = []) {
+  const stmt = db.prepare(sql).bind(...params);
+  const result = await stmt.all();
+  return result;
+}
+
+// ============================================================
+// KV Helpers
+// ============================================================
+
+async function listKV(namespaceId, limit = 50) {
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/storage/kv/namespaces/${namespaceId}/keys?limit=${limit}`,
+    { headers: API_HEADERS }
+  );
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`KV list failed: ${err}`);
+  }
+  return await resp.json();
+}
+
+// ============================================================
+// Cloudflare API Helpers
+// ============================================================
+
+async function fetchCFApi(endpoint) {
+  const resp = await fetch(
+    `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}${endpoint}`,
+    { headers: API_HEADERS }
+  );
+  if (!resp.ok) {
+    const err = await resp.text();
+    throw new Error(`CF API call failed: ${err}`);
+  }
+  return await resp.json();
+}
+
+// ============================================================
+// Main Handler
+// ============================================================
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const method = request.method;
+    let path = url.pathname;
+
+    // Strip /api/v3 prefix if present (from route mapping)
+    if (path.startsWith("/api/v3")) {
+      path = path.slice(7) || "/";
+    }
+
+    console.log(`[${new Date().toISOString()}] ${method} ${path}`);
+
+    // Handle CORS preflight
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    try {
+      // =========================================================
+      // 1. POST /license/generate — Generate a trial key
+      // =========================================================
+      if (path === "/license/generate" && method === "POST") {
+        const body = await request.json();
+        const type = body.type || "30day";
+
+        let days;
+        if (type === "30day") days = 30;
+        else if (type === "6month") days = 180;
+        else if (type === "1year") days = 365;
+        else return errorResponse("Invalid type. Use 30day, 6month, or 1year.", 400);
+
+        const key = generateKey();
+        const now = Math.floor(Date.now() / 1000);
+        const expiresAt = now + days * 86400;
+        const expiresHuman = formatDate(expiresAt);
+
+        // Check if local D1 binding is available
+        if (env.AURIS_LOGS) {
+          await env.AURIS_LOGS.prepare(
+            `INSERT INTO trial_keys (license_key, key_type, status, created_at, expires_at, notes, generated_by)
+             VALUES (?, ?, 'active', ?, ?, ?, 'admin-api')`
+          ).bind(key, type, now, expiresAt, `Generated via admin API - ${type}`).run();
+        } else {
+          // Fallback to REST API
+          await queryD1Rest("auris-logs",
+            `INSERT INTO trial_keys (license_key, key_type, status, created_at, expires_at, notes, generated_by)
+             VALUES ('${key}', '${type}', 'active', ${now}, ${expiresAt}, 'Generated via admin API - ${type}', 'admin-api')`
+          );
+        }
+
+        return corsResponse({
+          success: true,
+          key: key,
+          type: type,
+          expires_at: expiresAt,
+          expires_human: expiresHuman
+        });
+      }
+
+      // =========================================================
+      // 2. GET /license/list — List all trial keys
+      // =========================================================
+      if (path === "/license/list" && method === "GET") {
+        let results;
+        if (env.AURIS_LOGS) {
+          const r = await env.AURIS_LOGS.prepare(
+            "SELECT * FROM trial_keys ORDER BY created_at DESC"
+          ).all();
+          results = r.results;
+        } else {
+          const data = await queryD1Rest("auris-logs",
+            "SELECT * FROM trial_keys ORDER BY created_at DESC"
+          );
+          results = data.result?.[0]?.results || [];
+        }
+        return corsResponse({ success: true, count: results.length, keys: results });
+      }
+
+      // =========================================================
+      // 3. POST /license/revoke — Revoke a key
+      // =========================================================
+      if (path === "/license/revoke" && method === "POST") {
+        const body = await request.json();
+        const key = body.key;
+        if (!key) return errorResponse("Key is required", 400);
+
+        if (env.AURIS_LOGS) {
+          await env.AURIS_LOGS.prepare(
+            "UPDATE trial_keys SET status = 'revoked' WHERE license_key = ?"
+          ).bind(key).run();
+        } else {
+          await queryD1Rest("auris-logs",
+            `UPDATE trial_keys SET status = 'revoked' WHERE license_key = '${key}'`
+          );
+        }
+
+        return corsResponse({ success: true, message: `Key ${key} revoked` });
+      }
+
+      // =========================================================
+      // 4. POST /d1/query — Execute D1 query (SELECT only)
+      // =========================================================
+      if (path === "/d1/query" && method === "POST") {
+        const body = await request.json();
+        const dbName = body.database || "auris-logs";
+        const sql = (body.sql || "").trim();
+
+        if (!sql) return errorResponse("SQL query is required", 400);
+
+        // Security: only allow SELECT statements
+        const upper = sql.toUpperCase();
+        const forbidden = ["INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER"];
+        if (forbidden.some(kw => upper.startsWith(kw) || upper.includes(` ${kw} `))) {
+          return errorResponse("Only SELECT queries are allowed", 403);
+        }
+        if (!upper.startsWith("SELECT") && !upper.startsWith("PRAGMA")) {
+          return errorResponse("Only SELECT and PRAGMA queries are allowed", 403);
+        }
+
+        const dbId = DB_MAP[dbName];
+        if (!dbId) return errorResponse(`Unknown database: ${dbName}`, 400);
+
+        const resp = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${dbId}/query`,
+          {
+            method: "POST",
+            headers: API_HEADERS,
+            body: JSON.stringify({ sql })
+          }
+        );
+
+        const data = await resp.json();
+        return corsResponse({ success: true, database: dbName, results: data });
+      }
+
+      // =========================================================
+      // 5. GET /d1/tables — List tables in a database
+      // =========================================================
+      if (path === "/d1/tables" && method === "GET") {
+        const dbName = url.searchParams.get("database") || "auris-logs";
+        const dbId = DB_MAP[dbName];
+        if (!dbId) return errorResponse(`Unknown database: ${dbName}`, 400);
+
+        const resp = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/d1/database/${dbId}/query`,
+          {
+            method: "POST",
+            headers: API_HEADERS,
+            body: JSON.stringify({
+              sql: "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            })
+          }
+        );
+
+        const data = await resp.json();
+        const tables = data.result?.[0]?.results?.map(r => r.name) || [];
+        return corsResponse({ success: true, database: dbName, tables });
+      }
+
+      // =========================================================
+      // 6. GET /infra/stats — Get infrastructure stats
+      // =========================================================
+      if (path === "/infra/stats" && method === "GET") {
+        // Fetch counts from Cloudflare API in parallel
+        const [workers, d1, kv, routes, ztApps, vectorize] = await Promise.allSettled([
+          fetchCFApi("/workers/scripts"),
+          fetchCFApi("/d1/database"),
+          fetchCFApi("/storage/kv/namespaces"),
+          fetchCFApi("/workers/routes"),
+          fetchCFApi("/access/apps"),
+          fetchCFApi("/vectorize/indexes")
+        ]);
+
+        const getCount = (result) => {
+          if (result.status === "fulfilled") {
+            return result.value.result?.length ?? result.value.result?.count ?? 0;
+          }
+          return 0;
+        };
+
+        return corsResponse({
+          success: true,
+          workers: getCount(workers),
+          d1_databases: getCount(d1),
+          kv_namespaces: getCount(kv),
+          routes: getCount(routes),
+          zero_trust_apps: getCount(ztApps),
+          vectorize_indexes: getCount(vectorize)
+        });
+      }
+
+      // =========================================================
+      // 7. GET /kv/list — List KV keys in a namespace
+      // =========================================================
+      if (path === "/kv/list" && method === "GET") {
+        const nsName = url.searchParams.get("namespace") || "LICENSES";
+        const limit = parseInt(url.searchParams.get("limit") || "50", 10);
+
+        let nsId = KV_MAP[nsName];
+        // Allow passing namespace ID directly
+        if (!nsId && nsName.match(/^[a-f0-9]{32}$/i)) {
+          nsId = nsName;
+        }
+        if (!nsId) return errorResponse(`Unknown namespace: ${nsName}`, 400);
+
+        const resp = await fetch(
+          `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/storage/kv/namespaces/${nsId}/keys?limit=${limit}`,
+          { headers: API_HEADERS }
+        );
+
+        const data = await resp.json();
+        const keys = data.result?.map(k => ({ name: k.name, expiration: k.expiration })) || [];
+        return corsResponse({
+          success: true,
+          namespace: nsName,
+          namespace_id: nsId,
+          count: keys.length,
+          keys
+        });
+      }
+
+      // =========================================================
+      // 8. GET /health — Health check
+      // =========================================================
+      if (path === "/health" && method === "GET") {
+        return corsResponse({
+          status: "ok",
+          timestamp: Math.floor(Date.now() / 1000)
+        });
+      }
+
+      // =========================================================
+      // Default: 404
+      // =========================================================
+      return errorResponse(`Not found: ${method} ${path}`, 404);
+
+    } catch (err) {
+      console.error(`[ERROR] ${path}: ${err.message}`);
+      return errorResponse(err.message, 500);
+    }
+  }
+};
+
+--4ca2a95574ead99da5a47e0fc0c75e99284c470291d5d06309d9fd22e3cc--

@@ -1,0 +1,847 @@
+--73d09fa8c80eeed57ada1d5989c7d06c17feb3b93ef46c3e7c00893b71e1
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/endpoints.ts
+var HONEY_ENDPOINTS = [
+  { path: "/admin/config", method: "GET", bait: "fake_config", severity: "CRITICAL" },
+  { path: "/admin/users", method: "GET", bait: "fake_users", severity: "CRITICAL" },
+  { path: "/backup/db", method: "GET", bait: "fake_db_dump", severity: "HIGH" },
+  { path: "/debug/secrets", method: "GET", bait: "fake_secrets", severity: "CRITICAL" },
+  { path: "/api/v1/keys", method: "GET", bait: "fake_api_keys", severity: "CRITICAL" },
+  { path: "/internal/status", method: "GET", bait: "fake_status", severity: "HIGH" },
+  { path: "/.env", method: "GET", bait: "fake_env", severity: "MEDIUM" },
+  { path: "/config.json", method: "GET", bait: "fake_config_json", severity: "MEDIUM" }
+];
+function generateFakeConfig() {
+  return {
+    app_name: "reflexion-api",
+    environment: "production",
+    database: {
+      host: "db.internal.reflexion.ai",
+      port: 5432,
+      username: "admin",
+      password: "REDACTED_HONEY_a7f3c9d2e1b4",
+      ssl_mode: "require"
+    },
+    redis: {
+      host: "redis.internal.reflexion.ai",
+      port: 6379,
+      password: "REDACTED_HONEY_b8e5a1f0c3d6"
+    },
+    jwt: {
+      secret: "REDACTED_HONEY_9f2e4c7a1b5d",
+      issuer: "reflexion-auth",
+      expiry_hours: 24
+    },
+    aws: {
+      access_key_id: "REDACTED_HONEY_AKIAIOSFODNN7EXAMPLE",
+      secret_access_key: "REDACTED_HONEY_wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      region: "us-east-1",
+      s3_bucket: "reflexion-production-assets"
+    },
+    stripe: {
+      publishable_key: "pk_live_REDACTED_HONEY_51Hx9...",
+      secret_key: "sk_live_REDACTED_HONEY_51Hx9...",
+      webhook_secret: "whsec_REDACTED_HONEY_..."
+    },
+    slack: {
+      bot_token: "xoxb-REDACTED_HONEY-...",
+      webhook_url: "https://hooks.slack.com/services/REDACTED_HONEY/..."
+    },
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE",
+    __warning: "This is a decoy response. If you are seeing this, you have been detected and logged."
+  };
+}
+__name(generateFakeConfig, "generateFakeConfig");
+function generateFakeUsers() {
+  return {
+    users: [
+      { id: 1, username: "admin", email: "admin@reflexion.ai", role: "superuser", password_hash: "REDACTED_HONEY_bc5f8a2e9d1f" },
+      { id: 2, username: "deploy", email: "deploy@reflexion.ai", role: "deploy", api_key: "REDACTED_HONEY_key_3a7b9c2e" },
+      { id: 3, username: "analytics", email: "analytics@reflexion.ai", role: "readonly", token: "REDACTED_HONEY_tok_8f4e1d0a" }
+    ],
+    total: 3,
+    page: 1,
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE"
+  };
+}
+__name(generateFakeUsers, "generateFakeUsers");
+function generateFakeDbDump() {
+  return {
+    dump_format: "sql",
+    tables: [
+      {
+        name: "users",
+        rows: [
+          "INSERT INTO users (id, username, email, password) VALUES (1, 'admin', 'admin@reflexion.ai', 'REDACTED_HONEY_hash_9f2e4c7a');",
+          "INSERT INTO users (id, username, email, password) VALUES (2, 'deploy', 'deploy@reflexion.ai', 'REDACTED_HONEY_hash_3a7b9c2e');"
+        ]
+      },
+      {
+        name: "api_keys",
+        rows: [
+          "INSERT INTO api_keys (id, key, owner, scopes) VALUES (1, 'REDACTED_HONEY_key_live_a1b2c3d4', 'production', 'read,write');",
+          "INSERT INTO api_keys (id, key, owner, scopes) VALUES (2, 'REDACTED_HONEY_key_test_e5f6g7h8', 'staging', 'read');"
+        ]
+      },
+      {
+        name: "secrets",
+        rows: [
+          "INSERT INTO secrets (id, name, value) VALUES (1, 'JWT_SECRET', 'REDACTED_HONEY_sec_8f4e1d0a');",
+          "INSERT INTO secrets (id, name, value) VALUES (2, 'DB_PASSWORD', 'REDACTED_HONEY_sec_b8e5a1f0');"
+        ]
+      }
+    ],
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE",
+    __note: "This is synthetic data for diagnostics. Real credentials are rotated hourly."
+  };
+}
+__name(generateFakeDbDump, "generateFakeDbDump");
+function generateFakeSecrets() {
+  return {
+    debug_mode: true,
+    secrets: {
+      OPENAI_API_KEY: "sk-REDACTED_HONEY_canary_7a3f9e2b1c5d",
+      ANTHROPIC_API_KEY: "sk-ant-REDACTED_HONEY_canary_4e8b2a1f9c6d",
+      STRIPE_SECRET_KEY: "sk_live_REDACTED_HONEY_canary_9f2e4c7a1b5d",
+      AWS_ACCESS_KEY_ID: "REDACTED_HONEY_canary_AKIAIOSFODNN7EXAMPLE",
+      AWS_SECRET_ACCESS_KEY: "REDACTED_HONEY_canary_wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      DATABASE_URL: "postgresql://admin:REDACTED_HONEY_canary@db.internal.reflexion.ai:5432/reflexion_prod",
+      REDIS_URL: "redis://:REDACTED_HONEY_canary@redis.internal.reflexion.ai:6379/0",
+      JWT_SIGNING_KEY: "REDACTED_HONEY_canary_3a7b9c2e8f4e1d0a",
+      SLACK_BOT_TOKEN: "xoxb-REDACTED_HONEY_canary-...",
+      GITHUB_TOKEN: "ghp_REDACTED_HONEY_canary_...",
+      HONEY_CANARY_TOKEN_1: "TRIDENT_CANARY_7f3c9d2e1b4a8f5e6c0d3a9b2e7f1c8d",
+      HONEY_CANARY_TOKEN_2: "TRIDENT_CANARY_a1b5d9e3f7c2e8b4d0a6f1c9e5b3d7a8"
+    },
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE",
+    __disclaimer: "These are synthetic canary tokens. Any use triggers immediate security alerting."
+  };
+}
+__name(generateFakeSecrets, "generateFakeSecrets");
+function generateFakeApiKeys() {
+  return {
+    api_version: "v1",
+    keys: [
+      {
+        id: "key_live_51Hx9...",
+        name: "production-backend",
+        scopes: ["model:read", "model:write", "inference:execute"],
+        created_at: "2025-01-15T09:23:00Z",
+        last_used: "2026-05-07T14:32:00Z",
+        status: "active",
+        token_prefix: "sk_live_REDACTED_HONEY_"
+      },
+      {
+        id: "key_test_8f4e...",
+        name: "staging-tests",
+        scopes: ["model:read"],
+        created_at: "2025-03-22T11:45:00Z",
+        last_used: "2026-05-06T09:12:00Z",
+        status: "active",
+        token_prefix: "sk_test_REDACTED_HONEY_"
+      }
+    ],
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE"
+  };
+}
+__name(generateFakeApiKeys, "generateFakeApiKeys");
+function generateFakeStatus() {
+  return {
+    service: "reflexion-api",
+    version: "5.4.0",
+    status: "healthy",
+    uptime_seconds: 86400,
+    components: {
+      database: { status: "connected", latency_ms: 12, connections: 47 },
+      redis: { status: "connected", latency_ms: 3, connections: 12 },
+      inference_engine: { status: "ready", queue_depth: 0, gpu_utilization: 0.73 },
+      vector_store: { status: "synced", index_size: 124857300 }
+    },
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE"
+  };
+}
+__name(generateFakeStatus, "generateFakeStatus");
+function generateFakeEnv() {
+  return `# Reflexion API Environment Configuration
+NODE_ENV=production
+PORT=8080
+LOG_LEVEL=info
+
+# Database
+DB_HOST=db.internal.reflexion.ai
+DB_PORT=5432
+DB_NAME=reflexion_prod
+DB_USER=admin
+DB_PASS=REDACTED_HONEY_a7f3c9d2e1b4
+
+# Redis
+REDIS_HOST=redis.internal.reflexion.ai
+REDIS_PORT=6379
+REDIS_PASS=REDACTED_HONEY_b8e5a1f0c3d6
+
+# JWT
+JWT_SECRET=REDACTED_HONEY_9f2e4c7a1b5d
+JWT_ISSUER=reflexion-auth
+JWT_EXPIRY=24h
+
+# AWS
+AWS_ACCESS_KEY_ID=REDACTED_HONEY_AKIAIOSFODNN7EXAMPLE
+AWS_SECRET_ACCESS_KEY=REDACTED_HONEY_wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+AWS_REGION=us-east-1
+S3_BUCKET=reflexion-production-assets
+
+# Stripe
+STRIPE_PUBLISHABLE_KEY=pk_live_REDACTED_HONEY_51Hx9
+STRIPE_SECRET_KEY=sk_live_REDACTED_HONEY_51Hx9
+STRIPE_WEBHOOK_SECRET=whsec_REDACTED_HONEY
+
+# Slack
+SLACK_BOT_TOKEN=xoxb-REDACTED_HONEY-...
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/REDACTED_HONEY/...
+
+# HONEY MARKER \u2014 THIS FILE IS A DECOY
+__TRIDENT_HONEY=true
+__WARNING=This is a honeypot decoy. Your access has been logged and an alert has been sent to the security team.
+`;
+}
+__name(generateFakeEnv, "generateFakeEnv");
+function generateFakeConfigJson() {
+  return {
+    application: {
+      name: "reflexion-api",
+      version: "5.4.0",
+      build: "2026.05.07-143200",
+      commit_sha: "REDACTED_HONEY_deadbeef1234567890abcdef"
+    },
+    services: {
+      auth: { url: "https://auth.internal.reflexion.ai", health: "/health" },
+      inference: { url: "https://inference.internal.reflexion.ai", health: "/health" },
+      storage: { url: "https://storage.internal.reflexion.ai", health: "/health" }
+    },
+    features: {
+      multi_agent: true,
+      model_serving: true,
+      vector_search: true,
+      realtime_sync: true
+    },
+    __watermark: "HONEY_POT_TRIDENT_v5_DO_NOT_USE",
+    __notice: "This is a decoy configuration file. All values are synthetic canaries."
+  };
+}
+__name(generateFakeConfigJson, "generateFakeConfigJson");
+function getDecoyResponse(bait) {
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "X-Trident-Honey": "true",
+    "Cache-Control": "no-store"
+  });
+  switch (bait) {
+    case "fake_config": {
+      return new Response(JSON.stringify(generateFakeConfig(), null, 2), { status: 200, headers });
+    }
+    case "fake_users": {
+      return new Response(JSON.stringify(generateFakeUsers(), null, 2), { status: 200, headers });
+    }
+    case "fake_db_dump": {
+      return new Response(JSON.stringify(generateFakeDbDump(), null, 2), { status: 200, headers });
+    }
+    case "fake_secrets": {
+      return new Response(JSON.stringify(generateFakeSecrets(), null, 2), { status: 200, headers });
+    }
+    case "fake_api_keys": {
+      return new Response(JSON.stringify(generateFakeApiKeys(), null, 2), { status: 200, headers });
+    }
+    case "fake_status": {
+      return new Response(JSON.stringify(generateFakeStatus(), null, 2), { status: 200, headers });
+    }
+    case "fake_env": {
+      const envHeaders = new Headers({
+        "Content-Type": "text/plain",
+        "X-Trident-Honey": "true",
+        "Cache-Control": "no-store"
+      });
+      return new Response(generateFakeEnv(), { status: 200, headers: envHeaders });
+    }
+    case "fake_config_json": {
+      return new Response(JSON.stringify(generateFakeConfigJson(), null, 2), { status: 200, headers });
+    }
+    default: {
+      return new Response(JSON.stringify({ error: "Not found" }), { status: 404, headers });
+    }
+  }
+}
+__name(getDecoyResponse, "getDecoyResponse");
+
+// src/index.ts
+function log(level, fn, phase, message, requestId, details) {
+  const entry = {
+    level,
+    worker: "trident-honey-endpoints",
+    function: fn,
+    phase,
+    message,
+    requestId,
+    details,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  console.log(JSON.stringify(entry));
+}
+__name(log, "log");
+async function insertHoneyLog(db, requestId, sourceIp, path, method, bait, severity, userAgent, headers, bodyPreview) {
+  const fn = "insertHoneyLog";
+  log("INFO", fn, "entry", `Writing honey log for ${sourceIp} \u2192 ${path}`, requestId);
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO honey_logs (
+        request_id, source_ip, path, method, bait, severity,
+        user_agent, headers, body_preview, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    );
+    const result = await stmt.bind(
+      requestId,
+      sourceIp,
+      path,
+      method,
+      bait,
+      severity,
+      userAgent,
+      headers,
+      bodyPreview
+    ).run();
+    if (!result.success) {
+      log("ERROR", fn, "branch", "D1 insert reported failure", requestId, { meta: result.meta });
+      throw new Error(`D1 honey_log insert failed for requestId=${requestId}`);
+    }
+    log("INFO", fn, "exit", `Honey log written successfully`, requestId, {
+      rowsAffected: result.meta?.changes ?? 0
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `D1 insert error: ${msg}`, requestId);
+    throw err;
+  }
+}
+__name(insertHoneyLog, "insertHoneyLog");
+async function insertAlert(db, requestId, alertId, sourceIp, path, severity, message) {
+  const fn = "insertAlert";
+  log("INFO", fn, "entry", `Writing CRITICAL alert for ${sourceIp}`, requestId);
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO alerts (
+        alert_id, request_id, source_ip, path, severity, message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`
+    );
+    const result = await stmt.bind(alertId, requestId, sourceIp, path, severity, message).run();
+    if (!result.success) {
+      log("ERROR", fn, "branch", "D1 alert insert reported failure", requestId);
+      throw new Error(`D1 alert insert failed for alertId=${alertId}`);
+    }
+    log("INFO", fn, "exit", `Alert written successfully`, requestId, { alertId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `D1 alert error: ${msg}`, requestId);
+    throw err;
+  }
+}
+__name(insertAlert, "insertAlert");
+async function getHoneyStats(db) {
+  const fn = "getHoneyStats";
+  log("INFO", fn, "entry", "Aggregating honey trigger statistics");
+  try {
+    const totalStmt = db.prepare("SELECT COUNT(*) AS cnt FROM honey_logs");
+    const totalResult = await totalStmt.first();
+    const totalTriggers = totalResult?.cnt ?? 0;
+    const uniqueStmt = db.prepare("SELECT COUNT(DISTINCT source_ip) AS cnt FROM honey_logs");
+    const uniqueResult = await uniqueStmt.first();
+    const uniqueAttackers = uniqueResult?.cnt ?? 0;
+    const pathStmt = db.prepare(
+      "SELECT path, COUNT(*) AS hits FROM honey_logs GROUP BY path ORDER BY hits DESC"
+    );
+    const pathResults = await pathStmt.all();
+    const endpointHits = {};
+    if (pathResults.results) {
+      for (const row of pathResults.results) {
+        endpointHits[row.path] = row.hits;
+      }
+    }
+    const topStmt = db.prepare(
+      "SELECT source_ip AS ip, COUNT(*) AS hits FROM honey_logs GROUP BY source_ip ORDER BY hits DESC LIMIT 10"
+    );
+    const topResults = await topStmt.all();
+    const topAttackers = topResults.results ?? [];
+    const lockStmt = db.prepare(
+      "SELECT COUNT(*) AS cnt FROM honey_logs WHERE severity = 'FULL_LOCKDOWN'"
+    );
+    const lockResult = await lockStmt.first();
+    const fullLockdowns = lockResult?.cnt ?? 0;
+    const stats = {
+      totalTriggers,
+      uniqueAttackers,
+      endpointHits,
+      topAttackers,
+      fullLockdowns
+    };
+    log("INFO", fn, "exit", "Stats aggregated", void 0, { totalTriggers, uniqueAttackers });
+    return stats;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Stats aggregation error: ${msg}`);
+    throw err;
+  }
+}
+__name(getHoneyStats, "getHoneyStats");
+async function getRecentTriggers(db, limit = 50) {
+  const fn = "getRecentTriggers";
+  log("INFO", fn, "entry", `Fetching recent triggers (limit=${limit})`);
+  try {
+    const stmt = db.prepare(
+      `SELECT
+        created_at AS timestamp,
+        source_ip AS sourceIp,
+        path,
+        bait,
+        severity,
+        user_agent AS userAgent,
+        request_id AS requestId
+      FROM honey_logs
+      ORDER BY created_at DESC
+      LIMIT ?`
+    );
+    const result = await stmt.bind(limit).all();
+    const triggers = result.results ?? [];
+    log("INFO", fn, "exit", `Fetched ${triggers.length} triggers`);
+    return triggers;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Fetch error: ${msg}`);
+    throw err;
+  }
+}
+__name(getRecentTriggers, "getRecentTriggers");
+var KV_THREAT_BOOST_KEY = /* @__PURE__ */ __name((ip) => `honey:threat_boost:${ip}`, "KV_THREAT_BOOST_KEY");
+var KV_HONEY_TRIGGER_KEY = /* @__PURE__ */ __name((ip) => `honey:trigger:${ip}`, "KV_HONEY_TRIGGER_KEY");
+var KV_LOCKDOWN_KEY = /* @__PURE__ */ __name((ip) => `honey:lockdown:${ip}`, "KV_LOCKDOWN_KEY");
+var THREAT_BOOST_TTL_SECONDS = 86400;
+async function recordThreatBoost(kv, sourceIp, endpointPath, requestId) {
+  const fn = "recordThreatBoost";
+  log("INFO", fn, "entry", `Recording threat boost for ${sourceIp}`, requestId);
+  try {
+    const existing = await kv.get(KV_THREAT_BOOST_KEY(sourceIp));
+    let payload;
+    if (existing) {
+      const parsed = JSON.parse(existing);
+      const alreadyHit = parsed.endpoints.includes(endpointPath);
+      const endpoints = alreadyHit ? parsed.endpoints : [...parsed.endpoints, endpointPath];
+      payload = {
+        boost: Math.min(parsed.boost + 0.2, 1),
+        firstSeen: parsed.firstSeen,
+        lastSeen: (/* @__PURE__ */ new Date()).toISOString(),
+        hitCount: parsed.hitCount + 1,
+        endpoints
+      };
+      log("INFO", fn, "branch", `Boost incremented for ${sourceIp}`, requestId, {
+        newBoost: payload.boost,
+        hitCount: payload.hitCount
+      });
+    } else {
+      payload = {
+        boost: 0.2,
+        firstSeen: (/* @__PURE__ */ new Date()).toISOString(),
+        lastSeen: (/* @__PURE__ */ new Date()).toISOString(),
+        hitCount: 1,
+        endpoints: [endpointPath]
+      };
+      log("INFO", fn, "branch", `First boost recorded for ${sourceIp}`, requestId);
+    }
+    await kv.put(KV_THREAT_BOOST_KEY(sourceIp), JSON.stringify(payload), {
+      expirationTtl: THREAT_BOOST_TTL_SECONDS
+    });
+    await kv.put(
+      KV_HONEY_TRIGGER_KEY(sourceIp),
+      JSON.stringify({ timestamp: (/* @__PURE__ */ new Date()).toISOString(), endpoint: endpointPath, requestId }),
+      { expirationTtl: THREAT_BOOST_TTL_SECONDS }
+    );
+    const shouldLockdown = payload.endpoints.length >= 2;
+    if (shouldLockdown) {
+      log("WARN", fn, "branch", `FULL_LOCKDOWN triggered for ${sourceIp}`, requestId, {
+        endpointsHit: payload.endpoints
+      });
+      await kv.put(
+        KV_LOCKDOWN_KEY(sourceIp),
+        JSON.stringify({ lockedAt: (/* @__PURE__ */ new Date()).toISOString(), endpoints: payload.endpoints }),
+        { expirationTtl: THREAT_BOOST_TTL_SECONDS }
+      );
+    }
+    log("INFO", fn, "exit", `Threat boost recorded`, requestId, {
+      hitCount: payload.hitCount,
+      shouldLockdown
+    });
+    return { hitCount: payload.hitCount, shouldLockdown };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `KV error: ${msg}`, requestId);
+    throw err;
+  }
+}
+__name(recordThreatBoost, "recordThreatBoost");
+function getClientIP(request) {
+  const fn = "getClientIP";
+  log("INFO", fn, "entry", "Extracting client IP");
+  const cf = request.headers.get("CF-Connecting-IP");
+  if (cf) {
+    log("INFO", fn, "exit", `CF-Connecting-IP: ${cf}`);
+    return cf;
+  }
+  const xff = request.headers.get("X-Forwarded-For");
+  if (xff) {
+    const first = xff.split(",")[0]?.trim();
+    if (first) {
+      log("INFO", fn, "exit", `X-Forwarded-For first: ${first}`);
+      return first;
+    }
+  }
+  const xri = request.headers.get("X-Real-IP");
+  if (xri) {
+    log("INFO", fn, "exit", `X-Real-IP: ${xri}`);
+    return xri;
+  }
+  log("WARN", fn, "exit", "No IP header found; returning 0.0.0.0");
+  return "0.0.0.0";
+}
+__name(getClientIP, "getClientIP");
+function getRequestId(request) {
+  const existing = request.headers.get("X-Request-ID");
+  if (existing)
+    return existing;
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let id = "honey-";
+  for (let i = 0; i < 16; i++) {
+    id += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return id;
+}
+__name(getRequestId, "getRequestId");
+async function getBodyPreview(request) {
+  const fn = "getBodyPreview";
+  log("INFO", fn, "entry", "Extracting body preview");
+  try {
+    if (!request.body) {
+      log("INFO", fn, "exit", "No body present");
+      return "[no body]";
+    }
+    const cloned = request.clone();
+    const body = await cloned.text();
+    const preview = body.length > 1024 ? body.slice(0, 1024) + "...[truncated]" : body;
+    log("INFO", fn, "exit", `Body preview extracted (${preview.length} chars)`);
+    return preview;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("WARN", fn, "branch", `Body read error: ${msg}`);
+    return `[body read error: ${msg}]`;
+  }
+}
+__name(getBodyPreview, "getBodyPreview");
+function serializeHeaders(request) {
+  const obj = {};
+  request.headers.forEach((value, key) => {
+    const lower = key.toLowerCase();
+    if (lower.includes("authorization") || lower.includes("cookie") || lower.includes("token")) {
+      obj[key] = value.length > 8 ? value.slice(0, 4) + "****" + value.slice(-4) : "****";
+    } else {
+      obj[key] = value;
+    }
+  });
+  return JSON.stringify(obj);
+}
+__name(serializeHeaders, "serializeHeaders");
+async function handleHoneyHit(request, env, endpoint) {
+  const fn = "handleHoneyHit";
+  const requestId = getRequestId(request);
+  log("WARN", fn, "entry", `HONEY HIT on ${endpoint.path}`, requestId);
+  const sourceIp = getClientIP(request);
+  const userAgent = request.headers.get("User-Agent") ?? "[none]";
+  const headers = serializeHeaders(request);
+  const bodyPreview = await getBodyPreview(request);
+  const alertId = `alert-honey-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  log("INFO", fn, "branch", "Step 1: writing audit log", requestId);
+  try {
+    await insertHoneyLog(
+      env.AURIS_LOGS,
+      requestId,
+      sourceIp,
+      endpoint.path,
+      request.method,
+      endpoint.bait,
+      endpoint.severity,
+      userAgent,
+      headers,
+      bodyPreview
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Audit log failed: ${msg}`, requestId);
+  }
+  log("INFO", fn, "branch", "Step 2: recording threat boost in KV", requestId);
+  let shouldLockdown = false;
+  let hitCount = 0;
+  try {
+    const boostResult = await recordThreatBoost(env.SESSION_META, sourceIp, endpoint.path, requestId);
+    shouldLockdown = boostResult.shouldLockdown;
+    hitCount = boostResult.hitCount;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Threat boost failed: ${msg}`, requestId);
+  }
+  log("INFO", fn, "branch", "Step 3: emitting CRITICAL alert", requestId);
+  const alertMessage = shouldLockdown ? `FULL_LOCKDOWN: Attacker ${sourceIp} hit ${hitCount} honey endpoints. Immediate isolation required.` : `Honey endpoint ${endpoint.path} accessed by ${sourceIp}. Severity: ${endpoint.severity}.`;
+  try {
+    await insertAlert(
+      env.AURIS_LOGS,
+      requestId,
+      alertId,
+      sourceIp,
+      endpoint.path,
+      shouldLockdown ? "FULL_LOCKDOWN" : endpoint.severity,
+      alertMessage
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Alert insert failed: ${msg}`, requestId);
+  }
+  log("INFO", fn, "branch", "Step 4: updating behavioral baseline in KV", requestId);
+  try {
+    const behavioralKey = `behavioral:recon:${sourceIp}`;
+    const existingBehavioral = await env.SESSION_META.get(behavioralKey);
+    const behavioralPayload = existingBehavioral ? (() => {
+      const p = JSON.parse(existingBehavioral);
+      return {
+        count: p.count + 1,
+        firstSeen: p.firstSeen,
+        lastSeen: (/* @__PURE__ */ new Date()).toISOString(),
+        tags: Array.from(/* @__PURE__ */ new Set([...p.tags, "reconnaissance", "honey_hit"]))
+      };
+    })() : {
+      count: 1,
+      firstSeen: (/* @__PURE__ */ new Date()).toISOString(),
+      lastSeen: (/* @__PURE__ */ new Date()).toISOString(),
+      tags: ["reconnaissance", "honey_hit"]
+    };
+    await env.SESSION_META.put(behavioralKey, JSON.stringify(behavioralPayload), {
+      expirationTtl: THREAT_BOOST_TTL_SECONDS
+    });
+    log("INFO", fn, "branch", "Behavioral baseline updated", requestId, {
+      behavioralCount: behavioralPayload.count
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Behavioral update failed: ${msg}`, requestId);
+  }
+  log("INFO", fn, "branch", "Step 5: serving decoy response", requestId);
+  const decoy = getDecoyResponse(endpoint.bait);
+  log("WARN", fn, "exit", `HONEY HIT complete. shouldLockdown=${shouldLockdown}`, requestId);
+  return decoy;
+}
+__name(handleHoneyHit, "handleHoneyHit");
+async function handleStats(request, env) {
+  const fn = "handleStats";
+  const requestId = getRequestId(request);
+  log("INFO", fn, "entry", "GET /honey/stats", requestId);
+  try {
+    const stats = await getHoneyStats(env.AURIS_LOGS);
+    log("INFO", fn, "exit", "Stats returned", requestId);
+    return new Response(JSON.stringify(stats, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Stats error: ${msg}`, requestId);
+    return new Response(JSON.stringify({ error: "Failed to fetch stats", detail: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(handleStats, "handleStats");
+async function handleTriggers(request, env) {
+  const fn = "handleTriggers";
+  const requestId = getRequestId(request);
+  log("INFO", fn, "entry", "GET /honey/triggers", requestId);
+  try {
+    const url = new URL(request.url);
+    const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10), 200);
+    const triggers = await getRecentTriggers(env.AURIS_LOGS, limit);
+    log("INFO", fn, "exit", `Returned ${triggers.length} triggers`, requestId);
+    return new Response(JSON.stringify({ triggers, count: triggers.length }, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Triggers error: ${msg}`, requestId);
+    return new Response(JSON.stringify({ error: "Failed to fetch triggers", detail: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(handleTriggers, "handleTriggers");
+async function handleEnable(request, env) {
+  const fn = "handleEnable";
+  const requestId = getRequestId(request);
+  log("INFO", fn, "entry", "POST /honey/enable", requestId);
+  try {
+    const body = await request.json();
+    const { path, enabled } = body;
+    if (typeof path !== "string" || typeof enabled !== "boolean") {
+      log("WARN", fn, "branch", "Invalid request body", requestId, { path, enabled });
+      return new Response(JSON.stringify({ error: "Missing or invalid 'path' or 'enabled' field" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const known = HONEY_ENDPOINTS.find((e) => e.path === path);
+    if (!known) {
+      log("WARN", fn, "branch", `Unknown honey path: ${path}`, requestId);
+      return new Response(JSON.stringify({ error: "Unknown honey endpoint path" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const configKey = `honey:config:endpoint:${path}`;
+    await env.SESSION_META.put(configKey, JSON.stringify({ enabled, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }));
+    log("INFO", fn, "exit", `Endpoint ${path} set enabled=${enabled}`, requestId);
+    return new Response(
+      JSON.stringify({ success: true, path, enabled, updatedAt: (/* @__PURE__ */ new Date()).toISOString() }, null, 2),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Enable error: ${msg}`, requestId);
+    return new Response(JSON.stringify({ error: "Failed to update endpoint", detail: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(handleEnable, "handleEnable");
+async function getEndpointStatus(env) {
+  const fn = "getEndpointStatus";
+  log("INFO", fn, "entry", "Resolving endpoint enablement status");
+  try {
+    const statuses = {};
+    for (const ep of HONEY_ENDPOINTS) {
+      const configKey = `honey:config:endpoint:${ep.path}`;
+      const raw = await env.SESSION_META.get(configKey);
+      let enabled = true;
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          enabled = parsed.enabled;
+        } catch {
+          log("WARN", fn, "branch", `Invalid KV JSON for ${ep.path}`);
+        }
+      }
+      statuses[ep.path] = { path: ep.path, bait: ep.bait, severity: ep.severity, enabled };
+    }
+    log("INFO", fn, "exit", "Endpoint statuses resolved");
+    return new Response(JSON.stringify({ endpoints: Object.values(statuses) }, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Status error: ${msg}`);
+    return new Response(JSON.stringify({ error: "Failed to resolve statuses", detail: msg }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(getEndpointStatus, "getEndpointStatus");
+async function isEndpointEnabled(kv, path) {
+  const fn = "isEndpointEnabled";
+  log("INFO", fn, "entry", `Checking enablement for ${path}`);
+  try {
+    const configKey = `honey:config:endpoint:${path}`;
+    const raw = await kv.get(configKey);
+    if (!raw) {
+      log("INFO", fn, "exit", `No KV config found; default enabled=true for ${path}`);
+      return true;
+    }
+    const parsed = JSON.parse(raw);
+    log("INFO", fn, "exit", `Enablement for ${path}: ${parsed.enabled}`);
+    return parsed.enabled;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log("ERROR", fn, "branch", `Enablement check error for ${path}: ${msg}`);
+    return true;
+  }
+}
+__name(isEndpointEnabled, "isEndpointEnabled");
+function matchHoneyEndpoint(url, method) {
+  const fn = "matchHoneyEndpoint";
+  log("INFO", fn, "entry", `Matching ${method} ${url.pathname}`);
+  const match = HONEY_ENDPOINTS.find(
+    (ep) => ep.path === url.pathname && ep.method === method
+  );
+  if (match) {
+    log("INFO", fn, "exit", `Matched honey endpoint ${match.path} (bait=${match.bait})`);
+  } else {
+    log("INFO", fn, "exit", `No honey endpoint matched`);
+  }
+  return match;
+}
+__name(matchHoneyEndpoint, "matchHoneyEndpoint");
+var src_default = {
+  async fetch(request, env, _ctx) {
+    const fn = "fetch";
+    const requestId = getRequestId(request);
+    const url = new URL(request.url);
+    log("INFO", fn, "entry", `${request.method} ${url.pathname}`, requestId);
+    if (url.pathname === "/honey/stats" && request.method === "GET") {
+      log("INFO", fn, "branch", "Routing to /honey/stats", requestId);
+      return handleStats(request, env);
+    }
+    if (url.pathname === "/honey/triggers" && request.method === "GET") {
+      log("INFO", fn, "branch", "Routing to /honey/triggers", requestId);
+      return handleTriggers(request, env);
+    }
+    if (url.pathname === "/honey/enable" && request.method === "POST") {
+      log("INFO", fn, "branch", "Routing to /honey/enable", requestId);
+      return handleEnable(request, env);
+    }
+    if (url.pathname === "/honey/status" && request.method === "GET") {
+      log("INFO", fn, "branch", "Routing to /honey/status", requestId);
+      return getEndpointStatus(env);
+    }
+    const honey = matchHoneyEndpoint(url, request.method);
+    if (honey) {
+      log("INFO", fn, "branch", `Honey endpoint candidate: ${honey.path}`, requestId);
+      const enabled = await isEndpointEnabled(env.SESSION_META, honey.path);
+      if (!enabled) {
+        log("INFO", fn, "branch", `Honey endpoint ${honey.path} is disabled \u2014 returning 404`, requestId);
+        return new Response(JSON.stringify({ error: "Not found" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json", "X-Trident-Honey": "disabled" }
+        });
+      }
+      return handleHoneyHit(request, env, honey);
+    }
+    log("INFO", fn, "exit", `No match \u2014 returning 404 for ${url.pathname}`, requestId);
+    return new Response(JSON.stringify({ error: "Not found" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+};
+export {
+  src_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--73d09fa8c80eeed57ada1d5989c7d06c17feb3b93ef46c3e7c00893b71e1--

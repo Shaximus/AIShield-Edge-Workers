@@ -1,0 +1,1780 @@
+--ea3120c10adbd51126b5ef865a9385c7ece6e308a4025b6fb0b8a1f205a2
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var __publicField = (obj, key, value) => {
+  __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+  return value;
+};
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/_internal/utils.mjs
+function createNotImplementedError(name) {
+  return new Error(`[unenv] ${name} is not implemented yet!`);
+}
+__name(createNotImplementedError, "createNotImplementedError");
+function notImplemented(name) {
+  const fn = /* @__PURE__ */ __name(() => {
+    throw createNotImplementedError(name);
+  }, "fn");
+  return Object.assign(fn, { __unenv__: true });
+}
+__name(notImplemented, "notImplemented");
+function notImplementedClass(name) {
+  return class {
+    __unenv__ = true;
+    constructor() {
+      throw new Error(`[unenv] ${name} is not implemented yet!`);
+    }
+  };
+}
+__name(notImplementedClass, "notImplementedClass");
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/perf_hooks/performance.mjs
+var _timeOrigin = globalThis.performance?.timeOrigin ?? Date.now();
+var _performanceNow = globalThis.performance?.now ? globalThis.performance.now.bind(globalThis.performance) : () => Date.now() - _timeOrigin;
+var nodeTiming = {
+  name: "node",
+  entryType: "node",
+  startTime: 0,
+  duration: 0,
+  nodeStart: 0,
+  v8Start: 0,
+  bootstrapComplete: 0,
+  environment: 0,
+  loopStart: 0,
+  loopExit: 0,
+  idleTime: 0,
+  uvMetricsInfo: {
+    loopCount: 0,
+    events: 0,
+    eventsWaiting: 0
+  },
+  detail: void 0,
+  toJSON() {
+    return this;
+  }
+};
+var PerformanceEntry = class {
+  __unenv__ = true;
+  detail;
+  entryType = "event";
+  name;
+  startTime;
+  constructor(name, options) {
+    this.name = name;
+    this.startTime = options?.startTime || _performanceNow();
+    this.detail = options?.detail;
+  }
+  get duration() {
+    return _performanceNow() - this.startTime;
+  }
+  toJSON() {
+    return {
+      name: this.name,
+      entryType: this.entryType,
+      startTime: this.startTime,
+      duration: this.duration,
+      detail: this.detail
+    };
+  }
+};
+__name(PerformanceEntry, "PerformanceEntry");
+var PerformanceMark = /* @__PURE__ */ __name(class PerformanceMark2 extends PerformanceEntry {
+  entryType = "mark";
+  constructor() {
+    super(...arguments);
+  }
+  get duration() {
+    return 0;
+  }
+}, "PerformanceMark");
+var PerformanceMeasure = class extends PerformanceEntry {
+  entryType = "measure";
+};
+__name(PerformanceMeasure, "PerformanceMeasure");
+var PerformanceResourceTiming = class extends PerformanceEntry {
+  entryType = "resource";
+  serverTiming = [];
+  connectEnd = 0;
+  connectStart = 0;
+  decodedBodySize = 0;
+  domainLookupEnd = 0;
+  domainLookupStart = 0;
+  encodedBodySize = 0;
+  fetchStart = 0;
+  initiatorType = "";
+  name = "";
+  nextHopProtocol = "";
+  redirectEnd = 0;
+  redirectStart = 0;
+  requestStart = 0;
+  responseEnd = 0;
+  responseStart = 0;
+  secureConnectionStart = 0;
+  startTime = 0;
+  transferSize = 0;
+  workerStart = 0;
+  responseStatus = 0;
+};
+__name(PerformanceResourceTiming, "PerformanceResourceTiming");
+var PerformanceObserverEntryList = class {
+  __unenv__ = true;
+  getEntries() {
+    return [];
+  }
+  getEntriesByName(_name, _type) {
+    return [];
+  }
+  getEntriesByType(type) {
+    return [];
+  }
+};
+__name(PerformanceObserverEntryList, "PerformanceObserverEntryList");
+var Performance = class {
+  __unenv__ = true;
+  timeOrigin = _timeOrigin;
+  eventCounts = /* @__PURE__ */ new Map();
+  _entries = [];
+  _resourceTimingBufferSize = 0;
+  navigation = void 0;
+  timing = void 0;
+  timerify(_fn, _options) {
+    throw createNotImplementedError("Performance.timerify");
+  }
+  get nodeTiming() {
+    return nodeTiming;
+  }
+  eventLoopUtilization() {
+    return {};
+  }
+  markResourceTiming() {
+    return new PerformanceResourceTiming("");
+  }
+  onresourcetimingbufferfull = null;
+  now() {
+    if (this.timeOrigin === _timeOrigin) {
+      return _performanceNow();
+    }
+    return Date.now() - this.timeOrigin;
+  }
+  clearMarks(markName) {
+    this._entries = markName ? this._entries.filter((e) => e.name !== markName) : this._entries.filter((e) => e.entryType !== "mark");
+  }
+  clearMeasures(measureName) {
+    this._entries = measureName ? this._entries.filter((e) => e.name !== measureName) : this._entries.filter((e) => e.entryType !== "measure");
+  }
+  clearResourceTimings() {
+    this._entries = this._entries.filter((e) => e.entryType !== "resource" || e.entryType !== "navigation");
+  }
+  getEntries() {
+    return this._entries;
+  }
+  getEntriesByName(name, type) {
+    return this._entries.filter((e) => e.name === name && (!type || e.entryType === type));
+  }
+  getEntriesByType(type) {
+    return this._entries.filter((e) => e.entryType === type);
+  }
+  mark(name, options) {
+    const entry = new PerformanceMark(name, options);
+    this._entries.push(entry);
+    return entry;
+  }
+  measure(measureName, startOrMeasureOptions, endMark) {
+    let start;
+    let end;
+    if (typeof startOrMeasureOptions === "string") {
+      start = this.getEntriesByName(startOrMeasureOptions, "mark")[0]?.startTime;
+      end = this.getEntriesByName(endMark, "mark")[0]?.startTime;
+    } else {
+      start = Number.parseFloat(startOrMeasureOptions?.start) || this.now();
+      end = Number.parseFloat(startOrMeasureOptions?.end) || this.now();
+    }
+    const entry = new PerformanceMeasure(measureName, {
+      startTime: start,
+      detail: {
+        start,
+        end
+      }
+    });
+    this._entries.push(entry);
+    return entry;
+  }
+  setResourceTimingBufferSize(maxSize) {
+    this._resourceTimingBufferSize = maxSize;
+  }
+  addEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.addEventListener");
+  }
+  removeEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.removeEventListener");
+  }
+  dispatchEvent(event) {
+    throw createNotImplementedError("Performance.dispatchEvent");
+  }
+  toJSON() {
+    return this;
+  }
+};
+__name(Performance, "Performance");
+var PerformanceObserver = class {
+  __unenv__ = true;
+  _callback = null;
+  constructor(callback) {
+    this._callback = callback;
+  }
+  takeRecords() {
+    return [];
+  }
+  disconnect() {
+    throw createNotImplementedError("PerformanceObserver.disconnect");
+  }
+  observe(options) {
+    throw createNotImplementedError("PerformanceObserver.observe");
+  }
+  bind(fn) {
+    return fn;
+  }
+  runInAsyncScope(fn, thisArg, ...args) {
+    return fn.call(thisArg, ...args);
+  }
+  asyncId() {
+    return 0;
+  }
+  triggerAsyncId() {
+    return 0;
+  }
+  emitDestroy() {
+    return this;
+  }
+};
+__name(PerformanceObserver, "PerformanceObserver");
+__publicField(PerformanceObserver, "supportedEntryTypes", []);
+var performance = globalThis.performance && "addEventListener" in globalThis.performance ? globalThis.performance : new Performance();
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/@cloudflare/unenv-preset/dist/runtime/polyfill/performance.mjs
+globalThis.performance = performance;
+globalThis.Performance = Performance;
+globalThis.PerformanceEntry = PerformanceEntry;
+globalThis.PerformanceMark = PerformanceMark;
+globalThis.PerformanceMeasure = PerformanceMeasure;
+globalThis.PerformanceObserver = PerformanceObserver;
+globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/console.mjs
+import { Writable } from "node:stream";
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/mock/noop.mjs
+var noop_default = Object.assign(() => {
+}, { __unenv__: true });
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/console.mjs
+var _console = globalThis.console;
+var _ignoreErrors = true;
+var _stderr = new Writable();
+var _stdout = new Writable();
+var log = _console?.log ?? noop_default;
+var info = _console?.info ?? log;
+var trace = _console?.trace ?? info;
+var debug = _console?.debug ?? log;
+var table = _console?.table ?? log;
+var error = _console?.error ?? log;
+var warn = _console?.warn ?? error;
+var createTask = _console?.createTask ?? /* @__PURE__ */ notImplemented("console.createTask");
+var clear = _console?.clear ?? noop_default;
+var count = _console?.count ?? noop_default;
+var countReset = _console?.countReset ?? noop_default;
+var dir = _console?.dir ?? noop_default;
+var dirxml = _console?.dirxml ?? noop_default;
+var group = _console?.group ?? noop_default;
+var groupEnd = _console?.groupEnd ?? noop_default;
+var groupCollapsed = _console?.groupCollapsed ?? noop_default;
+var profile = _console?.profile ?? noop_default;
+var profileEnd = _console?.profileEnd ?? noop_default;
+var time = _console?.time ?? noop_default;
+var timeEnd = _console?.timeEnd ?? noop_default;
+var timeLog = _console?.timeLog ?? noop_default;
+var timeStamp = _console?.timeStamp ?? noop_default;
+var Console = _console?.Console ?? /* @__PURE__ */ notImplementedClass("console.Console");
+var _times = /* @__PURE__ */ new Map();
+var _stdoutErrorHandler = noop_default;
+var _stderrErrorHandler = noop_default;
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/@cloudflare/unenv-preset/dist/runtime/node/console.mjs
+var workerdConsole = globalThis["console"];
+var {
+  assert,
+  clear: clear2,
+  // @ts-expect-error undocumented public API
+  context,
+  count: count2,
+  countReset: countReset2,
+  // @ts-expect-error undocumented public API
+  createTask: createTask2,
+  debug: debug2,
+  dir: dir2,
+  dirxml: dirxml2,
+  error: error2,
+  group: group2,
+  groupCollapsed: groupCollapsed2,
+  groupEnd: groupEnd2,
+  info: info2,
+  log: log2,
+  profile: profile2,
+  profileEnd: profileEnd2,
+  table: table2,
+  time: time2,
+  timeEnd: timeEnd2,
+  timeLog: timeLog2,
+  timeStamp: timeStamp2,
+  trace: trace2,
+  warn: warn2
+} = workerdConsole;
+Object.assign(workerdConsole, {
+  Console,
+  _ignoreErrors,
+  _stderr,
+  _stderrErrorHandler,
+  _stdout,
+  _stdoutErrorHandler,
+  _times
+});
+var console_default = workerdConsole;
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-console
+globalThis.console = console_default;
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/process/hrtime.mjs
+var hrtime = /* @__PURE__ */ Object.assign(/* @__PURE__ */ __name(function hrtime2(startTime) {
+  const now = Date.now();
+  const seconds = Math.trunc(now / 1e3);
+  const nanos = now % 1e3 * 1e6;
+  if (startTime) {
+    let diffSeconds = seconds - startTime[0];
+    let diffNanos = nanos - startTime[0];
+    if (diffNanos < 0) {
+      diffSeconds = diffSeconds - 1;
+      diffNanos = 1e9 + diffNanos;
+    }
+    return [diffSeconds, diffNanos];
+  }
+  return [seconds, nanos];
+}, "hrtime"), { bigint: /* @__PURE__ */ __name(function bigint() {
+  return BigInt(Date.now() * 1e6);
+}, "bigint") });
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+import { EventEmitter } from "node:events";
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/tty/read-stream.mjs
+import { Socket } from "node:net";
+var ReadStream = class extends Socket {
+  fd;
+  constructor(fd) {
+    super();
+    this.fd = fd;
+  }
+  isRaw = false;
+  setRawMode(mode) {
+    this.isRaw = mode;
+    return this;
+  }
+  isTTY = false;
+};
+__name(ReadStream, "ReadStream");
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/tty/write-stream.mjs
+import { Socket as Socket2 } from "node:net";
+var WriteStream = class extends Socket2 {
+  fd;
+  constructor(fd) {
+    super();
+    this.fd = fd;
+  }
+  clearLine(dir3, callback) {
+    callback && callback();
+    return false;
+  }
+  clearScreenDown(callback) {
+    callback && callback();
+    return false;
+  }
+  cursorTo(x, y, callback) {
+    callback && typeof callback === "function" && callback();
+    return false;
+  }
+  moveCursor(dx, dy, callback) {
+    callback && callback();
+    return false;
+  }
+  getColorDepth(env2) {
+    return 1;
+  }
+  hasColors(count3, env2) {
+    return false;
+  }
+  getWindowSize() {
+    return [this.columns, this.rows];
+  }
+  columns = 80;
+  rows = 24;
+  isTTY = false;
+};
+__name(WriteStream, "WriteStream");
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+var Process = class extends EventEmitter {
+  env;
+  hrtime;
+  nextTick;
+  constructor(impl) {
+    super();
+    this.env = impl.env;
+    this.hrtime = impl.hrtime;
+    this.nextTick = impl.nextTick;
+    for (const prop of [...Object.getOwnPropertyNames(Process.prototype), ...Object.getOwnPropertyNames(EventEmitter.prototype)]) {
+      const value = this[prop];
+      if (typeof value === "function") {
+        this[prop] = value.bind(this);
+      }
+    }
+  }
+  emitWarning(warning, type, code) {
+    console.warn(`${code ? `[${code}] ` : ""}${type ? `${type}: ` : ""}${warning}`);
+  }
+  emit(...args) {
+    return super.emit(...args);
+  }
+  listeners(eventName) {
+    return super.listeners(eventName);
+  }
+  #stdin;
+  #stdout;
+  #stderr;
+  get stdin() {
+    return this.#stdin ??= new ReadStream(0);
+  }
+  get stdout() {
+    return this.#stdout ??= new WriteStream(1);
+  }
+  get stderr() {
+    return this.#stderr ??= new WriteStream(2);
+  }
+  #cwd = "/";
+  chdir(cwd2) {
+    this.#cwd = cwd2;
+  }
+  cwd() {
+    return this.#cwd;
+  }
+  arch = "";
+  platform = "";
+  argv = [];
+  argv0 = "";
+  execArgv = [];
+  execPath = "";
+  title = "";
+  pid = 200;
+  ppid = 100;
+  get version() {
+    return "";
+  }
+  get versions() {
+    return {};
+  }
+  get allowedNodeEnvironmentFlags() {
+    return /* @__PURE__ */ new Set();
+  }
+  get sourceMapsEnabled() {
+    return false;
+  }
+  get debugPort() {
+    return 0;
+  }
+  get throwDeprecation() {
+    return false;
+  }
+  get traceDeprecation() {
+    return false;
+  }
+  get features() {
+    return {};
+  }
+  get release() {
+    return {};
+  }
+  get connected() {
+    return false;
+  }
+  get config() {
+    return {};
+  }
+  get moduleLoadList() {
+    return [];
+  }
+  constrainedMemory() {
+    return 0;
+  }
+  availableMemory() {
+    return 0;
+  }
+  uptime() {
+    return 0;
+  }
+  resourceUsage() {
+    return {};
+  }
+  ref() {
+  }
+  unref() {
+  }
+  umask() {
+    throw createNotImplementedError("process.umask");
+  }
+  getBuiltinModule() {
+    return void 0;
+  }
+  getActiveResourcesInfo() {
+    throw createNotImplementedError("process.getActiveResourcesInfo");
+  }
+  exit() {
+    throw createNotImplementedError("process.exit");
+  }
+  reallyExit() {
+    throw createNotImplementedError("process.reallyExit");
+  }
+  kill() {
+    throw createNotImplementedError("process.kill");
+  }
+  abort() {
+    throw createNotImplementedError("process.abort");
+  }
+  dlopen() {
+    throw createNotImplementedError("process.dlopen");
+  }
+  setSourceMapsEnabled() {
+    throw createNotImplementedError("process.setSourceMapsEnabled");
+  }
+  loadEnvFile() {
+    throw createNotImplementedError("process.loadEnvFile");
+  }
+  disconnect() {
+    throw createNotImplementedError("process.disconnect");
+  }
+  cpuUsage() {
+    throw createNotImplementedError("process.cpuUsage");
+  }
+  setUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.setUncaughtExceptionCaptureCallback");
+  }
+  hasUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.hasUncaughtExceptionCaptureCallback");
+  }
+  initgroups() {
+    throw createNotImplementedError("process.initgroups");
+  }
+  openStdin() {
+    throw createNotImplementedError("process.openStdin");
+  }
+  assert() {
+    throw createNotImplementedError("process.assert");
+  }
+  binding() {
+    throw createNotImplementedError("process.binding");
+  }
+  permission = { has: /* @__PURE__ */ notImplemented("process.permission.has") };
+  report = {
+    directory: "",
+    filename: "",
+    signal: "SIGUSR2",
+    compact: false,
+    reportOnFatalError: false,
+    reportOnSignal: false,
+    reportOnUncaughtException: false,
+    getReport: /* @__PURE__ */ notImplemented("process.report.getReport"),
+    writeReport: /* @__PURE__ */ notImplemented("process.report.writeReport")
+  };
+  finalization = {
+    register: /* @__PURE__ */ notImplemented("process.finalization.register"),
+    unregister: /* @__PURE__ */ notImplemented("process.finalization.unregister"),
+    registerBeforeExit: /* @__PURE__ */ notImplemented("process.finalization.registerBeforeExit")
+  };
+  memoryUsage = Object.assign(() => ({
+    arrayBuffers: 0,
+    rss: 0,
+    external: 0,
+    heapTotal: 0,
+    heapUsed: 0
+  }), { rss: () => 0 });
+  mainModule = void 0;
+  domain = void 0;
+  send = void 0;
+  exitCode = void 0;
+  channel = void 0;
+  getegid = void 0;
+  geteuid = void 0;
+  getgid = void 0;
+  getgroups = void 0;
+  getuid = void 0;
+  setegid = void 0;
+  seteuid = void 0;
+  setgid = void 0;
+  setgroups = void 0;
+  setuid = void 0;
+  _events = void 0;
+  _eventsCount = void 0;
+  _exiting = void 0;
+  _maxListeners = void 0;
+  _debugEnd = void 0;
+  _debugProcess = void 0;
+  _fatalException = void 0;
+  _getActiveHandles = void 0;
+  _getActiveRequests = void 0;
+  _kill = void 0;
+  _preload_modules = void 0;
+  _rawDebug = void 0;
+  _startProfilerIdleNotifier = void 0;
+  _stopProfilerIdleNotifier = void 0;
+  _tickCallback = void 0;
+  _disconnect = void 0;
+  _handleQueue = void 0;
+  _pendingMessage = void 0;
+  _channel = void 0;
+  _send = void 0;
+  _linkedBinding = void 0;
+};
+__name(Process, "Process");
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/@cloudflare/unenv-preset/dist/runtime/node/process.mjs
+var globalProcess = globalThis["process"];
+var getBuiltinModule = globalProcess.getBuiltinModule;
+var { exit, platform, nextTick } = getBuiltinModule(
+  "node:process"
+);
+var unenvProcess = new Process({
+  env: globalProcess.env,
+  hrtime,
+  nextTick
+});
+var {
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  hasUncaughtExceptionCaptureCallback,
+  setUncaughtExceptionCaptureCallback,
+  loadEnvFile,
+  sourceMapsEnabled,
+  arch,
+  argv,
+  argv0,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  availableMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  dlopen,
+  disconnect,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  finalization,
+  features,
+  getActiveResourcesInfo,
+  getMaxListeners,
+  hrtime: hrtime3,
+  kill,
+  listeners,
+  listenerCount,
+  memoryUsage,
+  on,
+  off,
+  once,
+  pid,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  title,
+  throwDeprecation,
+  traceDeprecation,
+  umask,
+  uptime,
+  version,
+  versions,
+  domain,
+  initgroups,
+  moduleLoadList,
+  reallyExit,
+  openStdin,
+  assert: assert2,
+  binding,
+  send,
+  exitCode,
+  channel,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getuid,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setuid,
+  permission,
+  mainModule,
+  _events,
+  _eventsCount,
+  _exiting,
+  _maxListeners,
+  _debugEnd,
+  _debugProcess,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _kill,
+  _preload_modules,
+  _rawDebug,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  _disconnect,
+  _handleQueue,
+  _pendingMessage,
+  _channel,
+  _send,
+  _linkedBinding
+} = unenvProcess;
+var _process = {
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  hasUncaughtExceptionCaptureCallback,
+  setUncaughtExceptionCaptureCallback,
+  loadEnvFile,
+  sourceMapsEnabled,
+  arch,
+  argv,
+  argv0,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  availableMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  dlopen,
+  disconnect,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  exit,
+  finalization,
+  features,
+  getBuiltinModule,
+  getActiveResourcesInfo,
+  getMaxListeners,
+  hrtime: hrtime3,
+  kill,
+  listeners,
+  listenerCount,
+  memoryUsage,
+  nextTick,
+  on,
+  off,
+  once,
+  pid,
+  platform,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  title,
+  throwDeprecation,
+  traceDeprecation,
+  umask,
+  uptime,
+  version,
+  versions,
+  // @ts-expect-error old API
+  domain,
+  initgroups,
+  moduleLoadList,
+  reallyExit,
+  openStdin,
+  assert: assert2,
+  binding,
+  send,
+  exitCode,
+  channel,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getuid,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setuid,
+  permission,
+  mainModule,
+  _events,
+  _eventsCount,
+  _exiting,
+  _maxListeners,
+  _debugEnd,
+  _debugProcess,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _kill,
+  _preload_modules,
+  _rawDebug,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  _disconnect,
+  _handleQueue,
+  _pendingMessage,
+  _channel,
+  _send,
+  _linkedBinding
+};
+var process_default = _process;
+
+// ../../../../../../home/kimi/.npm-cache/_npx/0eedb5afd4158ff3/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-process
+globalThis.process = process_default;
+
+// src/ratelimit.ts
+var BASE_DELAY_MS = 1e3;
+var MAX_DELAY_MS = 6e4;
+var MAX_OFFENSE_FOR_EXPONENT = 6;
+function logEntry(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-ratelimit",
+    func,
+    ...extra
+  }));
+}
+__name(logEntry, "logEntry");
+function logExit2(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-ratelimit",
+    func,
+    event: "exit",
+    ...extra
+  }));
+}
+__name(logExit2, "logExit");
+function calculateDelay(offenseCount) {
+  logEntry("calculateDelay", { offenseCount });
+  if (offenseCount <= 0) {
+    logExit2("calculateDelay", { offenseCount, delayMs: 0, branch: "no-offense" });
+    return 0;
+  }
+  const exponent = Math.min(offenseCount, MAX_OFFENSE_FOR_EXPONENT);
+  const multiplier = Math.pow(2, exponent - 1);
+  const delay = Math.min(BASE_DELAY_MS * multiplier, MAX_DELAY_MS);
+  logExit2("calculateDelay", { offenseCount, exponent, multiplier, delayMs: delay });
+  return delay;
+}
+__name(calculateDelay, "calculateDelay");
+function shouldChallenge(offenseCount) {
+  logEntry("shouldChallenge", { offenseCount });
+  let difficulty = 0;
+  if (offenseCount >= 4 && offenseCount <= 6) {
+    difficulty = 2;
+  } else if (offenseCount >= 7 && offenseCount <= 10) {
+    difficulty = 4;
+  } else if (offenseCount >= 11) {
+    difficulty = 6;
+  }
+  logExit2("shouldChallenge", { offenseCount, difficulty, branch: difficulty === 0 ? "no-challenge" : "challenge-issued" });
+  return difficulty;
+}
+__name(shouldChallenge, "shouldChallenge");
+function classifyTier(offenseCount) {
+  logEntry("classifyTier", { offenseCount });
+  let tier;
+  if (offenseCount <= 0)
+    tier = "none";
+  else if (offenseCount <= 2)
+    tier = "suspicious";
+  else if (offenseCount <= 5)
+    tier = "nuisance";
+  else if (offenseCount <= 10)
+    tier = "aggressive";
+  else
+    tier = "persistent";
+  logExit2("classifyTier", { offenseCount, tier });
+  return tier;
+}
+__name(classifyTier, "classifyTier");
+function connectionBurnDuration(offenseCount) {
+  logEntry("connectionBurnDuration", { offenseCount });
+  if (offenseCount <= 0) {
+    logExit2("connectionBurnDuration", { offenseCount, seconds: 0, branch: "no-offense" });
+    return 0;
+  }
+  const min = Math.min(5 + offenseCount * 2, 15);
+  const max = Math.min(min + 15, 30);
+  const seconds = min + Math.random() * (max - min);
+  const rounded = Math.round(seconds);
+  logExit2("connectionBurnDuration", { offenseCount, min, max, seconds: rounded });
+  return rounded;
+}
+__name(connectionBurnDuration, "connectionBurnDuration");
+
+// src/cost.ts
+var LEDGER_PREFIX = "tarpit:ledger:";
+var COST_WEIGHT_TIME = 1;
+var COST_WEIGHT_CPU = 2;
+var COST_WEIGHT_FAKE = 5e3;
+var COST_WEIGHT_CONN = 3e3;
+function logEntry2(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-cost",
+    func,
+    ...extra
+  }));
+}
+__name(logEntry2, "logEntry");
+function logExit3(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-cost",
+    func,
+    event: "exit",
+    ...extra
+  }));
+}
+__name(logExit3, "logExit");
+async function getLedger(kv, ip) {
+  logEntry2("getLedger", { ip });
+  const key = `${LEDGER_PREFIX}${ip}`;
+  try {
+    const raw = await kv.get(key, "json");
+    if (raw) {
+      logExit3("getLedger", { ip, found: true });
+      return raw;
+    }
+    logExit3("getLedger", { ip, found: false });
+    return null;
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    console.log(JSON.stringify({
+      ts: Date.now(),
+      level: "error",
+      module: "tarpit-cost",
+      func: "getLedger",
+      ip,
+      error: error3
+    }));
+    throw err;
+  }
+}
+__name(getLedger, "getLedger");
+async function initLedger(kv, ip) {
+  logEntry2("initLedger", { ip });
+  const now = Date.now();
+  const ledger = {
+    ip,
+    timeWastedMs: 0,
+    cpuBurnedMs: 0,
+    fakeSuccesses: 0,
+    connectionsBurned: 0,
+    totalCostScore: 0,
+    firstSeen: now,
+    lastSeen: now,
+    offenseCount: 0,
+    challengeCount: 0
+  };
+  try {
+    await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+    logExit3("initLedger", { ip });
+    return ledger;
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    console.log(JSON.stringify({
+      ts: Date.now(),
+      level: "error",
+      module: "tarpit-cost",
+      func: "initLedger",
+      ip,
+      error: error3
+    }));
+    throw err;
+  }
+}
+__name(initLedger, "initLedger");
+async function ensureLedger(kv, ip) {
+  logEntry2("ensureLedger", { ip });
+  const existing = await getLedger(kv, ip);
+  if (existing) {
+    logExit3("ensureLedger", { ip, branch: "existing" });
+    return existing;
+  }
+  const fresh = await initLedger(kv, ip);
+  logExit3("ensureLedger", { ip, branch: "created" });
+  return fresh;
+}
+__name(ensureLedger, "ensureLedger");
+function recalcTotalScore(ledger) {
+  return ledger.timeWastedMs * COST_WEIGHT_TIME + ledger.cpuBurnedMs * COST_WEIGHT_CPU + ledger.fakeSuccesses * COST_WEIGHT_FAKE + ledger.connectionsBurned * COST_WEIGHT_CONN;
+}
+__name(recalcTotalScore, "recalcTotalScore");
+async function recordTimeWasted(kv, ip, ms) {
+  logEntry2("recordTimeWasted", { ip, ms });
+  const ledger = await ensureLedger(kv, ip);
+  ledger.timeWastedMs += ms;
+  ledger.lastSeen = Date.now();
+  ledger.totalCostScore = recalcTotalScore(ledger);
+  await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+  logExit3("recordTimeWasted", { ip, ms, newTotal: ledger.timeWastedMs });
+  return ledger;
+}
+__name(recordTimeWasted, "recordTimeWasted");
+async function recordFakeSuccess(kv, ip) {
+  logEntry2("recordFakeSuccess", { ip });
+  const ledger = await ensureLedger(kv, ip);
+  ledger.fakeSuccesses += 1;
+  ledger.lastSeen = Date.now();
+  ledger.totalCostScore = recalcTotalScore(ledger);
+  await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+  logExit3("recordFakeSuccess", { ip, newTotal: ledger.fakeSuccesses });
+  return ledger;
+}
+__name(recordFakeSuccess, "recordFakeSuccess");
+async function recordConnectionBurned(kv, ip) {
+  logEntry2("recordConnectionBurned", { ip });
+  const ledger = await ensureLedger(kv, ip);
+  ledger.connectionsBurned += 1;
+  ledger.lastSeen = Date.now();
+  ledger.totalCostScore = recalcTotalScore(ledger);
+  await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+  logExit3("recordConnectionBurned", { ip, newTotal: ledger.connectionsBurned });
+  return ledger;
+}
+__name(recordConnectionBurned, "recordConnectionBurned");
+async function incrementOffense(kv, ip) {
+  logEntry2("incrementOffense", { ip });
+  const ledger = await ensureLedger(kv, ip);
+  ledger.offenseCount += 1;
+  ledger.lastSeen = Date.now();
+  await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+  logExit3("incrementOffense", { ip, offenseCount: ledger.offenseCount });
+  return ledger.offenseCount;
+}
+__name(incrementOffense, "incrementOffense");
+async function recordChallengeIssued(kv, ip, attackerSolveTimeMs) {
+  logEntry2("recordChallengeIssued", { ip, attackerSolveTimeMs });
+  const ledger = await ensureLedger(kv, ip);
+  ledger.challengeCount += 1;
+  ledger.cpuBurnedMs += attackerSolveTimeMs;
+  ledger.lastSeen = Date.now();
+  ledger.totalCostScore = recalcTotalScore(ledger);
+  await kv.put(`${LEDGER_PREFIX}${ip}`, JSON.stringify(ledger));
+  logExit3("recordChallengeIssued", {
+    ip,
+    challengeCount: ledger.challengeCount,
+    cpuBurnedMs: ledger.cpuBurnedMs
+  });
+  return ledger;
+}
+__name(recordChallengeIssued, "recordChallengeIssued");
+async function getAllLedgers(kv) {
+  logEntry2("getAllLedgers");
+  const list = await kv.list({ prefix: LEDGER_PREFIX });
+  const ledgers = [];
+  for (const key of list.keys) {
+    const raw = await kv.get(key.name, "json");
+    if (raw)
+      ledgers.push(raw);
+  }
+  logExit3("getAllLedgers", { count: ledgers.length });
+  return ledgers;
+}
+__name(getAllLedgers, "getAllLedgers");
+function summarizeGlobalCosts(ledgers) {
+  logEntry2("summarizeGlobalCosts");
+  const totals = ledgers.reduce(
+    (acc, l) => ({
+      timeWastedMs: acc.timeWastedMs + l.timeWastedMs,
+      cpuBurnedMs: acc.cpuBurnedMs + l.cpuBurnedMs,
+      fakeSuccesses: acc.fakeSuccesses + l.fakeSuccesses,
+      connectionsBurned: acc.connectionsBurned + l.connectionsBurned,
+      totalCostScore: acc.totalCostScore + l.totalCostScore,
+      uniqueAttackers: acc.uniqueAttackers + 1,
+      totalChallenges: acc.totalChallenges + l.challengeCount
+    }),
+    {
+      timeWastedMs: 0,
+      cpuBurnedMs: 0,
+      fakeSuccesses: 0,
+      connectionsBurned: 0,
+      totalCostScore: 0,
+      uniqueAttackers: 0,
+      totalChallenges: 0
+    }
+  );
+  logExit3("summarizeGlobalCosts", totals);
+  return totals;
+}
+__name(summarizeGlobalCosts, "summarizeGlobalCosts");
+
+// src/delay.ts
+var FAKE_USER_ID_PREFIX = "usr_";
+var FAKE_MODEL_HASH_PREFIX = "mdl_sha256_";
+var FAKE_KV_KEY_PREFIX = "kv::";
+function logEntry3(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-delay",
+    func,
+    ...extra
+  }));
+}
+__name(logEntry3, "logEntry");
+function logExit4(func, extra) {
+  console.log(JSON.stringify({
+    ts: Date.now(),
+    level: "debug",
+    module: "tarpit-delay",
+    func,
+    event: "exit",
+    ...extra
+  }));
+}
+__name(logExit4, "logExit");
+function sleep(ms) {
+  logEntry3("sleep", { ms });
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      logExit4("sleep", { ms });
+      resolve();
+    }, ms);
+  });
+}
+__name(sleep, "sleep");
+async function applyDelay(kv, ip, delayMs) {
+  logEntry3("applyDelay", { ip, delayMs });
+  if (delayMs <= 0) {
+    logExit4("applyDelay", { ip, delayMs, branch: "zero-delay" });
+    return;
+  }
+  const start = Date.now();
+  await sleep(delayMs);
+  const actual = Date.now() - start;
+  await recordTimeWasted(kv, ip, actual);
+  logExit4("applyDelay", { ip, requestedMs: delayMs, actualMs: actual });
+}
+__name(applyDelay, "applyDelay");
+function fakeUserId() {
+  const suffix = Array.from(
+    { length: 16 },
+    () => Math.floor(Math.random() * 16).toString(16)
+  ).join("");
+  return `${FAKE_USER_ID_PREFIX}${suffix}`;
+}
+__name(fakeUserId, "fakeUserId");
+function fakeModelHash() {
+  const hash = Array.from(
+    { length: 64 },
+    () => Math.floor(Math.random() * 16).toString(16)
+  ).join("");
+  return `${FAKE_MODEL_HASH_PREFIX}${hash}`;
+}
+__name(fakeModelHash, "fakeModelHash");
+function fakeKvKey() {
+  const segments = Array.from(
+    { length: 3 },
+    () => Math.random().toString(36).substring(2, 6)
+  ).join("/");
+  return `${FAKE_KV_KEY_PREFIX}${segments}`;
+}
+__name(fakeKvKey, "fakeKvKey");
+function buildFakePayload(path, requestId) {
+  logEntry3("buildFakePayload", { path, requestId });
+  let data;
+  if (path.includes("/user") || path.includes("/users")) {
+    data = {
+      id: fakeUserId(),
+      username: `attacker_bait_${Math.floor(Math.random() * 1e4)}`,
+      email: `bait_${Math.random().toString(36).substring(2)}@reflexion.io`,
+      role: "analyst",
+      permissions: ["read:models", "read:kv", "write:logs"],
+      createdAt: new Date(Date.now() - Math.random() * 1e10).toISOString(),
+      lastLogin: (/* @__PURE__ */ new Date()).toISOString(),
+      apiKeyPrefix: "rk_live_",
+      mfaEnabled: true
+    };
+  } else if (path.includes("/model") || path.includes("/models")) {
+    data = {
+      id: fakeModelHash(),
+      name: `reflexion-v${Math.floor(Math.random() * 10)}.${Math.floor(Math.random() * 20)}`,
+      architecture: "transformer",
+      parameters: Math.floor(Math.random() * 1e12),
+      quantization: "Q4_K_M",
+      downloadUrl: `https://cdn.reflexion.io/models/${fakeModelHash()}.gguf`,
+      checksum: fakeModelHash(),
+      sizeBytes: Math.floor(Math.random() * 1e11),
+      uploadedAt: new Date(Date.now() - Math.random() * 1e9).toISOString()
+    };
+  } else if (path.includes("/kv") || path.includes("/key") || path.includes("/storage")) {
+    data = {
+      key: fakeKvKey(),
+      value: btoa(`DECOY_${Math.random().toString(36).substring(2, 20)}`),
+      ttl: Math.floor(Math.random() * 86400),
+      namespace: "production",
+      version: Math.floor(Math.random() * 100),
+      consistency: "strong",
+      replicationRegions: ["us-east", "eu-west", "ap-south"]
+    };
+  } else {
+    data = {
+      id: fakeUserId(),
+      type: "resource",
+      access: "granted",
+      token: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(String(Math.random()))}.${btoa(String(Math.random()))}`,
+      expiresIn: Math.floor(Math.random() * 3600),
+      scopes: ["read", "write", "admin"],
+      issuedBy: "trident-auth"
+    };
+  }
+  const payload = {
+    status: "success",
+    data,
+    meta: {
+      requestId,
+      timestamp: Date.now(),
+      processedBy: `tarpit-worker-${Math.floor(Math.random() * 100)}`
+    }
+  };
+  logExit4("buildFakePayload", { path, requestId, dataType: typeof data });
+  return payload;
+}
+__name(buildFakePayload, "buildFakePayload");
+async function serveFakeSuccess(kv, ip, path, requestId) {
+  logEntry3("serveFakeSuccess", { ip, path, requestId });
+  const payload = buildFakePayload(path, requestId);
+  const body = JSON.stringify(payload);
+  await recordFakeSuccess(kv, ip);
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    "X-Request-Id": requestId,
+    "X-RateLimit-Remaining": "4999",
+    "X-RateLimit-Reset": String(Math.floor(Date.now() / 1e3) + 60),
+    "Cache-Control": "no-store"
+  });
+  logExit4("serveFakeSuccess", { ip, path, requestId, bodyLength: body.length });
+  return new Response(body, { status: 200, headers });
+}
+__name(serveFakeSuccess, "serveFakeSuccess");
+async function burnConnection(kv, ip) {
+  logEntry3("burnConnection", { ip });
+  await recordConnectionBurned(kv, ip);
+  logExit4("burnConnection", { ip });
+}
+__name(burnConnection, "burnConnection");
+
+// src/index.ts
+var CURTIS_IPS = /* @__PURE__ */ new Set([
+  "127.0.0.1",
+  "::1",
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16"
+]);
+function isCurtisIp(ip) {
+  logEntry4("isCurtisIp", { ip });
+  if (CURTIS_IPS.has(ip)) {
+    logExit("isCurtisIp", { ip, result: true, branch: "exact-match" });
+    return true;
+  }
+  if (ip.startsWith("10.")) {
+    logExit("isCurtisIp", { ip, result: true, branch: "10.x" });
+    return true;
+  }
+  if (ip.startsWith("172.")) {
+    const second = parseInt(ip.split(".")[1], 10);
+    if (second >= 16 && second <= 31) {
+      logExit("isCurtisIp", { ip, result: true, branch: "172.16-31" });
+      return true;
+    }
+  }
+  if (ip.startsWith("192.168.")) {
+    logExit("isCurtisIp", { ip, result: true, branch: "192.168.x" });
+    return true;
+  }
+  if (ip === "::1" || ip === "fc00::/7" || ip.startsWith("fe80:")) {
+    logExit("isCurtisIp", { ip, result: true, branch: "ipv6-loopback-linklocal" });
+    return true;
+  }
+  logExit("isCurtisIp", { ip, result: false });
+  return false;
+}
+__name(isCurtisIp, "isCurtisIp");
+function isSwarmContainer(ip) {
+  logEntry4("isSwarmContainer", { ip });
+  if (ip.startsWith("10.")) {
+    logExit("isSwarmContainer", { ip, result: true });
+    return true;
+  }
+  if (ip.startsWith("172.")) {
+    const second = parseInt(ip.split(".")[1], 10);
+    if (second >= 16 && second <= 31) {
+      logExit("isSwarmContainer", { ip, result: true });
+      return true;
+    }
+  }
+  logExit("isSwarmContainer", { ip, result: false });
+  return false;
+}
+__name(isSwarmContainer, "isSwarmContainer");
+function logEntry4(func, extra) {
+  console.log(JSON.stringify({ ts: Date.now(), level: "debug", module: "tarpit-index", func, ...extra }));
+}
+__name(logEntry4, "logEntry");
+function logAudit(func, severity, extra) {
+  console.log(JSON.stringify({ ts: Date.now(), level: severity, module: "tarpit-audit", func, ...extra }));
+}
+__name(logAudit, "logAudit");
+async function writeAuditLog(db, ip, action, details) {
+  logEntry4("writeAuditLog", { ip, action });
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO audit_logs (timestamp, ip, action, details) VALUES (?, ?, ?, ?)`
+    ).bind(
+      Date.now(),
+      ip,
+      action,
+      JSON.stringify(details)
+    );
+    await stmt.run();
+    logExit("writeAuditLog", { ip, action, result: "success" });
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("writeAuditLog", "error", { ip, action, error: error3, details });
+    throw err;
+  }
+}
+__name(writeAuditLog, "writeAuditLog");
+var INTEL_PREFIX = "intel:blocklist:ip:";
+var HONEY_PREFIX = "honey:trigger:";
+var MANUAL_ACTIVATE_PREFIX = "tarpit:manual:";
+async function isFlaggedByTrident(kv, ip) {
+  logEntry4("isFlaggedByTrident", { ip });
+  try {
+    const blocklist = await kv.get(`${INTEL_PREFIX}${ip}`);
+    const honey = await kv.get(`${HONEY_PREFIX}${ip}`);
+    const manual = await kv.get(`${MANUAL_ACTIVATE_PREFIX}${ip}`);
+    const flagged = blocklist !== null || honey !== null || manual !== null;
+    logExit("isFlaggedByTrident", { ip, flagged, blocklist: blocklist !== null, honey: honey !== null, manual: manual !== null });
+    return flagged;
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("isFlaggedByTrident", "error", { ip, error: error3 });
+    throw err;
+  }
+}
+__name(isFlaggedByTrident, "isFlaggedByTrident");
+var CHALLENGE_TTL_SECONDS = 300;
+async function asyncSha256(input) {
+  const encoder = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", encoder.encode(input));
+  const arr = Array.from(new Uint8Array(buf));
+  return arr.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(asyncSha256, "asyncSha256");
+async function generateChallenge(difficulty) {
+  logEntry4("generateChallenge", { difficulty });
+  const puzzleBase = `trident_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+  let nonce = 0;
+  let hash = "";
+  const targetPrefix = "0".repeat(Math.ceil(difficulty / 4));
+  const start = Date.now();
+  while (true) {
+    hash = await asyncSha256(`${puzzleBase}:${nonce}`);
+    let zeroBits = 0;
+    for (const char of hash) {
+      const nibble = parseInt(char, 16);
+      for (let b = 3; b >= 0; b--) {
+        if (nibble >> b & 1) {
+          break;
+        }
+        zeroBits++;
+      }
+      if (nibble >> 0 & 1)
+        break;
+    }
+    const leadingZeros = hash.match(/^(0+)/)?.[0].length ?? 0;
+    if (leadingZeros >= Math.ceil(difficulty / 4)) {
+      break;
+    }
+    nonce++;
+    if (nonce > 1e7) {
+      throw new Error("Challenge generation exceeded safety limit");
+    }
+  }
+  const serverComputeMs = Date.now() - start;
+  const challenge = {
+    puzzle: puzzleBase,
+    difficulty,
+    expectedNonce: nonce,
+    expiresAt: Math.floor(Date.now() / 1e3) + CHALLENGE_TTL_SECONDS
+  };
+  logExit("generateChallenge", { difficulty, serverComputeMs, nonce });
+  return challenge;
+}
+__name(generateChallenge, "generateChallenge");
+async function verifyChallenge(challenge, submittedNonce) {
+  logEntry4("verifyChallenge", { difficulty: challenge.difficulty, submittedNonce });
+  const now = Math.floor(Date.now() / 1e3);
+  if (now > challenge.expiresAt) {
+    logExit("verifyChallenge", { result: false, branch: "expired" });
+    return false;
+  }
+  const hash = await asyncSha256(`${challenge.puzzle}:${submittedNonce}`);
+  const leadingZeros = hash.match(/^(0+)/)?.[0].length ?? 0;
+  const required = Math.ceil(challenge.difficulty / 4);
+  const valid = leadingZeros >= required;
+  logExit("verifyChallenge", { result: valid, hashPrefix: hash.substring(0, 8), required, leadingZeros });
+  return valid;
+}
+__name(verifyChallenge, "verifyChallenge");
+async function storeChallenge(kv, ip, challenge) {
+  logEntry4("storeChallenge", { ip, difficulty: challenge.difficulty });
+  const key = `tarpit:challenge:${ip}`;
+  await kv.put(key, JSON.stringify(challenge), { expirationTtl: CHALLENGE_TTL_SECONDS });
+  logExit("storeChallenge", { ip });
+}
+__name(storeChallenge, "storeChallenge");
+async function retrieveChallenge(kv, ip) {
+  logEntry4("retrieveChallenge", { ip });
+  const raw = await kv.get(`tarpit:challenge:${ip}`, "json");
+  if (raw) {
+    logExit("retrieveChallenge", { ip, found: true });
+    return raw;
+  }
+  logExit("retrieveChallenge", { ip, found: false });
+  return null;
+}
+__name(retrieveChallenge, "retrieveChallenge");
+async function clearChallenge(kv, ip) {
+  logEntry4("clearChallenge", { ip });
+  await kv.delete(`tarpit:challenge:${ip}`);
+  logExit("clearChallenge", { ip });
+}
+__name(clearChallenge, "clearChallenge");
+function makeRequestId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(12));
+  const hex = Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return `tp_${hex}`;
+}
+__name(makeRequestId, "makeRequestId");
+var src_default = {
+  async fetch(request, env2, ctx) {
+    const requestId = makeRequestId();
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const clientIP = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "0.0.0.0";
+    logEntry4("fetch", { requestId, method: request.method, path, clientIP });
+    if (isCurtisIp(clientIP) || isSwarmContainer(clientIP)) {
+      logAudit("fetch", "info", { requestId, clientIP, path, decision: "whitelist-pass" });
+      logExit("fetch", { requestId, branch: "whitelist" });
+      return new Response("OK", { status: 200, headers: { "X-Tarpit-Status": "bypass-whitelist" } });
+    }
+    if (path === "/tarpit/stats") {
+      return handleStats(request, env2, requestId, clientIP);
+    }
+    if (path === "/tarpit/ledger") {
+      return handleLedger(request, env2, requestId, clientIP);
+    }
+    if (path === "/tarpit/activate" && request.method === "POST") {
+      return handleActivate(request, env2, requestId, clientIP);
+    }
+    if (path === "/tarpit/deactivate" && request.method === "POST") {
+      return handleDeactivate(request, env2, requestId, clientIP);
+    }
+    const flagged = await isFlaggedByTrident(env2.SESSION_META, clientIP);
+    if (!flagged) {
+      logAudit("fetch", "info", { requestId, clientIP, path, decision: "not-flagged-pass" });
+      logExit("fetch", { requestId, branch: "not-flagged" });
+      return new Response("OK", { status: 200 });
+    }
+    logAudit("fetch", "warn", { requestId, clientIP, path, decision: "tarpit-engaged" });
+    const offenseCount = await incrementOffense(env2.SESSION_META, clientIP);
+    const tier = classifyTier(offenseCount);
+    const delayMs = calculateDelay(offenseCount);
+    if (delayMs > 0) {
+      await applyDelay(env2.SESSION_META, clientIP, delayMs);
+    }
+    const difficulty = shouldChallenge(offenseCount);
+    if (difficulty > 0) {
+      const existingChallenge = await retrieveChallenge(env2.SESSION_META, clientIP);
+      const challengeNonce = url.searchParams.get("nonce");
+      if (!existingChallenge || !challengeNonce) {
+        const challenge = await generateChallenge(difficulty);
+        await storeChallenge(env2.SESSION_META, clientIP, challenge);
+        await recordChallengeIssued(env2.SESSION_META, clientIP, 0);
+        await writeAuditLog(env2.AURIS_LOGS, clientIP, "challenge-issued", {
+          requestId,
+          difficulty,
+          offenseCount,
+          tier,
+          puzzle: challenge.puzzle
+        });
+        logExit("fetch", { requestId, branch: "challenge-issued" });
+        return new Response(
+          JSON.stringify({
+            status: "challenge_required",
+            puzzle: challenge.puzzle,
+            difficulty: challenge.difficulty,
+            algorithm: "SHA-256",
+            instruction: "Find nonce where hex(SHA-256(puzzle + ':' + nonce)) starts with required zero hex digits",
+            example: "SHA-256('abc:42') => 0x00..."
+          }),
+          {
+            status: 429,
+            headers: {
+              "Content-Type": "application/json",
+              "Retry-After": String(Math.max(1, Math.floor(delayMs / 1e3))),
+              "X-Tarpit-Challenge": "required"
+            }
+          }
+        );
+      }
+      const submitted = parseInt(challengeNonce, 10);
+      const valid = await verifyChallenge(existingChallenge, submitted);
+      if (!valid) {
+        await writeAuditLog(env2.AURIS_LOGS, clientIP, "challenge-failed", {
+          requestId,
+          difficulty,
+          offenseCount,
+          submittedNonce: submitted
+        });
+        logExit("fetch", { requestId, branch: "challenge-failed" });
+        return new Response(
+          JSON.stringify({ status: "challenge_failed", retry: true }),
+          { status: 429, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      await clearChallenge(env2.SESSION_META, clientIP);
+      await writeAuditLog(env2.AURIS_LOGS, clientIP, "challenge-passed", {
+        requestId,
+        difficulty,
+        offenseCount
+      });
+    }
+    const fakeResponse = await serveFakeSuccess(env2.SESSION_META, clientIP, path, requestId);
+    const burnSeconds = connectionBurnDuration(offenseCount);
+    if (burnSeconds > 0) {
+      await burnConnection(env2.SESSION_META, clientIP);
+      fakeResponse.headers.set("Connection", "keep-alive");
+      fakeResponse.headers.set("Keep-Alive", `timeout=${burnSeconds}, max=100`);
+      fakeResponse.headers.set("X-Tarpit-Burn", String(burnSeconds));
+    }
+    fakeResponse.headers.set("X-Tarpit-Status", "engaged");
+    fakeResponse.headers.set("X-Tarpit-Tier", tier);
+    fakeResponse.headers.set("X-Tarpit-Delay", String(delayMs));
+    fakeResponse.headers.set("X-Tarpit-Offense", String(offenseCount));
+    await writeAuditLog(env2.AURIS_LOGS, clientIP, "tarpit-response", {
+      requestId,
+      path,
+      tier,
+      offenseCount,
+      delayMs,
+      difficulty,
+      burnSeconds
+    });
+    logExit("fetch", { requestId, branch: "tarpit-response", tier, offenseCount, delayMs });
+    return fakeResponse;
+  }
+};
+async function handleStats(request, env2, requestId, clientIP) {
+  logEntry4("handleStats", { requestId, clientIP });
+  try {
+    const ledgers = await getAllLedgers(env2.SESSION_META);
+    const summary = summarizeGlobalCosts(ledgers);
+    const topAttackers = ledgers.sort((a, b) => b.totalCostScore - a.totalCostScore).slice(0, 10).map((l) => ({
+      ip: l.ip,
+      totalCostScore: l.totalCostScore,
+      offenseCount: l.offenseCount,
+      timeWastedMs: l.timeWastedMs,
+      cpuBurnedMs: l.cpuBurnedMs,
+      fakeSuccesses: l.fakeSuccesses,
+      connectionsBurned: l.connectionsBurned
+    }));
+    const body = JSON.stringify({
+      status: "success",
+      summary,
+      topAttackers,
+      ledgerCount: ledgers.length,
+      generatedAt: Date.now()
+    }, null, 2);
+    await writeAuditLog(env2.AURIS_LOGS, clientIP, "stats-read", { requestId, ledgerCount: ledgers.length });
+    logExit("handleStats", { requestId, ledgerCount: ledgers.length });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "application/json", "X-Request-Id": requestId }
+    });
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("handleStats", "error", { requestId, clientIP, error: error3 });
+    throw err;
+  }
+}
+__name(handleStats, "handleStats");
+async function handleLedger(request, env2, requestId, clientIP) {
+  logEntry4("handleLedger", { requestId, clientIP });
+  try {
+    const url = new URL(request.url);
+    const targetIp = url.searchParams.get("ip");
+    if (!targetIp) {
+      logExit("handleLedger", { requestId, branch: "missing-ip" });
+      return new Response(
+        JSON.stringify({ status: "error", message: "?ip= parameter required" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const ledger = await getLedger(env2.SESSION_META, targetIp);
+    if (!ledger) {
+      logExit("handleLedger", { requestId, targetIp, branch: "not-found" });
+      return new Response(
+        JSON.stringify({ status: "not_found", ip: targetIp }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    await writeAuditLog(env2.AURIS_LOGS, clientIP, "ledger-read", { requestId, targetIp });
+    logExit("handleLedger", { requestId, targetIp, branch: "found" });
+    return new Response(
+      JSON.stringify({ status: "success", ledger }, null, 2),
+      { status: 200, headers: { "Content-Type": "application/json", "X-Request-Id": requestId } }
+    );
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("handleLedger", "error", { requestId, clientIP, error: error3 });
+    throw err;
+  }
+}
+__name(handleLedger, "handleLedger");
+async function handleActivate(request, env2, requestId, clientIP) {
+  logEntry4("handleActivate", { requestId, clientIP });
+  try {
+    const body = await request.json();
+    const targetIp = body?.ip;
+    const reason = body?.reason ?? "manual-curtis-override";
+    if (!targetIp) {
+      logExit("handleActivate", { requestId, branch: "missing-ip" });
+      return new Response(
+        JSON.stringify({ status: "error", message: "ip field required in JSON body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (isCurtisIp(targetIp) || isSwarmContainer(targetIp)) {
+      logAudit("handleActivate", "error", { requestId, targetIp, reason, decision: "blocked-self-tarpit" });
+      logExit("handleActivate", { requestId, branch: "self-tarpit-blocked" });
+      return new Response(
+        JSON.stringify({ status: "error", message: "Cannot tarpit whitelisted IP" }),
+        { status: 403, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const key = `${MANUAL_ACTIVATE_PREFIX}${targetIp}`;
+    await env2.SESSION_META.put(key, JSON.stringify({
+      activatedBy: clientIP,
+      activatedAt: Date.now(),
+      reason
+    }));
+    await ensureLedger(env2.SESSION_META, targetIp);
+    await writeAuditLog(env2.AURIS_LOGS, clientIP, "manual-activate", { requestId, targetIp, reason });
+    logAudit("handleActivate", "warn", { requestId, targetIp, reason, activatedBy: clientIP });
+    logExit("handleActivate", { requestId, targetIp, branch: "activated" });
+    return new Response(
+      JSON.stringify({ status: "success", ip: targetIp, reason, activatedBy: clientIP }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("handleActivate", "error", { requestId, clientIP, error: error3 });
+    throw err;
+  }
+}
+__name(handleActivate, "handleActivate");
+async function handleDeactivate(request, env2, requestId, clientIP) {
+  logEntry4("handleDeactivate", { requestId, clientIP });
+  try {
+    const body = await request.json();
+    const targetIp = body?.ip;
+    const reason = body?.reason ?? "manual-curtis-override";
+    if (!targetIp) {
+      logExit("handleDeactivate", { requestId, branch: "missing-ip" });
+      return new Response(
+        JSON.stringify({ status: "error", message: "ip field required in JSON body" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const key = `${MANUAL_ACTIVATE_PREFIX}${targetIp}`;
+    await env2.SESSION_META.delete(key);
+    await clearChallenge(env2.SESSION_META, targetIp);
+    await writeAuditLog(env2.AURIS_LOGS, clientIP, "manual-deactivate", { requestId, targetIp, reason });
+    logAudit("handleDeactivate", "info", { requestId, targetIp, reason, deactivatedBy: clientIP });
+    logExit("handleDeactivate", { requestId, targetIp, branch: "deactivated" });
+    return new Response(
+      JSON.stringify({ status: "success", ip: targetIp, reason, deactivatedBy: clientIP }),
+      { status: 200, headers: { "Content-Type": "application/json" } }
+    );
+  } catch (err) {
+    const error3 = err instanceof Error ? err.message : String(err);
+    logAudit("handleDeactivate", "error", { requestId, clientIP, error: error3 });
+    throw err;
+  }
+}
+__name(handleDeactivate, "handleDeactivate");
+export {
+  src_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--ea3120c10adbd51126b5ef865a9385c7ece6e308a4025b6fb0b8a1f205a2--

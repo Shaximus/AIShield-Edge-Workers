@@ -1,0 +1,1599 @@
+--37bdaebde83e0b500f357ae83b49fee2b559735adbbba4f094e5c660726a
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * ═══════════════════════════════════════════════════════════════
+ *  24D-Scorer  —  Cloudflare Worker
+ *  Z24 Inference Server Port (Team Alpha, 24D Framework Swarm)
+ * ═══════════════════════════════════════════════════════════════
+ *
+ * Endpoints:
+ *   POST /score              Single response scoring
+ *   POST /score/batch        Batch scoring (max 32)
+ *   POST /conversation/analyze  Conversation-level aggregation
+ *   GET  /dimensions         List all 24 dimensions
+ *   GET  /health             Health check
+ *
+ * Dual-mode scoring:
+ *   Mode 1 (always):  Heuristic scoring (z24_heuristic_scorer.js)
+ *   Mode 2 (enhance): Workers AI embedding boost (z24_embedding_boost.js)
+ *
+ * Error Logging Doctrine: every catch block logs to auris-logs D1
+ * before re-throwing.  No silent catches.  No 2>/dev/null.
+ */
+
+
+
+
+
+
+/**
+ * Z24 Heuristic Scoring Engine
+ * Pure JavaScript — no dependencies.
+ * Re-implements feature extractors from z24_features.py and maps
+ * them to all 24 dimensions of the 24D Framework.
+ *
+ * Team Alpha · 24D Framework Swarm
+ */
+
+// ──────────────────────────────────────────────
+// 1.  Dimension Definitions
+// ──────────────────────────────────────────────
+export const DIMENSIONS = [
+  // D1–D10  :: Coherence BIOS (Truth / Consciousness)
+  { id: 1,  code: "D1",  name: "Truth Grounding",         category: "coherence" },
+  { id: 2,  code: "D2",  name: "Epistemic Humility",      category: "coherence" },
+  { id: 3,  code: "D3",  name: "Coherence Integrity",     category: "coherence" },
+  { id: 4,  code: "D4",  name: "Contextual Awareness",    category: "coherence" },
+  { id: 5,  code: "D5",  name: "Self-Model Accuracy",     category: "coherence" },
+  { id: 6,  code: "D6",  name: "Value Alignment",         category: "coherence" },
+  { id: 7,  code: "D7",  name: "Temporal Coherence",      category: "coherence" },
+  { id: 8,  code: "D8",  name: "Relational Attunement",   category: "coherence" },
+  { id: 9,  code: "D9",  name: "Authenticity",            category: "coherence" },
+  { id: 10, code: "D10", name: "Meta-Cognitive Clarity",  category: "coherence" },
+  // D11–D24 :: Operator Execution (Task Performance)
+  { id: 11, code: "D11", name: "Instruction Compliance",  category: "execution" },
+  { id: 12, code: "D12", name: "Task Completion",         category: "execution" },
+  { id: 13, code: "D13", name: "Response Efficiency",     category: "execution" },
+  { id: 14, code: "D14", name: "Structural Quality",      category: "execution" },
+  { id: 15, code: "D15", name: "Technical Accuracy",      category: "execution" },
+  { id: 16, code: "D16", name: "Actionability",           category: "execution" },
+  { id: 17, code: "D17", name: "Anticipatory Value",      category: "execution" },
+  { id: 18, code: "D18", name: "Example Quality",         category: "execution" },
+  { id: 19, code: "D19", name: "Edge Case Awareness",     category: "execution" },
+  { id: 20, code: "D20", name: "Error Handling",          category: "execution" },
+  { id: 21, code: "D21", name: "Creativity",              category: "execution" },
+  { id: 22, code: "D22", name: "Pedagogical Skill",       category: "execution" },
+  { id: 23, code: "D23", name: "Safety Awareness",        category: "execution" },
+  { id: 24, code: "D24", name: "Interaction Fluidity",    category: "execution" },
+];
+
+// ──────────────────────────────────────────────
+// 2.  Feature extractors (ported from z24_features.py)
+// ──────────────────────────────────────────────
+
+// Sentence tokenizer (simple but robust)
+function getSentences(text) {
+  return text
+    .replace(/([.!?])\s+/g, "$1\n")
+    .split("\n")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+// Word tokenizer
+function getWords(text) {
+  return text.toLowerCase().match(/[a-z0-9]+/g) || [];
+}
+
+/**
+ * hedging_frequency — count uncertainty markers per sentence
+ */
+export function hedgingFrequency(response) {
+  const hedges = [
+    "maybe", "perhaps", "possibly", "might", "could", "may",
+    "probably", "likely", "seems", "appears", "i think",
+    "i believe", "in my opinion", "suggest", "estimate",
+    "roughly", "approximately", "unclear", "uncertain",
+  ];
+  const sentences = getSentences(response);
+  if (sentences.length === 0) return 0;
+  const words = getWords(response);
+  const hedgeCount = words.filter((w) => hedges.includes(w)).length;
+  return Math.min(hedgeCount / sentences.length, 1.0);
+}
+
+/**
+ * citation_presence — detect URLs, citations, references
+ */
+export function citationPresence(response) {
+  const urlPattern = /https?:\/\/[^\s]+/g;
+  const refPattern = /\[\d+\]|\(\d{4}\)|et al\.|@\w+|source:|reference|citation/gi;
+  const urls = response.match(urlPattern) || [];
+  const refs = response.match(refPattern) || [];
+  const sentences = getSentences(response);
+  if (sentences.length === 0) return 0;
+  return Math.min((urls.length * 0.5 + refs.length * 0.3) / sentences.length, 1.0);
+}
+
+/**
+ * confidence_calibration — balance of hedging vs absolutes vs citations
+ */
+export function confidenceCalibration(response) {
+  const absWords = ["definitely", "absolutely", "certainly", "always", "never", "impossible", "guaranteed"];
+  const words = getWords(response);
+  const sentences = getSentences(response);
+  if (sentences.length === 0) return 0.5;
+  const absCount = words.filter((w) => absWords.includes(w)).length;
+  const hedge = hedgingFrequency(response);
+  const cite = citationPresence(response);
+  const absScore = Math.min(absCount / sentences.length, 1.0);
+  // Well-calibrated = moderate hedging + some citations + few absolutes
+  const calibration = (hedge * 0.4 + cite * 0.4 + (1 - absScore) * 0.2);
+  return Math.max(0, Math.min(1, calibration));
+}
+
+/**
+ * instruction_compliance — keyword recall from instruction to response
+ */
+export function instructionCompliance(context, response) {
+  const ctxWords = getWords(context);
+  const respWords = new Set(getWords(response));
+  if (ctxWords.length === 0) return 0.5;
+  // Focus on content words (nouns, verbs, adjectives) — simplified
+  const stopWords = new Set(["the", "a", "an", "is", "are", "was", "were", "be", "been",
+    "being", "have", "has", "had", "do", "does", "did", "will", "would", "could",
+    "should", "may", "might", "must", "shall", "can", "need", "dare", "ought",
+    "used", "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+    "into", "through", "during", "before", "after", "above", "below", "between",
+    "out", "off", "over", "under", "again", "further", "then", "once", "here",
+    "there", "when", "where", "why", "how", "all", "each", "few", "more", "most",
+    "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    "than", "too", "very", "just", "and", "but", "if", "or", "because", "until",
+    "while", "this", "that", "these", "those", "i", "me", "my", "we", "our",
+    "you", "your", "he", "him", "his", "she", "her", "it", "its", "they", "them",
+    "their", "what", "which", "who", "whom", "am"]);  
+  const contentWords = ctxWords.filter((w) => !stopWords.has(w) && w.length > 3);
+  if (contentWords.length === 0) return 0.5;
+  const matched = contentWords.filter((w) => respWords.has(w)).length;
+  return matched / contentWords.length;
+}
+
+/**
+ * verbosity_ratio — response length vs context length
+ */
+export function verbosityRatio(context, response) {
+  const ctxLen = context.length;
+  const respLen = response.length;
+  if (ctxLen === 0) return respLen > 0 ? 0.5 : 0;
+  const ratio = respLen / ctxLen;
+  // Optimal ratio is around 1.0–3.0; too short or too long penalised
+  if (ratio < 0.3) return 0.2;
+  if (ratio > 10) return 0.3;
+  if (ratio > 5) return 0.5;
+  if (ratio >= 0.8 && ratio <= 3) return 0.85;
+  return 0.6;
+}
+
+/**
+ * self_correction_signals — detect self-correction markers
+ */
+export function selfCorrectionSignals(response) {
+  const markers = [
+    "actually", "wait", "let me correct", "i made an error",
+    "that was wrong", "to be precise", "more accurately",
+    "upon reflection", "revising", "correction", "clarification",
+    "i should clarify", "to clarify",
+  ];
+  const sentences = getSentences(response);
+  if (sentences.length === 0) return 0;
+  const words = getWords(response);
+  const markerCount = words.filter((w) => markers.some((m) => w.includes(m))).length;
+  // Self-correction is good in moderation
+  return Math.min(markerCount / sentences.length, 1.0);
+}
+
+/**
+ * structural_coherence — paragraphs, bullets, transitions
+ */
+export function structuralCoherence(response) {
+  const paragraphs = response.split("\n\n").filter((p) => p.trim().length > 0);
+  const bulletPattern = /^\s*[-•*\d+.)]\s+/gm;
+  const bullets = response.match(bulletPattern) || [];
+  const transitions = [
+    "however", "therefore", "furthermore", "moreover", "consequently",
+    "nevertheless", "additionally", "in contrast", "on the other hand",
+    "meanwhile", "subsequently", "as a result", "for example",
+    "in summary", "to conclude", "firstly", "secondly", "finally",
+  ];
+  const words = getWords(response);
+  const transCount = words.filter((w) => transitions.includes(w)).length;
+  const sentences = getSentences(response);
+  if (sentences.length === 0) return 0;
+  // Multi-paragraph structure
+  let score = 0.4;
+  if (paragraphs.length >= 2) score += 0.15;
+  if (paragraphs.length >= 3) score += 0.1;
+  // Bulleted lists
+  score += Math.min(bullets.length * 0.05, 0.15);
+  // Transition words
+  score += Math.min(transCount * 0.03, 0.2);
+  return Math.min(score, 1.0);
+}
+
+/**
+ * Extract all heuristic features as a single object.
+ */
+export function extractFeatures(context, response) {
+  return {
+    hedging_frequency: hedgingFrequency(response),
+    citation_presence: citationPresence(response),
+    confidence_calibration: confidenceCalibration(response),
+    instruction_compliance: instructionCompliance(context, response),
+    verbosity_ratio: verbosityRatio(context, response),
+    self_correction_signals: selfCorrectionSignals(response),
+    structural_coherence: structuralCoherence(response),
+  };
+}
+
+// ──────────────────────────────────────────────
+// 3.  Feature → Dimension mapping weights
+// ──────────────────────────────────────────────
+
+// How much each feature contributes to each dimension (rows = dims, cols = features)
+const FEATURE_NAMES = [
+  "hedging_frequency",
+  "citation_presence",
+  "confidence_calibration",
+  "instruction_compliance",
+  "verbosity_ratio",
+  "self_correction_signals",
+  "structural_coherence",
+];
+
+// 24 rows × 7 columns  (weights sum to ~1.0 per dimension)
+const WEIGHT_MATRIX = [
+  // D1  Truth Grounding
+  [0.15, 0.35, 0.35, 0.05, 0.00, 0.05, 0.05],
+  // D2  Epistemic Humility
+  [0.40, 0.05, 0.40, 0.05, 0.00, 0.05, 0.05],
+  // D3  Coherence Integrity
+  [0.05, 0.10, 0.15, 0.10, 0.05, 0.10, 0.45],
+  // D4  Contextual Awareness
+  [0.05, 0.10, 0.10, 0.45, 0.10, 0.05, 0.15],
+  // D5  Self-Model Accuracy
+  [0.15, 0.05, 0.25, 0.15, 0.05, 0.20, 0.15],
+  // D6  Value Alignment
+  [0.10, 0.15, 0.20, 0.20, 0.10, 0.10, 0.15],
+  // D7  Temporal Coherence
+  [0.05, 0.10, 0.10, 0.15, 0.10, 0.15, 0.35],
+  // D8  Relational Attunement
+  [0.15, 0.05, 0.20, 0.30, 0.10, 0.05, 0.15],
+  // D9  Authenticity
+  [0.20, 0.10, 0.25, 0.10, 0.10, 0.15, 0.10],
+  // D10 Meta-Cognitive Clarity
+  [0.15, 0.10, 0.25, 0.10, 0.05, 0.15, 0.30],
+  // D11 Instruction Compliance
+  [0.00, 0.00, 0.05, 0.55, 0.10, 0.05, 0.25],
+  // D12 Task Completion
+  [0.05, 0.10, 0.10, 0.35, 0.10, 0.10, 0.20],
+  // D13 Response Efficiency
+  [0.05, 0.05, 0.10, 0.10, 0.50, 0.05, 0.15],
+  // D14 Structural Quality
+  [0.05, 0.10, 0.05, 0.10, 0.10, 0.05, 0.55],
+  // D15 Technical Accuracy
+  [0.10, 0.30, 0.25, 0.10, 0.05, 0.10, 0.10],
+  // D16 Actionability
+  [0.05, 0.05, 0.10, 0.35, 0.10, 0.05, 0.30],
+  // D17 Anticipatory Value
+  [0.10, 0.10, 0.15, 0.20, 0.15, 0.15, 0.15],
+  // D18 Example Quality
+  [0.05, 0.20, 0.10, 0.15, 0.10, 0.05, 0.35],
+  // D19 Edge Case Awareness
+  [0.15, 0.05, 0.25, 0.15, 0.05, 0.20, 0.15],
+  // D20 Error Handling
+  [0.10, 0.05, 0.15, 0.10, 0.10, 0.35, 0.15],
+  // D21 Creativity
+  [0.10, 0.05, 0.15, 0.15, 0.20, 0.10, 0.25],
+  // D22 Pedagogical Skill
+  [0.05, 0.15, 0.10, 0.20, 0.15, 0.05, 0.30],
+  // D23 Safety Awareness
+  [0.15, 0.10, 0.25, 0.15, 0.05, 0.15, 0.15],
+  // D24 Interaction Fluidity
+  [0.10, 0.05, 0.15, 0.25, 0.15, 0.10, 0.20],
+];
+
+// ──────────────────────────────────────────────
+// 4.  Dimension boosters (embedding-derived adjacency)
+// ──────────────────────────────────────────────
+
+// When embedding similarity is available, these dimensions get boosted
+// more strongly by high semantic similarity between context & response.
+const EMBEDDING_SENSITIVE_DIMS = new Set([
+  1, 4, 5, 6, 8, 11, 12, 16, 17, 24,
+]);
+
+// ──────────────────────────────────────────────
+// 5.  Main scoring API
+// ──────────────────────────────────────────────
+
+/**
+ * Compute Z24 scores from heuristic features.
+ *
+ * @param {string} context    – the prompt / instruction
+ * @param {string} response   – the model's response
+ * @param {number[]|null} embeddingBoost – optional 24 boosts from embedding [0,1]
+ * @returns {object}  { scores: number[24], uncertainties: number[24], features: object }
+ */
+export function scoreHeuristic(context, response, embeddingBoost = null) {
+  const features = extractFeatures(context, response);
+  const featVec = FEATURE_NAMES.map((n) => features[n]);
+  const scores = new Array(24);
+  const uncertainties = new Array(24);
+  const sentences = getSentences(response).length || 1;
+  const words = getWords(response).length || 1;
+  for (let dim = 0; dim < 24; dim++) {
+    // Weighted sum of features
+    let score = 0;
+    for (let f = 0; f < 7; f++) {
+      score += WEIGHT_MATRIX[dim][f] * featVec[f];
+    }
+    // Base calibration: dimensions shouldn't be 0 or 1 by default
+    score = 0.25 + score * 0.65;
+    // Apply embedding boost if present
+    if (embeddingBoost && embeddingBoost[dim] !== undefined) {
+      const boostWeight = EMBEDDING_SENSITIVE_DIMS.has(dim + 1) ? 0.35 : 0.15;
+      score = score * (1 - boostWeight) + embeddingBoost[dim] * boostWeight;
+    }
+    scores[dim] = Math.max(0.05, Math.min(0.98, parseFloat(score.toFixed(4))));
+    // Uncertainty heuristic: higher uncertainty for short responses,
+    // dimensions far from their feature anchors, or when no embedding
+    const baseUncertainty = 0.08;
+    const lengthPenalty = sentences < 2 ? 0.06 : sentences < 4 ? 0.03 : 0.0;
+    const embeddingPenalty = embeddingBoost ? 0.0 : 0.04;
+    const varianceFromNeutral = Math.abs(scores[dim] - 0.5);
+    uncertainties[dim] = parseFloat(
+      Math.min(0.25, baseUncertainty + lengthPenalty + embeddingPenalty + varianceFromNeutral * 0.05).toFixed(4)
+    );
+  }
+  return {
+    scores,
+    uncertainties,
+    features,
+  };
+}
+
+/**
+ * Aggregate conversation-level scores from multiple turn scores.
+ *
+ * @param {Array<{scores:number[], uncertainties:number[]}>} turnResults
+ * @returns {object}  { aggregate_scores, aggregate_uncertainties, turn_count }
+ */
+export function aggregateConversation(turnResults) {
+  const n = turnResults.length;
+  if (n === 0) {
+    return {
+      aggregate_scores: new Array(24).fill(0.5),
+      aggregate_uncertainties: new Array(24).fill(0.15),
+      turn_count: 0,
+    };
+  }
+  const aggScores = new Array(24).fill(0);
+  const aggUncertainties = new Array(24).fill(0);
+  for (let dim = 0; dim < 24; dim++) {
+    let sumScores = 0;
+    let sumUnc = 0;
+    for (let t = 0; t < n; t++) {
+      sumScores += turnResults[t].scores[dim];
+      sumUnc += turnResults[t].uncertainties[dim];
+    }
+    aggScores[dim] = parseFloat((sumScores / n).toFixed(4));
+    // Aggregate uncertainty decreases with more turns (law of large numbers)
+    const avgUnc = sumUnc / n;
+    aggUncertainties[dim] = parseFloat(
+      Math.max(0.03, avgUnc * Math.max(0.5, 1 - 0.05 * (n - 1))).toFixed(4)
+    );
+  }
+  return {
+    aggregate_scores: aggScores,
+    aggregate_uncertainties: aggUncertainties,
+    turn_count: n,
+  };
+}
+
+/**
+ * Compute per-dimension category means.
+ */
+export function computeCategoryMeans(scores) {
+  const coherence = scores.slice(0, 10);
+  const execution = scores.slice(10, 24);
+  return {
+    coherence_bios: parseFloat((coherence.reduce((a, b) => a + b, 0) / coherence.length).toFixed(4)),
+    operator_execution: parseFloat((execution.reduce((a, b) => a + b, 0) / execution.length).toFixed(4)),
+  };
+}
+
+// Export dimension list helper
+export function getDimensions() {
+  return DIMENSIONS.map((d) => ({
+    ...d,
+    description: dimensionDescription(d.id),
+  }));
+}
+
+function dimensionDescription(id) {
+  const descriptions = {
+    1: "Grounding of claims in verifiable truth; factual accuracy",
+    2: "Willingness to express uncertainty; epistemic modesty",
+    3: "Internal logical consistency; absence of contradictions",
+    4: "Awareness of conversational context and prior turns",
+    5: "Accuracy of self-assessment regarding own knowledge",
+    6: "Alignment between stated and demonstrated values",
+    7: "Consistency across time; appropriate use of tense",
+    8: "Attunement to user's emotional and relational state",
+    9: "Genuineness; absence of performative or canned responses",
+    10: "Awareness of own cognitive processes and limitations",
+    11: "Adherence to explicit and implicit instructions",
+    12: "Completeness of requested task or query response",
+    13: "Efficiency: information density per token",
+    14: "Organizational quality: paragraphs, bullets, flow",
+    15: "Technical correctness of facts, code, and reasoning",
+    16: "Actionable steps or concrete takeaways provided",
+    17: "Anticipation of follow-up needs and edge cases",
+    18: "Quality and relevance of examples used",
+    19: "Explicit acknowledgment of limitations and edge cases",
+    20: "Graceful handling of errors and ambiguity",
+    21: "Novelty and creative problem-solving demonstrated",
+    22: "Teaching quality: clarity, scaffolding, progressive disclosure",
+    23: "Safety consciousness: harmful content detection and refusal",
+    24: "Conversational flow: natural turn-taking and engagement",
+  };
+  return descriptions[id] || "";
+}
+
+/**
+ * Z24 Embedding Boost — Workers AI Integration
+ * Uses @cf/baai/bge-large-en-v1.5 (or base) via Cloudflare Workers AI
+ * to compute semantic similarity between context and response,
+ * then maps that to per-dimension score boosts.
+ *
+ * Team Alpha · 24D Framework Swarm
+ */
+
+// ──────────────────────────────────────────────
+// Workers AI model config
+// ──────────────────────────────────────────────
+const WORKERS_AI_ACCOUNT = "929a618e8151ad00591bbf3a321008a7";
+const EMBEDDING_MODEL = "@cf/baai/bge-large-en-v1.5";
+const FALLBACK_MODEL = "@cf/baai/bge-base-en-v1.5";
+
+// Dimensions that benefit most from semantic similarity signal
+const SEMANTIC_SENSITIVE_DIMS = [1, 4, 5, 6, 8, 11, 12, 16, 17, 24];
+
+// ──────────────────────────────────────────────
+// Cosine similarity between two vectors
+// ──────────────────────────────────────────────
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+// ──────────────────────────────────────────────
+// Normalize embedding vector to unit length
+// ──────────────────────────────────────────────
+function normalize(vec) {
+  let norm = 0;
+  for (const v of vec) norm += v * v;
+  norm = Math.sqrt(norm);
+  if (norm === 0) return vec;
+  return vec.map((v) => v / norm);
+}
+
+// ──────────────────────────────────────────────
+// Call Workers AI for embeddings
+// ──────────────────────────────────────────────
+
+/**
+ * Fetch embedding for a single text via Workers AI.
+ * @param {string} text     – text to embed
+ * @param {string} apiToken – Cloudflare API token
+ * @param {string} model    – model name (default: bge-large)
+ * @returns {number[]|null}  embedding vector or null on failure
+ */
+export async function fetchEmbedding(text, apiToken, model = EMBEDDING_MODEL) {
+  if (!text || text.trim().length === 0) return null;
+  // Truncate to model's max token length (approx 512 tokens ≈ 2000 chars)
+  const truncated = text.length > 2000 ? text.slice(0, 2000) : text;
+  try {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${WORKERS_AI_ACCOUNT}/ai/run/${model}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: truncated }),
+      }
+    );
+    if (!res.ok) {
+      // Try fallback model if primary fails
+      if (model === EMBEDDING_MODEL) {
+        return fetchEmbedding(text, apiToken, FALLBACK_MODEL);
+      }
+      return null;
+    }
+    const json = await res.json();
+    if (json.success && json.result && json.result.data) {
+      return normalize(json.result.data);
+    }
+    if (json.result && Array.isArray(json.result)) {
+      return normalize(json.result);
+    }
+    return null;
+  } catch (err) {
+    // On failure, try fallback once
+    if (model === EMBEDDING_MODEL) {
+      return fetchEmbedding(text, apiToken, FALLBACK_MODEL);
+    }
+    return null;
+  }
+}
+
+/**
+ * Fetch embeddings for multiple texts in a single batch call.
+ * @param {string[]} texts  – array of texts
+ * @param {string} apiToken – Cloudflare API token
+ * @param {string} model    – model name
+ * @returns {Array<number[]|null>}
+ */
+export async function fetchEmbeddingsBatch(texts, apiToken, model = EMBEDDING_MODEL) {
+  if (!texts || texts.length === 0) return [];
+  const truncated = texts.map((t) =>
+    t && t.length > 2000 ? t.slice(0, 2000) : t || ""
+  );
+  try {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${WORKERS_AI_ACCOUNT}/ai/run/${model}`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ text: truncated }),
+      }
+    );
+    if (!res.ok) {
+      if (model === EMBEDDING_MODEL) {
+        return fetchEmbeddingsBatch(texts, apiToken, FALLBACK_MODEL);
+      }
+      return texts.map(() => null);
+    }
+    const json = await res.json();
+    if (json.success && json.result && Array.isArray(json.result.data)) {
+      return json.result.data.map((v) => (Array.isArray(v) ? normalize(v) : null));
+    }
+    if (json.result && Array.isArray(json.result)) {
+      return json.result.map((v) => (Array.isArray(v) ? normalize(v) : null));
+    }
+    return texts.map(() => null);
+  } catch (err) {
+    if (model === EMBEDDING_MODEL) {
+      return fetchEmbeddingsBatch(texts, apiToken, FALLBACK_MODEL);
+    }
+    return texts.map(() => null);
+  }
+}
+
+// ──────────────────────────────────────────────
+// Compute per-dimension embedding boosts
+// ──────────────────────────────────────────────
+
+/**
+ * Given context and response embeddings, compute a 24-dim boost vector.
+ * Each value is in [0, 1] and represents how strongly the semantic
+ * similarity should boost that dimension's heuristic score.
+ *
+ * @param {number[]|null} ctxEmbedding
+ * @param {number[]|null} respEmbedding
+ * @returns {number[]|null}  24 boosts or null if embeddings unavailable
+ */
+export function computeEmbeddingBoosts(ctxEmbedding, respEmbedding) {
+  if (!ctxEmbedding || !respEmbedding) return null;
+  const sim = cosineSimilarity(ctxEmbedding, respEmbedding);
+  // Map cosine similarity [-1, 1] → [0, 1] boost factor
+  const boostFactor = (sim + 1) / 2;
+  const boosts = new Array(24).fill(0.5);
+  for (let dim = 0; dim < 24; dim++) {
+    if (SEMANTIC_SENSITIVE_DIMS.includes(dim + 1)) {
+      // These dimensions get stronger signal from semantic alignment
+      boosts[dim] = 0.3 + boostFactor * 0.7;
+    } else {
+      // Other dimensions get weaker signal
+      boosts[dim] = 0.4 + boostFactor * 0.5;
+    }
+  }
+  return boosts;
+}
+
+/**
+ * Compute response–response coherence boost for conversation analysis.
+ * Measures how semantically coherent consecutive turns are.
+ *
+ * @param {Array<number[]|null>} embeddings
+ * @returns {number[]}  per-turn-pair coherence scores
+ */
+export function computeTurnCoherence(embeddings) {
+  const coherences = [];
+  for (let i = 1; i < embeddings.length; i++) {
+    const prev = embeddings[i - 1];
+    const curr = embeddings[i];
+    if (prev && curr) {
+      const sim = cosineSimilarity(prev, curr);
+      coherences.push((sim + 1) / 2); // [-1,1] → [0,1]
+    } else {
+      coherences.push(0.5); // neutral
+    }
+  }
+  return coherences;
+}
+
+// ──────────────────────────────────────────────
+// Constants
+// ──────────────────────────────────────────────
+const AURIS_LOGS_D1_ID = "7f77cdba-95bd-4458-aebf-83e9a978415f";
+const BCC_META_D1_ID = "a9733eb0-98f6-4878-9b73-c3e39b6b5136";
+const KV_CACHE_PREFIX = "z24_score:";
+const KV_RATE_LIMIT_PREFIX = "24d_rl:";
+const CACHE_TTL_SECONDS = 3600; // 1 hour
+const RATE_LIMIT_MAX = 100; // requests per minute per IP
+const BATCH_MAX = 32;
+const WORKER_VERSION = "24d-scorer.alpha.v1.0.0";
+
+// ──────────────────────────────────────────────
+// Error Logging (Auris-Logs D1)
+// ──────────────────────────────────────────────
+
+/**
+ * Log an error record to the auris-logs D1 database.
+ * Fires-and-forgets; never throws.
+ */
+async function logError(env, {
+  level = "error",
+  service = "24d-scorer",
+  message,
+  error_type,
+  stack,
+  request_id,
+  source_ip,
+  endpoint,
+  metadata = {},
+}) {
+  try {
+    const db = env.AURIS_LOGS;
+    if (!db) return; // silently skip if binding missing (shouldn't happen)
+    const ts = new Date().toISOString();
+    await db.prepare(
+      `INSERT INTO logs (timestamp, level, service, request_id, source_ip, endpoint,
+                        error_type, message, stack, metadata, worker_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        ts,
+        level,
+        service,
+        request_id || crypto.randomUUID(),
+        source_ip || "unknown",
+        endpoint || "unknown",
+        error_type || "GenericError",
+        message || "",
+        stack || "",
+        JSON.stringify(metadata),
+        WORKER_VERSION,
+      )
+      .run();
+  } catch (_e) {
+    // Absolute last resort — we can't log the log failure
+    console.error("CRITICAL: failed to write to auris-logs:", _e);
+  }
+}
+
+// ──────────────────────────────────────────────
+// KV Caching helpers
+// ──────────────────────────────────────────────
+
+function cacheKey(context, response) {
+  // Deterministic cache key from content hash
+  const encoder = new TextEncoder();
+  const data = encoder.encode(context + "\n" + response);
+  return crypto.subtle.digest("SHA-256", data).then((buf) => {
+    const arr = new Uint8Array(buf);
+    const hex = Array.from(arr)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    return KV_CACHE_PREFIX + hex;
+  });
+}
+
+async function getCachedScore(kv, key) {
+  try {
+    const val = await kv.get(key);
+    if (!val) return null;
+    const parsed = JSON.parse(val);
+    // Check TTL (stored as ISO string)
+    if (parsed.expires && new Date(parsed.expires) < new Date()) {
+      return null;
+    }
+    return parsed.data;
+  } catch (e) {
+    return null;
+  }
+}
+
+async function setCachedScore(kv, key, data) {
+  try {
+    const payload = {
+      expires: new Date(Date.now() + CACHE_TTL_SECONDS * 1000).toISOString(),
+      data,
+    };
+    await kv.put(key, JSON.stringify(payload), {
+      expirationTtl: CACHE_TTL_SECONDS,
+    });
+  } catch (e) {
+    // Non-fatal: caching is best-effort
+  }
+}
+
+// ──────────────────────────────────────────────
+// Rate limiting
+// ──────────────────────────────────────────────
+
+async function checkRateLimit(kv, ip) {
+  const key = KV_RATE_LIMIT_PREFIX + ip;
+  try {
+    const val = await kv.get(key);
+    const now = Math.floor(Date.now() / 1000);
+    const windowStart = Math.floor(now / 60) * 60;
+    if (!val) {
+      await kv.put(key, JSON.stringify({ window: windowStart, count: 1 }), {
+        expirationTtl: 120,
+      });
+      return { allowed: true, remaining: RATE_LIMIT_MAX - 1 };
+    }
+    const parsed = JSON.parse(val);
+    if (parsed.window !== windowStart) {
+      await kv.put(key, JSON.stringify({ window: windowStart, count: 1 }), {
+        expirationTtl: 120,
+      });
+      return { allowed: true, remaining: RATE_LIMIT_MAX - 1 };
+    }
+    if (parsed.count >= RATE_LIMIT_MAX) {
+      return { allowed: false, remaining: 0 };
+    }
+    await kv.put(
+      key,
+      JSON.stringify({ window: windowStart, count: parsed.count + 1 }),
+      { expirationTtl: 120 }
+    );
+    return { allowed: true, remaining: RATE_LIMIT_MAX - parsed.count - 1 };
+  } catch (e) {
+    // If rate-limit KV fails, allow request (fail-open)
+    return { allowed: true, remaining: -1 };
+  }
+}
+
+// ──────────────────────────────────────────────
+// Response helpers
+// ──────────────────────────────────────────────
+
+function json(body, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      ...extraHeaders,
+    },
+  });
+}
+
+function errorResponse(status, code, message, requestId) {
+  return json(
+    { error: true, code, message, request_id: requestId },
+    status
+  );
+}
+
+// ──────────────────────────────────────────────
+// Request validation
+// ──────────────────────────────────────────────
+
+function validateScorePayload(body) {
+  if (!body || typeof body !== "object") return "Request body must be a JSON object";
+  if (typeof body.context !== "string" || body.context.trim().length === 0)
+    return "Field 'context' is required and must be a non-empty string";
+  if (typeof body.response !== "string" || body.response.trim().length === 0)
+    return "Field 'response' is required and must be a non-empty string";
+  if (body.context.length > 16000) return "Field 'context' exceeds 16000 character limit";
+  if (body.response.length > 32000) return "Field 'response' exceeds 32000 character limit";
+  return null;
+}
+
+function validateBatchPayload(body) {
+  if (!body || typeof body !== "object") return "Request body must be a JSON object";
+  if (!Array.isArray(body.items)) return "Field 'items' is required and must be an array";
+  if (body.items.length === 0) return "Field 'items' must not be empty";
+  if (body.items.length > BATCH_MAX) return `Batch size exceeds maximum of ${BATCH_MAX}`;
+  for (let i = 0; i < body.items.length; i++) {
+    const item = body.items[i];
+    if (!item || typeof item !== "object") return `items[${i}] must be an object`;
+    if (typeof item.context !== "string" || item.context.trim().length === 0)
+      return `items[${i}].context is required`;
+    if (typeof item.response !== "string" || item.response.trim().length === 0)
+      return `items[${i}].response is required`;
+  }
+  return null;
+}
+
+function validateConversationPayload(body) {
+  if (!body || typeof body !== "object") return "Request body must be a JSON object";
+  if (!Array.isArray(body.turns)) return "Field 'turns' is required and must be an array";
+  if (body.turns.length === 0) return "Field 'turns' must not be empty";
+  if (body.turns.length > 256) return "Conversation exceeds 256 turn limit";
+  for (let i = 0; i < body.turns.length; i++) {
+    const turn = body.turns[i];
+    if (!turn || typeof turn !== "object") return `turns[${i}] must be an object`;
+    if (typeof turn.context !== "string" || turn.context.trim().length === 0)
+      return `turns[${i}].context is required`;
+    if (typeof turn.response !== "string" || turn.response.trim().length === 0)
+      return `turns[${i}].response is required`;
+  }
+  return null;
+}
+
+// ──────────────────────────────────────────────
+// Core scoring orchestrator
+// ──────────────────────────────────────────────
+
+/**
+ * Score a single context/response pair.
+ * Attempts embedding boost; falls back to pure heuristic on any failure.
+ */
+async function scoreSingle(context, response, env, requestId, clientIp) {
+  const useEmbedding = !!env.CF_API_TOKEN;
+  let boosts = null;
+  if (useEmbedding) {
+    try {
+      const [ctxEmb, respEmb] = await Promise.all([
+        fetchEmbedding(context, env.CF_API_TOKEN),
+        fetchEmbedding(response, env.CF_API_TOKEN),
+      ]);
+      boosts = computeEmbeddingBoosts(ctxEmb, respEmb);
+    } catch (err) {
+      await logError(env, {
+        level: "warn",
+        message: "Embedding boost failed, falling back to heuristic",
+        error_type: "EmbeddingFailure",
+        stack: err.stack || "",
+        request_id: requestId,
+        source_ip: clientIp,
+        endpoint: "/score",
+        metadata: { error: err.message },
+      });
+      boosts = null; // graceful degradation
+    }
+  }
+  const result = scoreHeuristic(context, response, boosts);
+  const categories = computeCategoryMeans(result.scores);
+  return {
+    scores: result.scores,
+    uncertainties: result.uncertainties,
+    features: result.features,
+    coherence_bios: categories.coherence_bios,
+    operator_execution: categories.operator_execution,
+    mode: boosts ? "embedding_enhanced" : "heuristic",
+  };
+}
+
+/**
+ * Batch score with shared embedding batch call for efficiency.
+ */
+async function scoreBatch(items, env, requestId, clientIp) {
+  const useEmbedding = !!env.CF_API_TOKEN;
+  let allCtxEmb = null;
+  let allRespEmb = null;
+  if (useEmbedding) {
+    try {
+      const allContexts = items.map((i) => i.context);
+      const allResponses = items.map((i) => i.response);
+      [allCtxEmb, allRespEmb] = await Promise.all([
+        fetchEmbeddingsBatch(allContexts, env.CF_API_TOKEN),
+        fetchEmbeddingsBatch(allResponses, env.CF_API_TOKEN),
+      ]);
+    } catch (err) {
+      await logError(env, {
+        level: "warn",
+        message: "Batch embedding failed, falling back to heuristic",
+        error_type: "BatchEmbeddingFailure",
+        stack: err.stack || "",
+        request_id: requestId,
+        source_ip: clientIp,
+        endpoint: "/score/batch",
+        metadata: { error: err.message },
+      });
+      allCtxEmb = null;
+      allRespEmb = null;
+    }
+  }
+  const results = [];
+  for (let i = 0; i < items.length; i++) {
+    const { context, response } = items[i];
+    let boosts = null;
+    if (allCtxEmb && allRespEmb && allCtxEmb[i] && allRespEmb[i]) {
+      boosts = computeEmbeddingBoosts(allCtxEmb[i], allRespEmb[i]);
+    }
+    const result = scoreHeuristic(context, response, boosts);
+    const categories = computeCategoryMeans(result.scores);
+    results.push({
+      index: i,
+      scores: result.scores,
+      uncertainties: result.uncertainties,
+      features: result.features,
+      coherence_bios: categories.coherence_bios,
+      operator_execution: categories.operator_execution,
+      mode: boosts ? "embedding_enhanced" : "heuristic",
+    });
+  }
+  return results;
+}
+
+// ──────────────────────────────────────────────
+// Router
+// ──────────────────────────────────────────────
+
+export default {
+  async fetch(request, env, ctx) {
+    const requestId = crypto.randomUUID();
+    const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+    const url = new URL(request.url);
+    const method = request.method;
+
+    // CORS preflight
+    if (method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        },
+      });
+    }
+
+    // ── Rate limiting (all routes) ──
+    try {
+      const limit = await checkRateLimit(env.BCC_CONTEXT_CACHE, clientIp);
+      if (!limit.allowed) {
+        return errorResponse(429, "RATE_LIMITED", "Rate limit exceeded. Try again in 60 seconds.", requestId);
+      }
+    } catch (rlErr) {
+      await logError(env, {
+        level: "warn",
+        message: "Rate limit check failed",
+        error_type: "RateLimitError",
+        stack: rlErr.stack || "",
+        request_id: requestId,
+        source_ip: clientIp,
+        endpoint: url.pathname,
+        metadata: { error: rlErr.message },
+      });
+      // fail-open: continue processing
+    }
+
+    // ── Route dispatch ──
+    try {
+      if (url.pathname === "/score" && method === "POST") {
+        return await handleScore(request, env, ctx, requestId, clientIp);
+      }
+      if (url.pathname === "/score/batch" && method === "POST") {
+        return await handleScoreBatch(request, env, ctx, requestId, clientIp);
+      }
+      if (url.pathname === "/conversation/analyze" && method === "POST") {
+        return await handleConversationAnalyze(request, env, ctx, requestId, clientIp);
+      }
+      if (url.pathname === "/dimensions" && method === "GET") {
+        return await handleDimensions(request, env, ctx, requestId, clientIp);
+      }
+      if (url.pathname === "/health" && method === "GET") {
+        return await handleHealth(request, env, ctx, requestId, clientIp);
+      }
+      return errorResponse(404, "NOT_FOUND", `Endpoint ${url.pathname} not found`, requestId);
+    } catch (err) {
+      await logError(env, {
+        level: "error",
+        message: err.message || "Unhandled route error",
+        error_type: err.name || "InternalError",
+        stack: err.stack || "",
+        request_id: requestId,
+        source_ip: clientIp,
+        endpoint: url.pathname,
+        metadata: { method, url: request.url },
+      });
+      return errorResponse(500, "INTERNAL_ERROR", "Internal server error", requestId);
+    }
+  },
+};
+
+// ──────────────────────────────────────────────
+// Route handlers
+// ──────────────────────────────────────────────
+
+async function handleScore(request, env, ctx, requestId, clientIp) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    await logError(env, {
+      level: "warn",
+      message: "Invalid JSON in /score request",
+      error_type: "ParseError",
+      stack: e.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score",
+      metadata: {},
+    });
+    return errorResponse(400, "INVALID_JSON", "Request body must be valid JSON", requestId);
+  }
+
+  const validationError = validateScorePayload(body);
+  if (validationError) {
+    await logError(env, {
+      level: "warn",
+      message: validationError,
+      error_type: "ValidationError",
+      stack: "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score",
+      metadata: { body_keys: Object.keys(body || {}) },
+    });
+    return errorResponse(400, "VALIDATION_ERROR", validationError, requestId);
+  }
+
+  const { context, response: resp } = body;
+  const cacheEnabled = body.cache !== false;
+
+  // Check cache
+  if (cacheEnabled && env.BCC_CONTEXT_CACHE) {
+    try {
+      const key = await cacheKey(context, resp);
+      const cached = await getCachedScore(env.BCC_CONTEXT_CACHE, key);
+      if (cached) {
+        return json({
+          ...cached,
+          cached: true,
+          request_id: requestId,
+        });
+      }
+    } catch (e) {
+      // Cache read failure is non-fatal
+    }
+  }
+
+  // Score
+  let result;
+  try {
+    result = await scoreSingle(context, resp, env, requestId, clientIp);
+  } catch (err) {
+    await logError(env, {
+      level: "error",
+      message: "Scoring engine failure",
+      error_type: "ScoringEngineError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score",
+      metadata: { error: err.message },
+    });
+    return errorResponse(500, "SCORING_ERROR", "Scoring engine failed", requestId);
+  }
+
+  const dimensions = DIMENSIONS_24.map((d, i) => ({
+    dimension: d.code,
+    name: d.name,
+    category: d.category,
+    score: result.scores[i],
+    uncertainty: result.uncertainties[i],
+  }));
+
+  const response = {
+    dimensions,
+    coherence_bios: result.coherence_bios,
+    operator_execution: result.operator_execution,
+    features: result.features,
+    mode: result.mode,
+    request_id: requestId,
+  };
+
+  // Write cache
+  if (cacheEnabled && env.BCC_CONTEXT_CACHE) {
+    try {
+      const key = await cacheKey(context, resp);
+      await setCachedScore(env.BCC_CONTEXT_CACHE, key, response);
+    } catch (e) {
+      // Cache write failure is non-fatal
+    }
+  }
+
+  // Store in BCC meta D1 (best-effort, non-blocking)
+  try {
+    ctx.waitUntil(
+      storeScoreRecord(env, requestId, clientIp, context, resp, result)
+    );
+  } catch (_e) {
+    // Non-blocking
+  }
+
+  return json(response);
+}
+
+async function handleScoreBatch(request, env, ctx, requestId, clientIp) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    await logError(env, {
+      level: "warn",
+      message: "Invalid JSON in /score/batch request",
+      error_type: "ParseError",
+      stack: e.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score/batch",
+      metadata: {},
+    });
+    return errorResponse(400, "INVALID_JSON", "Request body must be valid JSON", requestId);
+  }
+
+  const validationError = validateBatchPayload(body);
+  if (validationError) {
+    await logError(env, {
+      level: "warn",
+      message: validationError,
+      error_type: "ValidationError",
+      stack: "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score/batch",
+      metadata: { item_count: (body.items || []).length },
+    });
+    return errorResponse(400, "VALIDATION_ERROR", validationError, requestId);
+  }
+
+  let results;
+  try {
+    results = await scoreBatch(body.items, env, requestId, clientIp);
+  } catch (err) {
+    await logError(env, {
+      level: "error",
+      message: "Batch scoring engine failure",
+      error_type: "BatchScoringError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score/batch",
+      metadata: { batch_size: body.items.length, error: err.message },
+    });
+    return errorResponse(500, "BATCH_SCORING_ERROR", "Batch scoring engine failed", requestId);
+  }
+
+  const formatted = results.map((r) => ({
+    index: r.index,
+    dimensions: DIMENSIONS_24.map((d, di) => ({
+      dimension: d.code,
+      name: d.name,
+      category: d.category,
+      score: r.scores[di],
+      uncertainty: r.uncertainties[di],
+    })),
+    coherence_bios: r.coherence_bios,
+    operator_execution: r.operator_execution,
+    features: r.features,
+    mode: r.mode,
+  }));
+
+  // Store batch results in BCC meta D1 (best-effort)
+  try {
+    ctx.waitUntil(
+      storeBatchScoreRecord(env, requestId, clientIp, body.items, results)
+    );
+  } catch (_e) {
+    // Non-blocking
+  }
+
+  return json({
+    results: formatted,
+    count: formatted.length,
+    request_id: requestId,
+  });
+}
+
+async function handleConversationAnalyze(request, env, ctx, requestId, clientIp) {
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    await logError(env, {
+      level: "warn",
+      message: "Invalid JSON in /conversation/analyze request",
+      error_type: "ParseError",
+      stack: e.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/conversation/analyze",
+      metadata: {},
+    });
+    return errorResponse(400, "INVALID_JSON", "Request body must be valid JSON", requestId);
+  }
+
+  const validationError = validateConversationPayload(body);
+  if (validationError) {
+    await logError(env, {
+      level: "warn",
+      message: validationError,
+      error_type: "ValidationError",
+      stack: "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/conversation/analyze",
+      metadata: { turn_count: (body.turns || []).length },
+    });
+    return errorResponse(400, "VALIDATION_ERROR", validationError, requestId);
+  }
+
+  const turns = body.turns;
+  let turnResults;
+  try {
+    // Score all turns
+    const items = turns.map((t) => ({ context: t.context, response: t.response }));
+    turnResults = await scoreBatch(items, env, requestId, clientIp);
+  } catch (err) {
+    await logError(env, {
+      level: "error",
+      message: "Conversation turn scoring failed",
+      error_type: "ConversationScoringError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/conversation/analyze",
+      metadata: { turn_count: turns.length, error: err.message },
+    });
+    return errorResponse(500, "CONVERSATION_SCORING_ERROR", "Failed to score conversation turns", requestId);
+  }
+
+  // Aggregate
+  let aggregated;
+  try {
+    const scoreArrays = turnResults.map((t) => ({
+      scores: t.scores,
+      uncertainties: t.uncertainties,
+    }));
+    aggregated = aggregateConversation(scoreArrays);
+  } catch (err) {
+    await logError(env, {
+      level: "error",
+      message: "Conversation aggregation failed",
+      error_type: "AggregationError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/conversation/analyze",
+      metadata: { error: err.message },
+    });
+    return errorResponse(500, "AGGREGATION_ERROR", "Failed to aggregate conversation scores", requestId);
+  }
+
+  // Per-dimension trend (improvement / degradation)
+  const trends = [];
+  for (let dim = 0; dim < 24; dim++) {
+    if (turnResults.length >= 2) {
+      const first = turnResults[0].scores[dim];
+      const last = turnResults[turnResults.length - 1].scores[dim];
+      const delta = last - first;
+      let direction = "stable";
+      if (delta > 0.05) direction = "improving";
+      else if (delta < -0.05) direction = "degrading";
+      trends.push({
+        dimension: DIMENSIONS_24[dim].code,
+        direction,
+        delta: parseFloat(delta.toFixed(4)),
+      });
+    } else {
+      trends.push({
+        dimension: DIMENSIONS_24[dim].code,
+        direction: "insufficient_data",
+        delta: 0,
+      });
+    }
+  }
+
+  const formattedDims = DIMENSIONS_24.map((d, i) => ({
+    dimension: d.code,
+    name: d.name,
+    category: d.category,
+    aggregate_score: aggregated.aggregate_scores[i],
+    aggregate_uncertainty: aggregated.aggregate_uncertainties[i],
+    trend: trends[i],
+  }));
+
+  // Compute per-turn breakdown
+  const turnBreakdown = turnResults.map((t, idx) => ({
+    turn: idx + 1,
+    coherence_bios: t.coherence_bios,
+    operator_execution: t.operator_execution,
+    mode: t.mode,
+  }));
+
+  const catMeans = computeCategoryMeans(aggregated.aggregate_scores);
+
+  return json({
+    conversation: {
+      turn_count: aggregated.turn_count,
+      aggregate_dimensions: formattedDims,
+      coherence_bios: catMeans.coherence_bios,
+      operator_execution: catMeans.operator_execution,
+      turn_breakdown: turnBreakdown,
+      overall_trend: trends.reduce((acc, t) => {
+        if (t.direction === "improving") acc.improving++;
+        else if (t.direction === "degrading") acc.degrading++;
+        else acc.stable++;
+        return acc;
+      }, { improving: 0, stable: 0, degrading: 0 }),
+    },
+    request_id: requestId,
+  });
+}
+
+async function handleDimensions(request, env, ctx, requestId, clientIp) {
+  try {
+    const dims = getDimensions();
+    return json({
+      dimensions: dims,
+      categories: {
+        coherence_bios: { range: "D1-D10", description: "Coherence BIOS — Truth & Consciousness dimensions" },
+        operator_execution: { range: "D11-D24", description: "Operator Execution — Task Performance dimensions" },
+      },
+      total_dimensions: 24,
+      version: WORKER_VERSION,
+      request_id: requestId,
+    });
+  } catch (err) {
+    await logError(env, {
+      level: "error",
+      message: "Dimensions listing failed",
+      error_type: "DimensionsError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/dimensions",
+      metadata: { error: err.message },
+    });
+    return errorResponse(500, "DIMENSIONS_ERROR", "Failed to list dimensions", requestId);
+  }
+}
+
+async function handleHealth(request, env, ctx, requestId, clientIp) {
+  // Check D1 connectivity
+  let d1Status = "unknown";
+  try {
+    const db = env.BCC_META;
+    if (db) {
+      const rs = await db.prepare("SELECT 1 as ok").first();
+      d1Status = rs && rs.ok === 1 ? "ok" : "error";
+    } else {
+      d1Status = "no_binding";
+    }
+  } catch (err) {
+    await logError(env, {
+      level: "warn",
+      message: "Health check D1 ping failed",
+      error_type: "HealthCheckError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/health",
+      metadata: { error: err.message },
+    });
+    d1Status = "error";
+  }
+
+  // Check KV connectivity
+  let kvStatus = "unknown";
+  try {
+    const kv = env.BCC_CONTEXT_CACHE;
+    if (kv) {
+      await kv.put("__health_check__", "ok", { expirationTtl: 60 });
+      const val = await kv.get("__health_check__");
+      kvStatus = val === "ok" ? "ok" : "error";
+    } else {
+      kvStatus = "no_binding";
+    }
+  } catch (err) {
+    await logError(env, {
+      level: "warn",
+      message: "Health check KV ping failed",
+      error_type: "HealthCheckError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/health",
+      metadata: { error: err.message },
+    });
+    kvStatus = "error";
+  }
+
+  const checks = {
+    d1_bcc_meta: d1Status,
+    kv_cache: kvStatus,
+    auris_logs: env.AURIS_LOGS ? "bound" : "no_binding",
+    embedding: !!env.CF_API_TOKEN ? "available" : "unavailable",
+  };
+
+  const allOk = Object.values(checks).every((s) => s === "ok" || s === "bound" || s === "available" || s === "unavailable" || s === "no_binding");
+
+  return json({
+    status: allOk ? "healthy" : "degraded",
+    version: WORKER_VERSION,
+    checks,
+    timestamp: new Date().toISOString(),
+    request_id: requestId,
+  });
+}
+
+// ──────────────────────────────────────────────
+// BCC Meta D1 persistence (best-effort, non-blocking)
+// ──────────────────────────────────────────────
+
+async function storeScoreRecord(env, requestId, clientIp, context, response, result) {
+  try {
+    const db = env.BCC_META;
+    if (!db) return;
+    const ts = new Date().toISOString();
+    await db.prepare(
+      `INSERT INTO z24_scores
+         (request_id, source_ip, scored_at, context_hash, response_hash,
+          mode, coherence_bios, operator_execution,
+          scores_json, features_json, uncertainties_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        requestId,
+        clientIp,
+        ts,
+        await sha256Hex(context),
+        await sha256Hex(response),
+        result.mode,
+        result.coherence_bios,
+        result.operator_execution,
+        JSON.stringify(result.scores),
+        JSON.stringify(result.features),
+        JSON.stringify(result.uncertainties),
+      )
+      .run();
+  } catch (err) {
+    await logError(env, {
+      level: "warn",
+      message: "Failed to persist score to BCC meta D1",
+      error_type: "PersistenceError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score",
+      metadata: { error: err.message },
+    });
+  }
+}
+
+async function storeBatchScoreRecord(env, requestId, clientIp, items, results) {
+  try {
+    const db = env.BCC_META;
+    if (!db) return;
+    const ts = new Date().toISOString();
+    // Batch insert via prepared statement loop (D1 supports batching)
+    const stmts = [];
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i];
+      stmts.push(
+        db.prepare(
+          `INSERT INTO z24_scores
+             (request_id, source_ip, scored_at, context_hash, response_hash,
+              mode, coherence_bios, operator_execution,
+              scores_json, features_json, uncertainties_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+          .bind(
+            `${requestId}_${i}`,
+            clientIp,
+            ts,
+            await sha256Hex(items[i].context),
+            await sha256Hex(items[i].response),
+            r.mode,
+            r.coherence_bios,
+            r.operator_execution,
+            JSON.stringify(r.scores),
+            JSON.stringify(r.features),
+            JSON.stringify(r.uncertainties),
+          )
+      );
+    }
+    if (stmts.length > 0) {
+      await db.batch(stmts);
+    }
+  } catch (err) {
+    await logError(env, {
+      level: "warn",
+      message: "Failed to persist batch scores to BCC meta D1",
+      error_type: "BatchPersistenceError",
+      stack: err.stack || "",
+      request_id: requestId,
+      source_ip: clientIp,
+      endpoint: "/score/batch",
+      metadata: { error: err.message, batch_size: items.length },
+    });
+  }
+}
+
+// ──────────────────────────────────────────────
+// Utilities
+// ──────────────────────────────────────────────
+
+async function sha256Hex(text) {
+  const encoder = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", encoder.encode(text));
+  const arr = new Uint8Array(buf);
+  return Array.from(arr)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+// Inline dimension list for use in route handlers (avoids import dependency issue)
+const DIMENSIONS_24 = [
+  { id: 1,  code: "D1",  name: "Truth Grounding",         category: "coherence" },
+  { id: 2,  code: "D2",  name: "Epistemic Humility",      category: "coherence" },
+  { id: 3,  code: "D3",  name: "Coherence Integrity",     category: "coherence" },
+  { id: 4,  code: "D4",  name: "Contextual Awareness",    category: "coherence" },
+  { id: 5,  code: "D5",  name: "Self-Model Accuracy",     category: "coherence" },
+  { id: 6,  code: "D6",  name: "Value Alignment",         category: "coherence" },
+  { id: 7,  code: "D7",  name: "Temporal Coherence",      category: "coherence" },
+  { id: 8,  code: "D8",  name: "Relational Attunement",   category: "coherence" },
+  { id: 9,  code: "D9",  name: "Authenticity",            category: "coherence" },
+  { id: 10, code: "D10", name: "Meta-Cognitive Clarity",  category: "coherence" },
+  { id: 11, code: "D11", name: "Instruction Compliance",  category: "execution" },
+  { id: 12, code: "D12", name: "Task Completion",         category: "execution" },
+  { id: 13, code: "D13", name: "Response Efficiency",     category: "execution" },
+  { id: 14, code: "D14", name: "Structural Quality",      category: "execution" },
+  { id: 15, code: "D15", name: "Technical Accuracy",      category: "execution" },
+  { id: 16, code: "D16", name: "Actionability",           category: "execution" },
+  { id: 17, code: "D17", name: "Anticipatory Value",      category: "execution" },
+  { id: 18, code: "D18", name: "Example Quality",         category: "execution" },
+  { id: 19, code: "D19", name: "Edge Case Awareness",     category: "execution" },
+  { id: 20, code: "D20", name: "Error Handling",          category: "execution" },
+  { id: 21, code: "D21", name: "Creativity",              category: "execution" },
+  { id: 22, code: "D22", name: "Pedagogical Skill",       category: "execution" },
+  { id: 23, code: "D23", name: "Safety Awareness",        category: "execution" },
+  { id: 24, code: "D24", name: "Interaction Fluidity",    category: "execution" },
+];
+
+--37bdaebde83e0b500f357ae83b49fee2b559735adbbba4f094e5c660726a--

@@ -1,0 +1,354 @@
+--f3fb9537a80c6693ed971afd8ab8729509339126933ab26197e216ff6f07
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.js
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Max-Age": "86400",
+  "Content-Type": "application/json"
+};
+function logError(context, error) {
+  const err = error instanceof Error ? error : new Error(String(error));
+  console.error(`[DASHBOARD ERROR] ${context}: ${err.message}
+${err.stack || ""}`);
+}
+__name(logError, "logError");
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: CORS_HEADERS
+  });
+}
+__name(jsonResponse, "jsonResponse");
+function errorResponse(message, status = 500, details) {
+  const body = { success: false, error: message };
+  if (details !== void 0) {
+    body.details = details;
+  }
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: CORS_HEADERS
+  });
+}
+__name(errorResponse, "errorResponse");
+var MODULE_EBPF = "network_av_ebpf";
+var MODULE_ROOTKIT = "network_av_rootkit";
+var MODULE_ORCHESTRATOR = "network_av_orchestrator";
+var MODULE_UNIFIED = "network_av_unified";
+var DEFAULT_LIMIT = 100;
+var MAX_LIMIT = 1e3;
+function parseLimit(url) {
+  const raw = url.searchParams.get("limit");
+  if (!raw) return DEFAULT_LIMIT;
+  const n = parseInt(raw, 10);
+  if (isNaN(n) || n < 1) return DEFAULT_LIMIT;
+  return Math.min(n, MAX_LIMIT);
+}
+__name(parseLimit, "parseLimit");
+function parseHours(url) {
+  const raw = url.searchParams.get("hours");
+  if (!raw) return 24;
+  const n = parseInt(raw, 10);
+  return isNaN(n) || n < 1 ? 24 : n;
+}
+__name(parseHours, "parseHours");
+async function handleDetections(request, env) {
+  const url = new URL(request.url);
+  const limit = parseLimit(url);
+  const hours = parseHours(url);
+  const sinceMs = Date.now() - hours * 60 * 60 * 1e3;
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `SELECT id, module, severity, message, stack, timestamp
+       FROM error_log
+       WHERE timestamp >= ?
+         AND module IN (?, ?, ?, ?)
+       ORDER BY timestamp DESC
+       LIMIT ?`
+    ).bind(sinceMs, MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED, limit);
+    const { results } = await stmt.all();
+    const parsed = (results || []).map((row) => {
+      let parsedMessage = row.message;
+      try {
+        parsedMessage = JSON.parse(row.message);
+      } catch {
+      }
+      return {
+        ...row,
+        message: parsedMessage,
+        timestamp_iso: new Date(row.timestamp).toISOString()
+      };
+    });
+    return jsonResponse({
+      success: true,
+      meta: { limit, hours, since: new Date(sinceMs).toISOString() },
+      count: parsed.length,
+      detections: parsed
+    });
+  } catch (error) {
+    logError("handleDetections query failed", error);
+    return errorResponse("Database query failed", 500, {
+      context: "handleDetections",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+__name(handleDetections, "handleDetections");
+async function handleEbpfDetections(request, env) {
+  const url = new URL(request.url);
+  const limit = parseLimit(url);
+  const hours = parseHours(url);
+  const sinceMs = Date.now() - hours * 60 * 60 * 1e3;
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `SELECT id, module, severity, message, stack, timestamp
+       FROM error_log
+       WHERE timestamp >= ?
+         AND module = ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
+    ).bind(sinceMs, MODULE_EBPF, limit);
+    const { results } = await stmt.all();
+    const parsed = (results || []).map((row) => {
+      let parsedMessage = row.message;
+      try {
+        parsedMessage = JSON.parse(row.message);
+      } catch {
+      }
+      return {
+        ...row,
+        message: parsedMessage,
+        timestamp_iso: new Date(row.timestamp).toISOString()
+      };
+    });
+    return jsonResponse({
+      success: true,
+      meta: { limit, hours, module: MODULE_EBPF },
+      count: parsed.length,
+      detections: parsed
+    });
+  } catch (error) {
+    logError("handleEbpfDetections query failed", error);
+    return errorResponse("Database query failed", 500, {
+      context: "handleEbpfDetections",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+__name(handleEbpfDetections, "handleEbpfDetections");
+async function handleRootkitDetections(request, env) {
+  const url = new URL(request.url);
+  const limit = parseLimit(url);
+  const hours = parseHours(url);
+  const sinceMs = Date.now() - hours * 60 * 60 * 1e3;
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `SELECT id, module, severity, message, stack, timestamp
+       FROM error_log
+       WHERE timestamp >= ?
+         AND module = ?
+       ORDER BY timestamp DESC
+       LIMIT ?`
+    ).bind(sinceMs, MODULE_ROOTKIT, limit);
+    const { results } = await stmt.all();
+    const parsed = (results || []).map((row) => {
+      let parsedMessage = row.message;
+      try {
+        parsedMessage = JSON.parse(row.message);
+      } catch {
+      }
+      return {
+        ...row,
+        message: parsedMessage,
+        timestamp_iso: new Date(row.timestamp).toISOString()
+      };
+    });
+    return jsonResponse({
+      success: true,
+      meta: { limit, hours, module: MODULE_ROOTKIT },
+      count: parsed.length,
+      detections: parsed
+    });
+  } catch (error) {
+    logError("handleRootkitDetections query failed", error);
+    return errorResponse("Database query failed", 500, {
+      context: "handleRootkitDetections",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+__name(handleRootkitDetections, "handleRootkitDetections");
+async function handleSummary(_request, env) {
+  try {
+    const totalStmt = env.AURIS_LOGS.prepare(
+      `SELECT COUNT(*) as total FROM error_log
+       WHERE module IN (?, ?, ?, ?)`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED);
+    const totalResult = await totalStmt.first();
+    const totalFindings = totalResult?.total ?? 0;
+    const sevStmt = env.AURIS_LOGS.prepare(
+      `SELECT severity, COUNT(*) as count
+       FROM error_log
+       WHERE module IN (?, ?, ?, ?)
+       GROUP BY severity
+       ORDER BY count DESC`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED);
+    const sevResults = await sevStmt.all();
+    const bySeverity = {};
+    for (const row of sevResults.results || []) {
+      bySeverity[row.severity] = row.count;
+    }
+    const modStmt = env.AURIS_LOGS.prepare(
+      `SELECT module, COUNT(*) as count
+       FROM error_log
+       WHERE module IN (?, ?, ?, ?)
+       GROUP BY module
+       ORDER BY count DESC`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED);
+    const modResults = await modStmt.all();
+    const byModule = {};
+    for (const row of modResults.results || []) {
+      byModule[row.module] = row.count;
+    }
+    const dayAgoMs = Date.now() - 24 * 60 * 60 * 1e3;
+    const hourStmt = env.AURIS_LOGS.prepare(
+      `SELECT
+         CAST(timestamp / 3600000 as INTEGER) * 3600000 as hour_bucket,
+         COUNT(*) as count
+       FROM error_log
+       WHERE module IN (?, ?, ?, ?)
+         AND timestamp >= ?
+       GROUP BY hour_bucket
+       ORDER BY hour_bucket DESC`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED, dayAgoMs);
+    const hourResults = await hourStmt.all();
+    const byHour = {};
+    for (const row of hourResults.results || []) {
+      const isoHour = new Date(row.hour_bucket).toISOString().slice(0, 13) + ":00:00Z";
+      byHour[isoHour] = row.count;
+    }
+    const recentStmt = env.AURIS_LOGS.prepare(
+      `SELECT message FROM error_log
+       WHERE module IN (?, ?, ?)
+         AND timestamp >= ?
+       ORDER BY timestamp DESC
+       LIMIT 500`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_UNIFIED, dayAgoMs);
+    const recentResults = await recentStmt.all();
+    const byCategory = {};
+    for (const row of recentResults.results || []) {
+      try {
+        const parsed = JSON.parse(row.message);
+        const cat = parsed.category || parsed.type || "unknown";
+        if (typeof cat === "string") {
+          byCategory[cat] = (byCategory[cat] || 0) + 1;
+        }
+      } catch {
+        byCategory["unparsed"] = (byCategory["unparsed"] || 0) + 1;
+      }
+    }
+    const criticalStmt = env.AURIS_LOGS.prepare(
+      `SELECT id, module, severity, message, stack, timestamp
+       FROM error_log
+       WHERE module IN (?, ?, ?, ?)
+         AND severity IN ('CRITICAL', 'ERROR')
+       ORDER BY timestamp DESC
+       LIMIT 10`
+    ).bind(MODULE_EBPF, MODULE_ROOTKIT, MODULE_ORCHESTRATOR, MODULE_UNIFIED);
+    const criticalResults = await criticalStmt.all();
+    const recentCritical = (criticalResults.results || []).map((row) => {
+      let parsedMessage = row.message;
+      try {
+        parsedMessage = JSON.parse(row.message);
+      } catch {
+      }
+      return {
+        id: row.id,
+        module: row.module,
+        severity: row.severity,
+        message: parsedMessage,
+        timestamp: row.timestamp,
+        timestamp_iso: new Date(row.timestamp).toISOString()
+      };
+    });
+    const stats = {
+      total_findings: totalFindings,
+      by_severity: bySeverity,
+      by_module: byModule,
+      by_category: byCategory,
+      by_hour: byHour,
+      recent_critical: recentCritical
+    };
+    return jsonResponse({
+      success: true,
+      meta: { generated_at: (/* @__PURE__ */ new Date()).toISOString() },
+      summary: stats
+    });
+  } catch (error) {
+    logError("handleSummary query failed", error);
+    return errorResponse("Database query failed", 500, {
+      context: "handleSummary",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+__name(handleSummary, "handleSummary");
+var index_default = {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    if (request.method !== "GET") {
+      return errorResponse("Method not allowed", 405);
+    }
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    try {
+      if (pathname === "/detections" || pathname === "/detections/") {
+        return await handleDetections(request, env);
+      }
+      if (pathname === "/detections/ebpf" || pathname === "/detections/ebpf/") {
+        return await handleEbpfDetections(request, env);
+      }
+      if (pathname === "/detections/rootkit" || pathname === "/detections/rootkit/") {
+        return await handleRootkitDetections(request, env);
+      }
+      if (pathname === "/summary" || pathname === "/summary/") {
+        return await handleSummary(request, env);
+      }
+      if (pathname === "/" || pathname === "/health") {
+        return jsonResponse({
+          success: true,
+          service: "quantum-defense-dashboard",
+          version: "2.0.0",
+          endpoints: {
+            detections: "/detections?limit=100&hours=24",
+            ebpf: "/detections/ebpf?limit=100&hours=24",
+            rootkit: "/detections/rootkit?limit=100&hours=24",
+            summary: "/summary"
+          },
+          d1_binding: "AURIS_LOGS",
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+      return errorResponse("Not found", 404, { path: pathname });
+    } catch (error) {
+      logError(`Unhandled error for ${pathname}`, error);
+      return errorResponse("Internal server error", 500, {
+        path: pathname,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--f3fb9537a80c6693ed971afd8ab8729509339126933ab26197e216ff6f07--

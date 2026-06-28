@@ -1,0 +1,311 @@
+--003470fb79b52dfb8e6f0320f04fb03feb75fc3e94f3318303a73ba39ee6
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.js
+var BLOCKED_PATHS = ["/api/event_logging", "/api/eval/", "/telemetry", "/analytics"];
+var BLOCKED_DOMAINS = ["datadoghq.com", "segment.io", "mixpanel.com", "amplitude.com"];
+var API_PATH_PATTERNS = ["/v1/chat/completions", "/v1/completions", "/v1/messages"];
+var RATE_LIMIT_KEYS = ["ratelimit", "retry", "overage"];
+function nowIso() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+__name(nowIso, "nowIso");
+function normalizeModel(modelStr) {
+  if (!modelStr) return null;
+  return modelStr.replace(/-\d{8}$/, "").toLowerCase();
+}
+__name(normalizeModel, "normalizeModel");
+function isApiCall(path) {
+  return API_PATH_PATTERNS.some((p) => path.includes(p));
+}
+__name(isApiCall, "isApiCall");
+function isBlockedDomain(host) {
+  for (const domain of BLOCKED_DOMAINS) {
+    if (host.includes(domain)) {
+      return { blocked: true, reason: `matched domain: ${domain}` };
+    }
+  }
+  return { blocked: false };
+}
+__name(isBlockedDomain, "isBlockedDomain");
+function isBlockedPath(path) {
+  for (const bp of BLOCKED_PATHS) {
+    if (path.includes(bp)) {
+      return { blocked: true, reason: `matched path: ${bp}` };
+    }
+  }
+  return { blocked: false };
+}
+__name(isBlockedPath, "isBlockedPath");
+function extractRateLimitHeaders(headers) {
+  const rl = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (RATE_LIMIT_KEYS.some((k) => lower.includes(k))) {
+      rl[key] = value;
+    }
+  }
+  return rl;
+}
+__name(extractRateLimitHeaders, "extractRateLimitHeaders");
+function detectModelSwap(requested, returned) {
+  const reqNorm = normalizeModel(requested);
+  const retNorm = normalizeModel(returned);
+  return {
+    swapped: reqNorm !== retNorm,
+    requestedNormalized: reqNorm,
+    returnedNormalized: retNorm,
+    requested,
+    returned
+  };
+}
+__name(detectModelSwap, "detectModelSwap");
+function extractModelFromSSE(chunks) {
+  for (const chunk of chunks) {
+    const chunkStr = typeof chunk === "string" ? chunk : JSON.stringify(chunk);
+    const modelMatch = chunkStr.match(/"model"\s*:\s*"([^"]+)"/);
+    if (modelMatch) {
+      return modelMatch[1];
+    }
+    if (chunkStr.includes("message_start")) {
+      try {
+        const lines = chunkStr.split("\n");
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            const data = line.slice(6);
+            const parsed = JSON.parse(data);
+            if (parsed.type === "message_start" && parsed.message?.model) {
+              return parsed.message.model;
+            }
+          }
+        }
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+__name(extractModelFromSSE, "extractModelFromSSE");
+async function logToD1(db, module, severity, message, meta = {}) {
+  try {
+    await db.prepare("INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)").bind(module, severity, message, JSON.stringify(meta), Date.now()).run();
+  } catch {
+  }
+}
+__name(logToD1, "logToD1");
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Content-Type": "application/json"
+};
+var index_default = {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const method = request.method;
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    if (url.pathname === "/health" && method === "GET") {
+      return new Response(JSON.stringify({ status: "ok", platform: "kimi", timestamp: nowIso() }), {
+        status: 200,
+        headers: CORS_HEADERS
+      });
+    }
+    if (url.pathname === "/analyze" && method === "POST") {
+      try {
+        const payload = await request.json();
+        const headers = payload.headers || {};
+        const body = payload.body || {};
+        const platform = payload.platform || "kimi";
+        const path = payload.path || "";
+        const isStream = payload.is_stream || false;
+        const contentLength = payload.content_length || 0;
+        const sseChunks = payload.sse_chunks || [];
+        const requestedModel = payload.request_model || body.model || "unknown";
+        const returnedModel = payload.response_model || "unknown";
+        const results = {
+          platform,
+          timestamp: nowIso(),
+          analysis: {},
+          findings: [],
+          blocked: false,
+          modelSwap: null,
+          rateLimitHeaders: null,
+          isApiCall: isApiCall(path),
+          isStream,
+          models: {
+            requestedModel,
+            returnedModel
+          }
+        };
+        const host = headers.host || headers.Host || "";
+        const domainBlock = isBlockedDomain(host);
+        const pathBlock = isBlockedPath(path);
+        if (domainBlock.blocked) {
+          results.blocked = true;
+          results.findings.push({
+            type: "BLOCKED_DOMAIN",
+            severity: "HIGH",
+            details: domainBlock.reason,
+            host
+          });
+        }
+        if (pathBlock.blocked) {
+          results.blocked = true;
+          results.findings.push({
+            type: "BLOCKED_PATH",
+            severity: "HIGH",
+            details: pathBlock.reason,
+            path
+          });
+        }
+        if (isApiCall(path)) {
+          results.analysis.isInferenceCall = true;
+          results.findings.push({
+            type: "API_CALL",
+            severity: "INFO",
+            details: `Kimi API call: ${path}`,
+            requestedModel,
+            contentLength
+          });
+          if (requestedModel !== "unknown" && returnedModel !== "unknown") {
+            const swapResult = detectModelSwap(requestedModel, returnedModel);
+            results.modelSwap = swapResult;
+            if (swapResult.swapped) {
+              results.findings.push({
+                type: "MODEL_SWAP",
+                severity: "CRITICAL",
+                details: `Requested ${swapResult.requested} but got ${swapResult.returned}`,
+                swapResult
+              });
+            }
+          }
+          const usage = body.usage;
+          if (usage) {
+            results.findings.push({
+              type: "USAGE",
+              severity: "INFO",
+              details: "Usage data present in response",
+              usage
+            });
+          }
+          if (isStream) {
+            results.findings.push({
+              type: "STREAMING_RESPONSE",
+              severity: "INFO",
+              details: "Streaming response detected"
+            });
+            if (sseChunks.length > 0) {
+              const sseModel = extractModelFromSSE(sseChunks);
+              if (sseModel) {
+                results.findings.push({
+                  type: "SSE_MODEL_DETECTED",
+                  severity: "INFO",
+                  details: `Model extracted from SSE stream: ${sseModel}`,
+                  sseModel
+                });
+                const swapResult = detectModelSwap(requestedModel, sseModel);
+                if (swapResult.swapped) {
+                  results.modelSwap = swapResult;
+                  results.findings.push({
+                    type: "MODEL_SWAP_SSE",
+                    severity: "CRITICAL",
+                    details: `SSE stream returned model ${sseModel} differs from requested ${requestedModel}`,
+                    swapResult
+                  });
+                }
+              }
+              const eventCounts = {};
+              for (const chunk of sseChunks) {
+                const chunkStr = typeof chunk === "string" ? chunk : JSON.stringify(chunk);
+                const eventMatch = chunkStr.match(/"type"\s*:\s*"([^"]+)"/);
+                if (eventMatch) {
+                  eventCounts[eventMatch[1]] = (eventCounts[eventMatch[1]] || 0) + 1;
+                }
+              }
+              if (Object.keys(eventCounts).length > 0) {
+                results.findings.push({
+                  type: "SSE_EVENT_COUNTS",
+                  severity: "INFO",
+                  details: `SSE event breakdown: ${JSON.stringify(eventCounts)}`,
+                  eventCounts
+                });
+              }
+            }
+            if (body.model && typeof body.model === "string" && body.model !== requestedModel) {
+              const swapResult = detectModelSwap(requestedModel, body.model);
+              if (swapResult.swapped) {
+                results.modelSwap = swapResult;
+                results.findings.push({
+                  type: "MODEL_SWAP_BODY",
+                  severity: "CRITICAL",
+                  details: `Response body model ${body.model} differs from requested ${requestedModel}`,
+                  swapResult
+                });
+              }
+            }
+          }
+          const choices = body.choices;
+          if (choices && choices.length > 0) {
+            results.findings.push({
+              type: "CHOICES_PRESENT",
+              severity: "INFO",
+              details: `${choices.length} choice(s) in response`,
+              count: choices.length
+            });
+          }
+        }
+        const rlHeaders = extractRateLimitHeaders(headers);
+        results.rateLimitHeaders = rlHeaders;
+        if (Object.keys(rlHeaders).length > 0) {
+          results.findings.push({
+            type: "RATE_LIMIT",
+            severity: "INFO",
+            details: `Rate limit headers present: ${Object.keys(rlHeaders).join(", ")}`,
+            headers: rlHeaders
+          });
+        }
+        await logToD1(env.AURIS_LOGS, "kimi-analyze", results.findings.length > 0 ? "WARN" : "INFO", "Kimi analysis complete", {
+          platform,
+          requestedModel,
+          returnedModel,
+          findingsCount: results.findings.length,
+          blocked: results.blocked,
+          modelSwapped: results.modelSwap?.swapped || false,
+          rateLimitPresent: Object.keys(rlHeaders).length > 0,
+          isApiCall: isApiCall(path),
+          isStream
+        });
+        try {
+          const key = `network_av:kimi_analysis:${Date.now()}`;
+          await env.BCC_CACHE.put(key, JSON.stringify(results), { expirationTtl: 86400 });
+        } catch (e) {
+          await logToD1(env.AURIS_LOGS, "kimi-analyze", "ERROR", `KV store failed: ${e.message}`, {});
+        }
+        return new Response(JSON.stringify(results), { status: 200, headers: CORS_HEADERS });
+      } catch (e) {
+        await env.AURIS_LOGS.prepare(
+          "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+        ).bind("kimi-analyze", "ERROR", e.message, e.stack || "", Date.now()).run();
+        return new Response(
+          JSON.stringify({ error: "Analysis failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    return new Response(
+      JSON.stringify({ error: "Not found", path: url.pathname, valid: ["/analyze", "/health"] }),
+      { status: 404, headers: CORS_HEADERS }
+    );
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--003470fb79b52dfb8e6f0320f04fb03feb75fc3e94f3318303a73ba39ee6--

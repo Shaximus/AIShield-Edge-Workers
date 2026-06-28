@@ -1,0 +1,807 @@
+--b3a35ac5f0db309238f3ea571c929250523348f878ef1f74101e1eeb63ee
+Content-Disposition: form-data; name="stripe.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/logger.ts
+var Logger = class {
+  static {
+    __name(this, "Logger");
+  }
+  source;
+  env;
+  constructor(options) {
+    this.source = options.source;
+    this.env = options.env;
+  }
+  /**
+   * Internal log method — writes to console AND persists to D1.
+   * Sanitizes metadata to ensure no sensitive data leaks into logs.
+   */
+  async log(level, message, metadata) {
+    const entry = {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      source: this.source,
+      message,
+      metadata: metadata ? this.sanitizeMetadata(metadata) : void 0
+    };
+    const logLine = JSON.stringify(entry);
+    switch (level) {
+      case "debug":
+        console.log(logLine);
+        break;
+      case "info":
+        console.log(logLine);
+        break;
+      case "warning":
+        console.warn(logLine);
+        break;
+      case "error":
+      case "fatal":
+        console.error(logLine);
+        break;
+    }
+    try {
+      if (this.env.AURIS_LOGS) {
+        await this.env.AURIS_LOGS.prepare(
+          `INSERT INTO worker_logs (timestamp, level, source, message, metadata)
+           VALUES (?, ?, ?, ?, ?)`
+        ).bind(
+          entry.timestamp,
+          entry.level,
+          entry.source,
+          entry.message,
+          metadata ? JSON.stringify(entry.metadata) : null
+        ).run();
+      }
+    } catch (e) {
+      console.error(
+        JSON.stringify({
+          timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+          level: "error",
+          source: "logger.d1_fallback",
+          message: "Failed to write log to D1",
+          metadata: { error: e.message, originalMessage: message }
+        })
+      );
+    }
+  }
+  /**
+   * Strip any sensitive fields from metadata before logging.
+   * NEVER logs: raw license keys, payment card data, passwords, secrets.
+   */
+  sanitizeMetadata(meta) {
+    const sensitiveKeys = [
+      "license_key",
+      "raw_key",
+      "licenseKey",
+      "card",
+      "card_number",
+      "cvv",
+      "stripe_api_key",
+      "webhook_secret",
+      "jwt_signing_key",
+      "password",
+      "token",
+      "payment_method",
+      "payment_intent_client_secret"
+    ];
+    const sanitized = {};
+    for (const [key, value] of Object.entries(meta)) {
+      if (sensitiveKeys.includes(key.toLowerCase())) {
+        sanitized[key] = "[REDACTED]";
+      } else if (typeof value === "object" && value !== null) {
+        sanitized[key] = this.sanitizeMetadata(value);
+      } else {
+        sanitized[key] = value;
+      }
+    }
+    return sanitized;
+  }
+  debug(message, metadata) {
+    this.log("debug", message, metadata).catch((e) => {
+      console.error(`[stripe.Logger] FAILED: debug log D1 write error: ${e.message}`, {
+        error_type: e.constructor.name,
+        context: "Debug log persistence",
+        severity: "ERROR",
+        worker_name: "moe-stripe"
+      });
+    });
+  }
+  info(message, metadata) {
+    this.log("info", message, metadata).catch((e) => {
+      console.error(`[stripe.Logger] FAILED: info log D1 write error: ${e.message}`, {
+        error_type: e.constructor.name,
+        context: "Info log persistence",
+        severity: "ERROR",
+        worker_name: "moe-stripe"
+      });
+    });
+  }
+  warning(message, metadata) {
+    this.log("warning", message, metadata).catch((e) => {
+      console.error(`[stripe.Logger] FAILED: warning log D1 write error: ${e.message}`, {
+        error_type: e.constructor.name,
+        context: "Warning log persistence",
+        severity: "ERROR",
+        worker_name: "moe-stripe"
+      });
+    });
+  }
+  error(message, metadata) {
+    this.log("error", message, metadata).catch((e) => {
+      console.error(`[stripe.Logger] FAILED: error log D1 write error: ${e.message}`, {
+        error_type: e.constructor.name,
+        context: "Error log persistence",
+        severity: "ERROR",
+        worker_name: "moe-stripe"
+      });
+    });
+  }
+  fatal(message, metadata) {
+    this.log("fatal", message, metadata).catch((e) => {
+      console.error(`[stripe.Logger] FAILED: fatal log D1 write error: ${e.message}`, {
+        error_type: e.constructor.name,
+        context: "Fatal log persistence",
+        severity: "ERROR",
+        worker_name: "moe-stripe"
+      });
+    });
+  }
+};
+async function logAdminAction(env, action, details) {
+  const logger = new Logger({ source: "admin.audit", env });
+  try {
+    await env.AURIS_LOGS.prepare(
+      `INSERT INTO admin_audit (timestamp, action, details)
+       VALUES (?, ?, ?)`
+    ).bind((/* @__PURE__ */ new Date()).toISOString(), action, JSON.stringify(details)).run();
+    logger.debug(`[admin.audit] Recorded action=${action}`, { action });
+  } catch (e) {
+    logger.error(`[admin.audit] Failed to record action=${action}`, {
+      error: e.message,
+      action
+    });
+  }
+}
+__name(logAdminAction, "logAdminAction");
+
+// src/stripe_verify.ts
+var SIGNATURE_TOLERANCE_MS = 5 * 60 * 1e3;
+var encoder = new TextEncoder();
+async function validateStripeSignature(payload, signature, secret) {
+  const { timestamp, signatures } = parseSignatureHeader(signature);
+  const now = Date.now();
+  const eventTime = timestamp * 1e3;
+  if (Math.abs(now - eventTime) > SIGNATURE_TOLERANCE_MS) {
+    throw new Error(
+      `Stripe signature timestamp too old or too far in the future: ${timestamp}`
+    );
+  }
+  const signedPayload = `${timestamp}.${payload}`;
+  const expectedSig = await computeHmacSha256(signedPayload, secret);
+  let matched = false;
+  for (const sig of signatures) {
+    if (timingSafeEqualHex(expectedSig, sig)) {
+      matched = true;
+      break;
+    }
+  }
+  if (!matched) {
+    throw new Error("Stripe signature verification failed: no v1 signature matched");
+  }
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch (e) {
+    console.error(`[stripe_verify.validateStripeSignature] FAILED: JSON parse error: ${e.message}`, {
+      error_type: e.constructor.name,
+      stack_trace: e.stack,
+      context: "Stripe webhook payload JSON parse",
+      severity: "ERROR",
+      worker_name: "moe-stripe"
+    });
+    throw new Error(`Invalid JSON in Stripe webhook payload: ${e.message}`);
+  }
+  if (!event.type || !event.data || !event.data.object) {
+    throw new Error("Malformed Stripe event: missing type or data.object");
+  }
+  return event;
+}
+__name(validateStripeSignature, "validateStripeSignature");
+function parseSignatureHeader(signature) {
+  const parts = signature.split(",");
+  let timestamp = 0;
+  const signatures = [];
+  for (const part of parts) {
+    const trimmed = part.trim();
+    if (trimmed.startsWith("t=")) {
+      const tsStr = trimmed.slice(2);
+      timestamp = parseInt(tsStr, 10);
+      if (isNaN(timestamp) || timestamp <= 0) {
+        throw new Error(`Invalid timestamp in Stripe signature: ${tsStr}`);
+      }
+    } else if (trimmed.startsWith("v1=")) {
+      signatures.push(trimmed.slice(3));
+    }
+  }
+  if (timestamp === 0) {
+    throw new Error("Missing timestamp (t=) in Stripe signature header");
+  }
+  if (signatures.length === 0) {
+    throw new Error("Missing v1 signature in Stripe signature header");
+  }
+  return { timestamp, signatures };
+}
+__name(parseSignatureHeader, "parseSignatureHeader");
+async function computeHmacSha256(message, secret) {
+  const keyData = encoder.encode(secret);
+  const messageData = encoder.encode(message);
+  const cryptoKey = await crypto.subtle.importKey(
+    "raw",
+    keyData,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign("HMAC", cryptoKey, messageData);
+  return arrayBufferToHex(signature);
+}
+__name(computeHmacSha256, "computeHmacSha256");
+function timingSafeEqualHex(a, b) {
+  const aBuf = hexToArrayBuffer(a);
+  const bBuf = hexToArrayBuffer(b);
+  if (aBuf.byteLength !== bBuf.byteLength) {
+    return false;
+  }
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+__name(timingSafeEqualHex, "timingSafeEqualHex");
+function hexToArrayBuffer(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes.buffer;
+}
+__name(hexToArrayBuffer, "hexToArrayBuffer");
+function arrayBufferToHex(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(arrayBufferToHex, "arrayBufferToHex");
+function extractTierFromSession(session) {
+  const items = session.line_items?.data ?? [];
+  if (items.length === 0) {
+    if (session.metadata?.tier) {
+      return session.metadata.tier;
+    }
+    return "unknown";
+  }
+  const price = items[0].price;
+  if (!price) return "unknown";
+  let productName = null;
+  if (typeof price.product === "string") {
+    productName = null;
+  } else if (price.product && typeof price.product === "object") {
+    productName = price.product.name;
+  }
+  if (productName) {
+    const lower = productName.toLowerCase();
+    if (lower.includes("sovereign")) return "sovereign";
+    if (lower.includes("pro")) return "pro";
+    if (lower.includes("basic")) return "basic";
+    if (lower.includes("starter")) return "starter";
+  }
+  if (session.metadata?.tier) {
+    return session.metadata.tier;
+  }
+  return "unknown";
+}
+__name(extractTierFromSession, "extractTierFromSession");
+
+// src/license_generator.ts
+var LICENSE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+var LICENSE_ALPHABET_LENGTH = LICENSE_ALPHABET.length;
+var DEFAULT_KEY_LENGTH = 20;
+var DEFAULT_PBKDF2_ITERATIONS = 1e5;
+var PBKDF2_HASH_ALGORITHM = "SHA-256";
+var PBKDF2_KEY_LENGTH_BITS = 256;
+function generateLicenseKey(length = DEFAULT_KEY_LENGTH) {
+  if (length < 4 || length > 64) {
+    throw new Error(`License key length must be between 4 and 64, got ${length}`);
+  }
+  const randomBytes = crypto.getRandomValues(new Uint8Array(length));
+  const chars = new Array(length);
+  for (let i = 0; i < length; i++) {
+    const idx = randomBytes[i] % LICENSE_ALPHABET_LENGTH;
+    chars[i] = LICENSE_ALPHABET[idx];
+  }
+  const groupSize = 5;
+  const groups = [];
+  for (let i = 0; i < length; i += groupSize) {
+    groups.push(chars.slice(i, i + groupSize).join(""));
+  }
+  return groups.join("-");
+}
+__name(generateLicenseKey, "generateLicenseKey");
+async function hashLicenseKeyPBKDF2(key, salt, iterations = DEFAULT_PBKDF2_ITERATIONS) {
+  if (salt.length < 8) {
+    throw new Error(`Salt must be at least 8 bytes, got ${salt.length}`);
+  }
+  if (iterations < 1e4) {
+    throw new Error(
+      `PBKDF2 iterations must be at least 10,000, got ${iterations}`
+    );
+  }
+  const encoder2 = new TextEncoder();
+  const keyMaterial = encoder2.encode(key);
+  const importedKey = await crypto.subtle.importKey(
+    "raw",
+    keyMaterial,
+    { name: "PBKDF2" },
+    false,
+    ["deriveBits"]
+  );
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt,
+      iterations,
+      hash: PBKDF2_HASH_ALGORITHM
+    },
+    importedKey,
+    PBKDF2_KEY_LENGTH_BITS
+  );
+  return arrayBufferToHex2(derivedBits);
+}
+__name(hashLicenseKeyPBKDF2, "hashLicenseKeyPBKDF2");
+function generateCanary(customerId) {
+  const timestamp = Math.floor(Date.now() / 1e3);
+  const randomBytes = crypto.getRandomValues(new Uint8Array(4));
+  const randomHex = Array.from(randomBytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  const safeCustomerId = customerId.replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `canary_${safeCustomerId}_${timestamp}_${randomHex}`;
+}
+__name(generateCanary, "generateCanary");
+function generateSalt(length = 16) {
+  return crypto.getRandomValues(new Uint8Array(length));
+}
+__name(generateSalt, "generateSalt");
+function arrayBufferToHex2(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(arrayBufferToHex2, "arrayBufferToHex");
+
+// src/validate_license.ts
+var RATE_LIMIT_MAX = 5;
+var RATE_LIMIT_WINDOW_MS = 60 * 1e3;
+var LICENSE_KEY_REGEX = /^[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}-[A-HJ-NP-Z2-9]{5}$/;
+async function validateLicense(request, env) {
+  const logger = new Logger({ source: "license.validate", env });
+  logger.debug("[license.validate] ENTER");
+  const clientIp = getClientIp(request);
+  const rateLimitKey = `ratelimit:license:${clientIp}`;
+  const rateAllowed = await checkRateLimit(env, rateLimitKey, logger);
+  if (!rateAllowed) {
+    logger.warning("[license.validate] RATE_LIMITED", { clientIp });
+    return jsonResponse(
+      { valid: false, message: "Too many attempts. Please try again later." },
+      429,
+      { "Retry-After": "60" }
+    );
+  }
+  let body;
+  try {
+    body = await request.json();
+  } catch (e) {
+    logger.error("[license.validate] FAILED: JSON parse error", {
+      error_type: e.constructor.name,
+      error_message: e.message,
+      stack_trace: e.stack,
+      context: "License validation request body parse",
+      severity: "ERROR",
+      worker_name: "moe-stripe"
+    });
+    return jsonResponse({ valid: false, message: "Invalid JSON body" }, 400);
+  }
+  const { license_key } = body;
+  if (!license_key || typeof license_key !== "string") {
+    logger.warning("[license.validate] MISSING_KEY");
+    return jsonResponse(
+      { valid: false, message: "License key is required" },
+      400
+    );
+  }
+  const normalizedKey = license_key.toUpperCase().replace(/\s/g, "");
+  if (!LICENSE_KEY_REGEX.test(normalizedKey)) {
+    logger.warning("[license.validate] INVALID_FORMAT", {
+      keyPrefix: normalizedKey.slice(0, 4) + "..."
+    });
+    await logValidationAttempt(env, normalizedKey, false, "invalid_format");
+    return jsonResponse(
+      { valid: false, message: "Invalid license key format" },
+      400
+    );
+  }
+  logger.debug("[license.validate] CALLING D1 license_registry lookup");
+  let rows;
+  try {
+    const result = await env.AURIS_LOGS.prepare(
+      `SELECT id, license_key_hash, salt, tier, status,
+              customer_email, canary_watermark, stripe_session_id,
+              created_at, expires_at, pbkdf2_iterations
+       FROM license_registry
+       WHERE status = 'active'`
+    ).all();
+    rows = result.results ?? [];
+  } catch (e) {
+    logger.error("[license.validate] D1_LOOKUP_ERROR", {
+      error: e.message
+    });
+    return jsonResponse(
+      { valid: false, message: "Internal server error" },
+      500
+    );
+  }
+  let matchedRow = null;
+  for (const row of rows) {
+    const salt = hexToUint8Array(row.salt);
+    const iterations = row.pbkdf2_iterations ?? 1e5;
+    const computedHash = await hashLicenseKeyPBKDF2(
+      normalizedKey,
+      salt,
+      iterations
+    );
+    if (timingSafeEqualHex2(computedHash, row.license_key_hash)) {
+      matchedRow = row;
+      break;
+    }
+  }
+  if (!matchedRow) {
+    logger.warning("[license.validate] KEY_NOT_FOUND", {
+      keyPrefix: normalizedKey.slice(0, 4) + "..."
+    });
+    await logValidationAttempt(env, normalizedKey, false, "key_not_found");
+    return jsonResponse(
+      { valid: false, message: "License key not found or inactive" },
+      403
+    );
+  }
+  if (matchedRow.expires_at) {
+    const expiry = new Date(matchedRow.expires_at);
+    if (expiry.getTime() < Date.now()) {
+      logger.info("[license.validate] LICENSE_EXPIRED", {
+        tier: matchedRow.tier,
+        expiredAt: matchedRow.expires_at
+      });
+      await logValidationAttempt(env, normalizedKey, false, "expired", {
+        tier: matchedRow.tier
+      });
+      return jsonResponse(
+        { valid: false, message: "License has expired", tier: matchedRow.tier },
+        403
+      );
+    }
+  }
+  logger.debug("[license.validate] EXIT valid=true", {
+    tier: matchedRow.tier
+  });
+  await logValidationAttempt(env, normalizedKey, true, "success", {
+    tier: matchedRow.tier,
+    licenseId: matchedRow.id
+  });
+  const features = getTierFeatures(matchedRow.tier);
+  const response = {
+    valid: true,
+    tier: matchedRow.tier,
+    status: matchedRow.status,
+    features,
+    expires_at: matchedRow.expires_at,
+    canary_watermark: matchedRow.canary_watermark
+  };
+  return jsonResponse(response, 200);
+}
+__name(validateLicense, "validateLicense");
+async function checkRateLimit(env, key, logger) {
+  try {
+    const now = Date.now();
+    const existing = await env.RATE_LIMIT_KV.getWithMetadata(key);
+    if (!existing.value) {
+      await env.RATE_LIMIT_KV.put(key, JSON.stringify({ count: 1, windowStart: now }), {
+        expirationTtl: 60
+      });
+      return true;
+    }
+    const data = existing.value;
+    if (now - data.windowStart > RATE_LIMIT_WINDOW_MS) {
+      await env.RATE_LIMIT_KV.put(key, JSON.stringify({ count: 1, windowStart: now }), {
+        expirationTtl: 60
+      });
+      return true;
+    }
+    if (data.count >= RATE_LIMIT_MAX) {
+      return false;
+    }
+    await env.RATE_LIMIT_KV.put(
+      key,
+      JSON.stringify({ count: data.count + 1, windowStart: data.windowStart }),
+      { expirationTtl: 60 }
+    );
+    return true;
+  } catch (e) {
+    logger?.error("[license.validate.checkRateLimit] FAILED: KV rate limit check error", {
+      error_type: e.constructor.name,
+      error_message: e.message,
+      stack_trace: e.stack,
+      context: `KV rate limit read for key=${key}`,
+      severity: "ERROR",
+      worker_name: "moe-stripe"
+    });
+    return true;
+  }
+}
+__name(checkRateLimit, "checkRateLimit");
+async function logValidationAttempt(env, rawKey, success, reason, extra) {
+  await logAdminAction(env, success ? "license.validate.success" : "license.validate.failure", {
+    keyPrefix: rawKey.slice(0, 4) + "****",
+    reason,
+    ...extra
+  });
+}
+__name(logValidationAttempt, "logValidationAttempt");
+function getTierFeatures(tier) {
+  const featureMap = {
+    sovereign: [
+      "precognition.full",
+      "precognition.batch",
+      "precognition.realtime",
+      "precognition.export",
+      "precognition.api",
+      "precognition.priority",
+      "support.premium"
+    ],
+    pro: [
+      "precognition.full",
+      "precognition.batch",
+      "precognition.export",
+      "precognition.priority",
+      "support.standard"
+    ],
+    basic: [
+      "precognition.basic",
+      "precognition.export",
+      "support.community"
+    ],
+    starter: ["precognition.basic", "support.community"]
+  };
+  return featureMap[tier.toLowerCase()] ?? ["precognition.basic"];
+}
+__name(getTierFeatures, "getTierFeatures");
+function getClientIp(request) {
+  const forwarded = request.headers.get("cf-connecting-ip");
+  if (forwarded) return forwarded;
+  const xff = request.headers.get("x-forwarded-for");
+  if (xff) return xff.split(",")[0].trim();
+  return "unknown";
+}
+__name(getClientIp, "getClientIp");
+function hexToUint8Array(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+__name(hexToUint8Array, "hexToUint8Array");
+function timingSafeEqualHex2(a, b) {
+  const aBuf = hexToUint8Array(a);
+  const bBuf = hexToUint8Array(b);
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+__name(timingSafeEqualHex2, "timingSafeEqualHex");
+function jsonResponse(body, status, extraHeaders) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "https://reflexionsoftware.com",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Max-Age": "86400",
+    ...extraHeaders
+  };
+  return new Response(JSON.stringify(body), { status, headers });
+}
+__name(jsonResponse, "jsonResponse");
+
+// src/stripe.ts
+var ALLOWED_ORIGINS = [
+  "https://reflexionsoftware.com",
+  "https://checkout.stripe.com"
+];
+var stripe_default = {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const method = request.method;
+    if (method === "OPTIONS") {
+      return handleCorsPreflight(request);
+    }
+    if (url.pathname === "/webhook/stripe" && method === "POST") {
+      return handleStripeWebhook(request, env);
+    }
+    if (url.pathname === "/v1/license/validate" && method === "POST") {
+      return validateLicense(request, env);
+    }
+    if (url.pathname === "/health" && method === "GET") {
+      return handleHealth(request, env);
+    }
+    return jsonResponse2({ error: "Not found" }, 404);
+  }
+};
+async function handleStripeWebhook(request, env) {
+  const logger = new Logger({ source: "stripe.webhook", env });
+  logger.debug("[stripe.webhook] ENTER");
+  const signature = request.headers.get("stripe-signature");
+  if (!signature) {
+    logger.warning("[stripe.webhook] Missing stripe-signature header", {
+      headers: Array.from(request.headers.keys())
+    });
+    return new Response("Missing signature", { status: 400 });
+  }
+  const payload = await request.text();
+  if (!payload || payload.length === 0) {
+    logger.warning("[stripe.webhook] Empty request body");
+    return new Response("Empty body", { status: 400 });
+  }
+  let event;
+  try {
+    event = await validateStripeSignature(
+      payload,
+      signature,
+      env.STRIPE_WEBHOOK_SECRET
+    );
+  } catch (e) {
+    logger.error("[stripe.webhook] Signature verification failed", {
+      error: e.message
+    });
+    return new Response("Invalid signature", { status: 400 });
+  }
+  logger.debug(`[stripe.webhook] ENTER event_type=${event.type}`);
+  if (event.type !== "checkout.session.completed") {
+    logger.info(`[stripe.webhook] Ignoring event type: ${event.type}`);
+    return new Response("Ignored", { status: 200 });
+  }
+  const session = event.data.object;
+  const clientReferenceId = session.client_reference_id;
+  const customerEmail = session.customer_details?.email ?? session.customer_email;
+  const customerId = session.customer;
+  if (!clientReferenceId) {
+    logger.error("[stripe.webhook] Missing client_reference_id in session", {
+      sessionId: session.id
+    });
+    return new Response("Missing client_reference_id", { status: 200 });
+  }
+  const tier = extractTierFromSession(session);
+  logger.debug(`[stripe.webhook] BRANCH tier=${tier} from line_items`);
+  const rawKey = generateLicenseKey(20);
+  const salt = generateSalt(16);
+  const hashedKey = await hashLicenseKeyPBKDF2(rawKey, salt, 1e5);
+  const canary = generateCanary(customerId ?? "unknown");
+  logger.debug("[stripe.webhook] CALLING D1 license_registry INSERT");
+  try {
+    await env.AURIS_LOGS.prepare(
+      `INSERT INTO license_registry
+        (license_key_hash, salt, tier, customer_email,
+         client_reference_id, canary_watermark, stripe_session_id,
+         stripe_customer_id, status, pbkdf2_iterations, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 100000, unixepoch())`
+    ).bind(
+      hashedKey,
+      arrayBufferToHex3(salt),
+      tier,
+      customerEmail,
+      clientReferenceId,
+      canary,
+      session.id,
+      customerId
+    ).run();
+  } catch (e) {
+    logger.error("[stripe.webhook] D1 INSERT failed", {
+      error: e.message,
+      sessionId: session.id,
+      tier
+    });
+    return new Response("Database error", { status: 500 });
+  }
+  await logAdminAction(env, "license.create", {
+    tier,
+    customerEmail: customerEmail ? maskEmail(customerEmail) : null,
+    clientReferenceId,
+    stripeSessionId: session.id,
+    stripeCustomerId: customerId,
+    canaryPrefix: canary.split("_").slice(0, 3).join("_")
+  });
+  logger.debug("[stripe.webhook] EXIT status=200 license_created=true");
+  return jsonResponse2(
+    {
+      received: true,
+      license_key: rawKey,
+      tier,
+      canary
+    },
+    200
+  );
+}
+__name(handleStripeWebhook, "handleStripeWebhook");
+async function handleHealth(request, env) {
+  const logger = new Logger({ source: "health", env });
+  let dbHealthy = false;
+  try {
+    const result = await env.AURIS_LOGS.prepare(
+      "SELECT 1 as health_check"
+    ).first();
+    dbHealthy = result?.health_check === 1;
+  } catch (e) {
+    logger.error("[health] D1 connectivity check failed", {
+      error: e.message
+    });
+  }
+  const status = dbHealthy ? 200 : 503;
+  const body = {
+    status: dbHealthy ? "ok" : "degraded",
+    service: "moe-stripe",
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    checks: {
+      d1: dbHealthy ? "pass" : "fail"
+    }
+  };
+  return jsonResponse2(body, status);
+}
+__name(handleHealth, "handleHealth");
+function handleCorsPreflight(request) {
+  const origin = request.headers.get("Origin") ?? "";
+  const allowOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : "";
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": allowOrigin,
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization, stripe-signature",
+      "Access-Control-Max-Age": "86400"
+    }
+  });
+}
+__name(handleCorsPreflight, "handleCorsPreflight");
+function jsonResponse2(body, status) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+__name(jsonResponse2, "jsonResponse");
+function arrayBufferToHex3(buffer) {
+  const bytes = new Uint8Array(buffer);
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(arrayBufferToHex3, "arrayBufferToHex");
+function maskEmail(email) {
+  const parts = email.split("@");
+  if (parts.length !== 2) return "***";
+  const [local, domain] = parts;
+  const maskedLocal = local.charAt(0) + "***";
+  const domainParts = domain.split(".");
+  const tld = domainParts.pop() ?? "";
+  const maskedDomain = domainParts.join(".").charAt(0) + "***";
+  return `${maskedLocal}@${maskedDomain}.${tld}`;
+}
+__name(maskEmail, "maskEmail");
+export {
+  stripe_default as default,
+  handleStripeWebhook
+};
+//# sourceMappingURL=stripe.js.map
+
+--b3a35ac5f0db309238f3ea571c929250523348f878ef1f74101e1eeb63ee--

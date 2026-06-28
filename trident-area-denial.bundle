@@ -1,0 +1,1002 @@
+--3b73032ce12d7b4f797578ed2cca7b0677d0458260e409849f2c56aad981
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/geo.ts
+var CURTIS_WHITELIST = /* @__PURE__ */ new Set([
+  "US",
+  // United States
+  "CA",
+  // Canada (travel)
+  "GB"
+  // United Kingdom (travel)
+]);
+var DEFAULT_HOSTILE_COUNTRIES = [
+  { countryCode: "RU", severity: "CRITICAL", reason: "Nation-state APT infrastructure" },
+  { countryCode: "KP", severity: "CRITICAL", reason: "State-sponsored cyber operations" },
+  { countryCode: "BY", severity: "HIGH", reason: "APT staging ground" },
+  { countryCode: "IR", severity: "HIGH", reason: "State-sponsored hostile traffic" },
+  { countryCode: "CN", severity: "MEDIUM", reason: "High-volume automated attack traffic" },
+  { countryCode: "KP", severity: "CRITICAL", reason: "State-level hostile traffic" }
+];
+var LEVEL_LABELS = ["monitor", "challenge", "rate_limit", "block_range", "block_asn", "block_geo"];
+function isCurtisWhitelisted(countryCode) {
+  const upper = countryCode.toUpperCase();
+  return CURTIS_WHITELIST.has(upper);
+}
+__name(isCurtisWhitelisted, "isCurtisWhitelisted");
+function isGeoBlocked(countryCode, activeRules, now = Date.now()) {
+  const upper = countryCode.toUpperCase();
+  if (isCurtisWhitelisted(upper)) {
+    return { blocked: false };
+  }
+  for (const rule of activeRules) {
+    if (rule.countryCode.toUpperCase() !== upper)
+      continue;
+    if (rule.expiresAt > 0 && rule.expiresAt <= now)
+      continue;
+    if (rule.effectiveAt > now)
+      continue;
+    return { blocked: true, rule };
+  }
+  return { blocked: false };
+}
+__name(isGeoBlocked, "isGeoBlocked");
+var KV_PREFIX_GEO = "geo:rule:";
+var KV_KEY_ALL_GEO = "geo:all_rules";
+function packGeo(rule) {
+  return JSON.stringify(rule);
+}
+__name(packGeo, "packGeo");
+function unpackGeo(raw) {
+  if (!raw)
+    return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj.countryCode || !obj.severity || !obj.reason) {
+      throw new Error("Malformed geo rule: missing required fields");
+    }
+    return obj;
+  } catch (err) {
+    throw new Error(`Failed to unpack geo rule: ${err.message}`);
+  }
+}
+__name(unpackGeo, "unpackGeo");
+async function loadGeoRules(kv) {
+  console.log(`[geo.loadGeoRules] ENTRY`);
+  try {
+    const raw = await kv.get(KV_KEY_ALL_GEO);
+    if (!raw) {
+      console.log(`[geo.loadGeoRules] EXIT \u2014 no rules stored, returning defaults`);
+      return hydrateDefaultGeoRules();
+    }
+    const keys = JSON.parse(raw);
+    const rules = [];
+    for (const key of keys) {
+      const packed = await kv.get(key);
+      const rule = unpackGeo(packed);
+      if (rule)
+        rules.push(rule);
+    }
+    console.log(`[geo.loadGeoRules] EXIT \u2014 loaded ${rules.length} rules`);
+    return rules;
+  } catch (err) {
+    console.error(`[geo.loadGeoRules] BRANCH error: ${err.message}`);
+    throw new Error(`loadGeoRules failed: ${err.message}`);
+  }
+}
+__name(loadGeoRules, "loadGeoRules");
+async function saveGeoRule(kv, rule) {
+  console.log(`[geo.saveGeoRule] ENTRY countryCode=${rule.countryCode}`);
+  try {
+    const key = `${KV_PREFIX_GEO}${rule.countryCode}`;
+    const raw = await kv.get(KV_KEY_ALL_GEO);
+    let keys = raw ? JSON.parse(raw) : [];
+    if (!keys.includes(key))
+      keys.push(key);
+    await kv.put(KV_KEY_ALL_GEO, JSON.stringify(keys));
+    await kv.put(key, packGeo(rule));
+    console.log(`[geo.saveGeoRule] EXIT saved rule for ${rule.countryCode}`);
+  } catch (err) {
+    console.error(`[geo.saveGeoRule] BRANCH error: ${err.message}`);
+    throw new Error(`saveGeoRule failed: ${err.message}`);
+  }
+}
+__name(saveGeoRule, "saveGeoRule");
+async function removeGeoRule(kv, countryCode) {
+  const upper = countryCode.toUpperCase();
+  console.log(`[geo.removeGeoRule] ENTRY countryCode=${upper}`);
+  try {
+    const key = `${KV_PREFIX_GEO}${upper}`;
+    const raw = await kv.get(KV_KEY_ALL_GEO);
+    if (!raw) {
+      console.log(`[geo.removeGeoRule] EXIT \u2014 no rule list found`);
+      return false;
+    }
+    let keys = JSON.parse(raw);
+    const idx = keys.indexOf(key);
+    if (idx === -1) {
+      console.log(`[geo.removeGeoRule] EXIT \u2014 rule not found in list`);
+      return false;
+    }
+    keys.splice(idx, 1);
+    await kv.put(KV_KEY_ALL_GEO, JSON.stringify(keys));
+    await kv.delete(key);
+    console.log(`[geo.removeGeoRule] EXIT \u2014 removed rule for ${upper}`);
+    return true;
+  } catch (err) {
+    console.error(`[geo.removeGeoRule] BRANCH error: ${err.message}`);
+    throw new Error(`removeGeoRule failed: ${err.message}`);
+  }
+}
+__name(removeGeoRule, "removeGeoRule");
+function hydrateDefaultGeoRules() {
+  console.log(`[geo.hydrateDefaultGeoRules] ENTRY`);
+  const now = Date.now();
+  const rules = DEFAULT_HOSTILE_COUNTRIES.map((partial) => ({
+    countryCode: partial.countryCode,
+    region: partial.region,
+    severity: partial.severity ?? "HIGH",
+    reason: partial.reason ?? "Threat intel default block",
+    effectiveAt: now,
+    expiresAt: -1,
+    // Permanent for known hostile
+    autoBlock: false
+  }));
+  console.log(`[geo.hydrateDefaultGeoRules] EXIT hydrated ${rules.length} default rules`);
+  return rules;
+}
+__name(hydrateDefaultGeoRules, "hydrateDefaultGeoRules");
+async function logGeoAction(d1, action, countryCode, reason, severity, triggeredBy) {
+  console.log(`[geo.logGeoAction] ENTRY action=${action} countryCode=${countryCode}`);
+  try {
+    const stmt = d1.prepare(`
+      INSERT INTO area_denial_log (timestamp, action, target_type, target, reason, severity, triggered_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    await stmt.bind(Date.now(), action, "geo", countryCode, reason, severity, triggeredBy).run();
+    console.log(`[geo.logGeoAction] EXIT logged`);
+  } catch (err) {
+    console.error(`[geo.logGeoAction] BRANCH error: ${err.message}`);
+    throw new Error(`logGeoAction failed: ${err.message}`);
+  }
+}
+__name(logGeoAction, "logGeoAction");
+
+// src/asn.ts
+var ASN_WHITELIST = /* @__PURE__ */ new Set([
+  15169,
+  // Google
+  16509,
+  // Amazon
+  8075,
+  // Microsoft
+  13335,
+  // Cloudflare
+  20940,
+  // Akamai
+  32934,
+  // Facebook
+  13414,
+  // Twitter/X
+  54113,
+  // Fastly
+  14618,
+  // Amazon AWS
+  16509
+  // Amazon (duplicate guard)
+]);
+var DEFAULT_HOSTILE_ASNS = [
+  { asn: 20278, asOrganization: "Nexeon Technologies", severity: "CRITICAL", reason: "Bulletproof hosting", blockType: "full" },
+  { asn: 61440, asOrganization: "DigitalOcean", severity: "LOW", reason: "Abuse-prone VPS range (monitored)", blockType: "rate_limit" },
+  { asn: 14061, asOrganization: "DigitalOcean", severity: "LOW", reason: "Abuse-prone VPS range (monitored)", blockType: "rate_limit" },
+  { asn: 20473, asOrganization: "Vultr Holdings", severity: "LOW", reason: "Abuse-prone VPS range (monitored)", blockType: "rate_limit" },
+  { asn: 16276, asOrganization: "OVH SAS", severity: "MEDIUM", reason: "Compromised hosting provider", blockType: "challenge" },
+  { asn: 12876, asOrganization: "Online S.A.S.", severity: "MEDIUM", reason: "Compromised hosting provider", blockType: "challenge" },
+  { asn: 9009, asOrganization: "M247 Ltd", severity: "HIGH", reason: "Residential proxy / VPN abuse", blockType: "full" },
+  { asn: 9009, asOrganization: "M247 Ltd", severity: "HIGH", reason: "Residential proxy / VPN abuse", blockType: "full" },
+  { asn: 206092, asOrganization: "OXYGEN", severity: "CRITICAL", reason: "Bulletproof hosting", blockType: "full" },
+  { asn: 49981, asOrganization: "WorldStream", severity: "HIGH", reason: "Bulletproof hosting", blockType: "full" }
+];
+function isAsnWhitelisted(asn) {
+  return ASN_WHITELIST.has(asn);
+}
+__name(isAsnWhitelisted, "isAsnWhitelisted");
+function evaluateAsnAction(asn, asOrganization, detections, activeRules, now = Date.now()) {
+  console.log(`[asn.evaluateAsnAction] ENTRY asn=${asn} org="${asOrganization}" detections=${detections}`);
+  if (isAsnWhitelisted(asn)) {
+    console.log(`[asn.evaluateAsnAction] BRANCH whitelisted ASN, returning monitor`);
+    return { action: "monitor", reason: "Whitelisted ASN" };
+  }
+  for (const rule of activeRules) {
+    if (rule.asn !== asn)
+      continue;
+    if (rule.expiresAt > 0 && rule.expiresAt <= now)
+      continue;
+    if (rule.effectiveAt > now)
+      continue;
+    console.log(`[asn.evaluateAsnAction] BRANCH existing rule found blockType=${rule.blockType}`);
+    return { action: rule.blockType, reason: rule.reason, rule };
+  }
+  if (detections >= 20) {
+    console.log(`[asn.evaluateAsnAction] BRANCH detections >= 20 => full block`);
+    return { action: "full", reason: `Escalated to full ASN block after ${detections} detections` };
+  }
+  if (detections >= 10) {
+    console.log(`[asn.evaluateAsnAction] BRANCH detections >= 10 => rate_limit`);
+    return { action: "rate_limit", reason: `Rate-limit ASN after ${detections} detections` };
+  }
+  if (detections >= 5) {
+    console.log(`[asn.evaluateAsnAction] BRANCH detections >= 5 => challenge`);
+    return { action: "challenge", reason: `Challenge ASN after ${detections} detections` };
+  }
+  console.log(`[asn.evaluateAsnAction] EXIT insufficient detections => monitor`);
+  return { action: "monitor", reason: "Insufficient evidence" };
+}
+__name(evaluateAsnAction, "evaluateAsnAction");
+var KV_PREFIX_ASN = "asn:rule:";
+var KV_KEY_ALL_ASN = "asn:all_rules";
+function packAsn(rule) {
+  return JSON.stringify(rule);
+}
+__name(packAsn, "packAsn");
+function unpackAsn(raw) {
+  if (!raw)
+    return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (typeof obj.asn !== "number" || !obj.asOrganization) {
+      throw new Error("Malformed ASN rule: missing required fields");
+    }
+    return obj;
+  } catch (err) {
+    throw new Error(`Failed to unpack ASN rule: ${err.message}`);
+  }
+}
+__name(unpackAsn, "unpackAsn");
+async function loadAsnRules(kv) {
+  console.log(`[asn.loadAsnRules] ENTRY`);
+  try {
+    const raw = await kv.get(KV_KEY_ALL_ASN);
+    if (!raw) {
+      console.log(`[asn.loadAsnRules] EXIT \u2014 no rules stored, returning defaults`);
+      return hydrateDefaultAsnRules();
+    }
+    const keys = JSON.parse(raw);
+    const rules = [];
+    for (const key of keys) {
+      const packed = await kv.get(key);
+      const rule = unpackAsn(packed);
+      if (rule)
+        rules.push(rule);
+    }
+    console.log(`[asn.loadAsnRules] EXIT \u2014 loaded ${rules.length} rules`);
+    return rules;
+  } catch (err) {
+    console.error(`[asn.loadAsnRules] BRANCH error: ${err.message}`);
+    throw new Error(`loadAsnRules failed: ${err.message}`);
+  }
+}
+__name(loadAsnRules, "loadAsnRules");
+async function saveAsnRule(kv, rule) {
+  console.log(`[asn.saveAsnRule] ENTRY asn=${rule.asn} org="${rule.asOrganization}"`);
+  try {
+    if (isAsnWhitelisted(rule.asn)) {
+      throw new Error(`Refusing to block whitelisted ASN ${rule.asn}`);
+    }
+    const key = `${KV_PREFIX_ASN}${rule.asn}`;
+    const raw = await kv.get(KV_KEY_ALL_ASN);
+    let keys = raw ? JSON.parse(raw) : [];
+    if (!keys.includes(key))
+      keys.push(key);
+    await kv.put(KV_KEY_ALL_ASN, JSON.stringify(keys));
+    await kv.put(key, packAsn(rule));
+    console.log(`[asn.saveAsnRule] EXIT saved rule for ASN ${rule.asn}`);
+  } catch (err) {
+    console.error(`[asn.saveAsnRule] BRANCH error: ${err.message}`);
+    throw new Error(`saveAsnRule failed: ${err.message}`);
+  }
+}
+__name(saveAsnRule, "saveAsnRule");
+async function removeAsnRule(kv, asn) {
+  console.log(`[asn.removeAsnRule] ENTRY asn=${asn}`);
+  try {
+    const key = `${KV_PREFIX_ASN}${asn}`;
+    const raw = await kv.get(KV_KEY_ALL_ASN);
+    if (!raw) {
+      console.log(`[asn.removeAsnRule] EXIT \u2014 no rule list found`);
+      return false;
+    }
+    let keys = JSON.parse(raw);
+    const idx = keys.indexOf(key);
+    if (idx === -1) {
+      console.log(`[asn.removeAsnRule] EXIT \u2014 rule not found in list`);
+      return false;
+    }
+    keys.splice(idx, 1);
+    await kv.put(KV_KEY_ALL_ASN, JSON.stringify(keys));
+    await kv.delete(key);
+    console.log(`[asn.removeAsnRule] EXIT \u2014 removed rule for ASN ${asn}`);
+    return true;
+  } catch (err) {
+    console.error(`[asn.removeAsnRule] BRANCH error: ${err.message}`);
+    throw new Error(`removeAsnRule failed: ${err.message}`);
+  }
+}
+__name(removeAsnRule, "removeAsnRule");
+function hydrateDefaultAsnRules() {
+  console.log(`[asn.hydrateDefaultAsnRules] ENTRY`);
+  const now = Date.now();
+  const seen = /* @__PURE__ */ new Set();
+  const rules = [];
+  for (const partial of DEFAULT_HOSTILE_ASNS) {
+    if (!partial.asn)
+      continue;
+    if (seen.has(partial.asn))
+      continue;
+    if (isAsnWhitelisted(partial.asn))
+      continue;
+    seen.add(partial.asn);
+    rules.push({
+      asn: partial.asn,
+      asOrganization: partial.asOrganization ?? "Unknown",
+      severity: partial.severity ?? "MEDIUM",
+      reason: partial.reason ?? "Threat intel default block",
+      effectiveAt: now,
+      expiresAt: -1,
+      // Permanent for known hostile
+      blockType: partial.blockType ?? "challenge"
+    });
+  }
+  console.log(`[asn.hydrateDefaultAsnRules] EXIT hydrated ${rules.length} default rules`);
+  return rules;
+}
+__name(hydrateDefaultAsnRules, "hydrateDefaultAsnRules");
+async function logAsnAction(d1, action, asn, asOrganization, reason, severity, triggeredBy) {
+  console.log(`[asn.logAsnAction] ENTRY action=${action} asn=${asn}`);
+  try {
+    const stmt = d1.prepare(`
+      INSERT INTO area_denial_log (timestamp, action, target_type, target, reason, severity, triggered_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    await stmt.bind(Date.now(), action, "asn", `${asn} (${asOrganization})`, reason, severity, triggeredBy).run();
+    console.log(`[asn.logAsnAction] EXIT logged`);
+  } catch (err) {
+    console.error(`[asn.logAsnAction] BRANCH error: ${err.message}`);
+    throw new Error(`logAsnAction failed: ${err.message}`);
+  }
+}
+__name(logAsnAction, "logAsnAction");
+
+// src/range.ts
+var IP_WHITELIST = /* @__PURE__ */ new Set([
+  "127.0.0.1",
+  "::1"
+]);
+function ipToUint32(ip) {
+  const parts = ip.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => isNaN(n) || n < 0 || n > 255)) {
+    throw new Error(`Invalid IPv4 address: ${ip}`);
+  }
+  return parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3];
+}
+__name(ipToUint32, "ipToUint32");
+function parseCidr(cidr) {
+  const [ipPart, prefixPart] = cidr.split("/");
+  if (!ipPart || !prefixPart)
+    throw new Error(`Invalid CIDR: ${cidr}`);
+  const prefix = parseInt(prefixPart, 10);
+  if (isNaN(prefix) || prefix < 0 || prefix > 32)
+    throw new Error(`Invalid CIDR prefix: ${cidr}`);
+  const network = ipToUint32(ipPart);
+  const mask = prefix === 0 ? 0 : 4294967295 << 32 - prefix >>> 0;
+  return { network: network & mask, mask, prefix };
+}
+__name(parseCidr, "parseCidr");
+function ipInCidr(ip, cidr) {
+  const ipNum = ipToUint32(ip);
+  const { network, mask } = parseCidr(cidr);
+  return (ipNum & mask) === network;
+}
+__name(ipInCidr, "ipInCidr");
+function isIpWhitelisted(ip) {
+  return IP_WHITELIST.has(ip);
+}
+__name(isIpWhitelisted, "isIpWhitelisted");
+function isRangeBlocked(ip, activeRules, now = Date.now()) {
+  console.log(`[range.isRangeBlocked] ENTRY ip=${ip}`);
+  if (isIpWhitelisted(ip)) {
+    console.log(`[range.isRangeBlocked] BRANCH whitelisted IP`);
+    return { blocked: false };
+  }
+  for (const rule of activeRules) {
+    if (rule.expiresAt > 0 && rule.expiresAt <= now)
+      continue;
+    if (rule.effectiveAt > now)
+      continue;
+    if (ipInCidr(ip, rule.cidr)) {
+      console.log(`[range.isRangeBlocked] EXIT blocked by CIDR ${rule.cidr}`);
+      return { blocked: true, rule };
+    }
+  }
+  console.log(`[range.isRangeBlocked] EXIT not blocked`);
+  return { blocked: false };
+}
+__name(isRangeBlocked, "isRangeBlocked");
+var KV_PREFIX_RANGE = "range:rule:";
+var KV_KEY_ALL_RANGE = "range:all_rules";
+function packRange(rule) {
+  return JSON.stringify(rule);
+}
+__name(packRange, "packRange");
+function unpackRange(raw) {
+  if (!raw)
+    return null;
+  try {
+    const obj = JSON.parse(raw);
+    if (!obj.cidr || !obj.reason) {
+      throw new Error("Malformed range rule: missing required fields");
+    }
+    return obj;
+  } catch (err) {
+    throw new Error(`Failed to unpack range rule: ${err.message}`);
+  }
+}
+__name(unpackRange, "unpackRange");
+async function loadRangeRules(kv) {
+  console.log(`[range.loadRangeRules] ENTRY`);
+  try {
+    const raw = await kv.get(KV_KEY_ALL_RANGE);
+    if (!raw) {
+      console.log(`[range.loadRangeRules] EXIT \u2014 no rules stored`);
+      return [];
+    }
+    const keys = JSON.parse(raw);
+    const rules = [];
+    for (const key of keys) {
+      const packed = await kv.get(key);
+      const rule = unpackRange(packed);
+      if (rule)
+        rules.push(rule);
+    }
+    console.log(`[range.loadRangeRules] EXIT \u2014 loaded ${rules.length} rules`);
+    return rules;
+  } catch (err) {
+    console.error(`[range.loadRangeRules] BRANCH error: ${err.message}`);
+    throw new Error(`loadRangeRules failed: ${err.message}`);
+  }
+}
+__name(loadRangeRules, "loadRangeRules");
+async function saveRangeRule(kv, rule) {
+  console.log(`[range.saveRangeRule] ENTRY cidr=${rule.cidr}`);
+  try {
+    const key = `${KV_PREFIX_RANGE}${rule.cidr}`;
+    const raw = await kv.get(KV_KEY_ALL_RANGE);
+    let keys = raw ? JSON.parse(raw) : [];
+    if (!keys.includes(key))
+      keys.push(key);
+    await kv.put(KV_KEY_ALL_RANGE, JSON.stringify(keys));
+    await kv.put(key, packRange(rule));
+    console.log(`[range.saveRangeRule] EXIT saved rule for ${rule.cidr}`);
+  } catch (err) {
+    console.error(`[range.saveRangeRule] BRANCH error: ${err.message}`);
+    throw new Error(`saveRangeRule failed: ${err.message}`);
+  }
+}
+__name(saveRangeRule, "saveRangeRule");
+async function removeRangeRule(kv, cidr) {
+  console.log(`[range.removeRangeRule] ENTRY cidr=${cidr}`);
+  try {
+    const key = `${KV_PREFIX_RANGE}${cidr}`;
+    const raw = await kv.get(KV_KEY_ALL_RANGE);
+    if (!raw) {
+      console.log(`[range.removeRangeRule] EXIT \u2014 no rule list found`);
+      return false;
+    }
+    let keys = JSON.parse(raw);
+    const idx = keys.indexOf(key);
+    if (idx === -1) {
+      console.log(`[range.removeRangeRule] EXIT \u2014 rule not found in list`);
+      return false;
+    }
+    keys.splice(idx, 1);
+    await kv.put(KV_KEY_ALL_RANGE, JSON.stringify(keys));
+    await kv.delete(key);
+    console.log(`[range.removeRangeRule] EXIT \u2014 removed rule for ${cidr}`);
+    return true;
+  } catch (err) {
+    console.error(`[range.removeRangeRule] BRANCH error: ${err.message}`);
+    throw new Error(`removeRangeRule failed: ${err.message}`);
+  }
+}
+__name(removeRangeRule, "removeRangeRule");
+async function logRangeAction(d1, action, cidr, reason, source, triggeredBy) {
+  console.log(`[range.logRangeAction] ENTRY action=${action} cidr=${cidr}`);
+  try {
+    const stmt = d1.prepare(`
+      INSERT INTO area_denial_log (timestamp, action, target_type, target, reason, severity, triggered_by)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+    await stmt.bind(Date.now(), action, "range", cidr, reason, source, triggeredBy).run();
+    console.log(`[range.logRangeAction] EXIT logged`);
+  } catch (err) {
+    console.error(`[range.logRangeAction] BRANCH error: ${err.message}`);
+    throw new Error(`logRangeAction failed: ${err.message}`);
+  }
+}
+__name(logRangeAction, "logRangeAction");
+
+// src/index.ts
+var KV_PREFIX_ESCALATION = "escalation:";
+var KV_KEY_STATS = "denial:stats";
+function evaluateAreaDenial(ip, detections, severity) {
+  console.log(`[index.evaluateAreaDenial] ENTRY ip=${ip} detections=${detections} severity=${severity}`);
+  if (isIpWhitelisted(ip)) {
+    console.log(`[index.evaluateAreaDenial] BRANCH whitelisted IP => monitor`);
+    return { action: "monitor", reason: "Whitelisted IP" };
+  }
+  if (detections >= 50 && severity === "CRITICAL") {
+    console.log(`[index.evaluateAreaDenial] EXIT block_asn \u2014 persistent critical attacker`);
+    return { action: "block_asn", reason: "Persistent critical attacker" };
+  }
+  if (detections >= 20) {
+    console.log(`[index.evaluateAreaDenial] EXIT block_range \u2014 multiple attacks from /24`);
+    return { action: "block_range", reason: "Multiple attacks from /24" };
+  }
+  if (detections >= 10) {
+    console.log(`[index.evaluateAreaDenial] EXIT rate_limit_asn \u2014 elevated attack rate from ASN`);
+    return { action: "rate_limit", reason: "Elevated attack rate from ASN" };
+  }
+  if (detections >= 5) {
+    console.log(`[index.evaluateAreaDenial] EXIT challenge \u2014 suspicious activity`);
+    return { action: "challenge", reason: "Suspicious activity" };
+  }
+  console.log(`[index.evaluateAreaDenial] EXIT monitor \u2014 insufficient evidence`);
+  return { action: "monitor", reason: "Insufficient evidence" };
+}
+__name(evaluateAreaDenial, "evaluateAreaDenial");
+function levelFromAction(action) {
+  switch (action) {
+    case "monitor":
+      return 0;
+    case "challenge":
+      return 1;
+    case "rate_limit":
+      return 2;
+    case "block_range":
+      return 3;
+    case "block_asn":
+      return 4;
+    case "block_geo":
+      return 5;
+    default:
+      return 0;
+  }
+}
+__name(levelFromAction, "levelFromAction");
+async function getEscalationHistory(kv, ip) {
+  console.log(`[index.getEscalationHistory] ENTRY ip=${ip}`);
+  try {
+    const raw = await kv.get(`${KV_PREFIX_ESCALATION}${ip}`);
+    if (!raw) {
+      console.log(`[index.getEscalationHistory] EXIT \u2014 no history found`);
+      return null;
+    }
+    const hist = JSON.parse(raw);
+    console.log(`[index.getEscalationHistory] EXIT \u2014 loaded ${hist.actions.length} actions`);
+    return hist;
+  } catch (err) {
+    console.error(`[index.getEscalationHistory] BRANCH error: ${err.message}`);
+    throw new Error(`getEscalationHistory failed: ${err.message}`);
+  }
+}
+__name(getEscalationHistory, "getEscalationHistory");
+async function recordEscalation(kv, ip, action, triggeredBy) {
+  console.log(`[index.recordEscalation] ENTRY ip=${ip} action=${action} triggeredBy=${triggeredBy}`);
+  try {
+    let hist = await getEscalationHistory(kv, ip);
+    if (!hist) {
+      hist = { ip, actions: [], currentLevel: 0 };
+    }
+    const entry = { action, timestamp: Date.now(), triggeredBy };
+    hist.actions.push(entry);
+    const newLevel = levelFromAction(action);
+    if (newLevel > hist.currentLevel) {
+      console.log(`[index.recordEscalation] BRANCH level ${hist.currentLevel} \u2192 ${newLevel}`);
+      hist.currentLevel = newLevel;
+    }
+    await kv.put(`${KV_PREFIX_ESCALATION}${ip}`, JSON.stringify(hist));
+    console.log(`[index.recordEscalation] EXIT \u2014 recorded escalation`);
+    return hist;
+  } catch (err) {
+    console.error(`[index.recordEscalation] BRANCH error: ${err.message}`);
+    throw new Error(`recordEscalation failed: ${err.message}`);
+  }
+}
+__name(recordEscalation, "recordEscalation");
+async function loadStats(kv) {
+  console.log(`[index.loadStats] ENTRY`);
+  try {
+    const raw = await kv.get(KV_KEY_STATS);
+    if (!raw) {
+      console.log(`[index.loadStats] EXIT \u2014 no stats, returning zero`);
+      return {
+        geoRules: 0,
+        asnRules: 0,
+        rangeRules: 0,
+        escalationsRecorded: 0,
+        autoBlocks24h: 0,
+        manualBlocks: 0,
+        lastUpdated: Date.now()
+      };
+    }
+    const stats = JSON.parse(raw);
+    console.log(`[index.loadStats] EXIT \u2014 loaded stats`);
+    return stats;
+  } catch (err) {
+    console.error(`[index.loadStats] BRANCH error: ${err.message}`);
+    throw new Error(`loadStats failed: ${err.message}`);
+  }
+}
+__name(loadStats, "loadStats");
+async function saveStats(kv, stats) {
+  console.log(`[index.saveStats] ENTRY`);
+  try {
+    stats.lastUpdated = Date.now();
+    await kv.put(KV_KEY_STATS, JSON.stringify(stats));
+    console.log(`[index.saveStats] EXIT \u2014 saved stats`);
+  } catch (err) {
+    console.error(`[index.saveStats] BRANCH error: ${err.message}`);
+    throw new Error(`saveStats failed: ${err.message}`);
+  }
+}
+__name(saveStats, "saveStats");
+async function recalcStats(kv) {
+  console.log(`[index.recalcStats] ENTRY`);
+  try {
+    const geo = await loadGeoRules(kv);
+    const asn = await loadAsnRules(kv);
+    const range = await loadRangeRules(kv);
+    const stats = {
+      geoRules: geo.length,
+      asnRules: asn.length,
+      rangeRules: range.length,
+      escalationsRecorded: 0,
+      autoBlocks24h: 0,
+      manualBlocks: 0,
+      lastUpdated: Date.now()
+    };
+    for (const r of range) {
+      if (r.source === "auto")
+        stats.autoBlocks24h++;
+      if (r.source === "manual")
+        stats.manualBlocks++;
+    }
+    for (const r of geo) {
+      if (r.autoBlock)
+        stats.autoBlocks24h++;
+      else
+        stats.manualBlocks++;
+    }
+    for (const r of asn) {
+      if (r.expiresAt > 0)
+        stats.autoBlocks24h++;
+      else
+        stats.manualBlocks++;
+    }
+    await saveStats(kv, stats);
+    console.log(`[index.recalcStats] EXIT`);
+    return stats;
+  } catch (err) {
+    console.error(`[index.recalcStats] BRANCH error: ${err.message}`);
+    throw new Error(`recalcStats failed: ${err.message}`);
+  }
+}
+__name(recalcStats, "recalcStats");
+var src_default = {
+  async fetch(request, env, ctx) {
+    console.log(`[index.fetch] ENTRY method=${request.method} url=${request.url}`);
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    try {
+      if (pathname === "/denial/rules" && request.method === "GET") {
+        console.log(`[index.fetch] BRANCH => handleRules`);
+        return await handleRules(request, env, ctx);
+      }
+      if (pathname === "/denial/stats" && request.method === "GET") {
+        console.log(`[index.fetch] BRANCH => handleStats`);
+        return await handleStats(request, env, ctx);
+      }
+      if (pathname === "/denial/block" && request.method === "POST") {
+        console.log(`[index.fetch] BRANCH => handleBlock`);
+        return await handleBlock(request, env, ctx);
+      }
+      if (pathname === "/denial/unblock" && request.method === "POST") {
+        console.log(`[index.fetch] BRANCH => handleUnblock`);
+        return await handleUnblock(request, env, ctx);
+      }
+      if (pathname === "/denial/escalation" && request.method === "GET") {
+        console.log(`[index.fetch] BRANCH => handleEscalation`);
+        return await handleEscalation(request, env, ctx);
+      }
+      if (pathname === "/denial/evaluate" && request.method === "POST") {
+        console.log(`[index.fetch] BRANCH => handleEvaluate`);
+        return await handleEvaluate(request, env, ctx);
+      }
+      console.log(`[index.fetch] EXIT 404`);
+      return jsonResponse({ error: "Not found" }, 404);
+    } catch (err) {
+      console.error(`[index.fetch] BRANCH fatal error: ${err.message}`);
+      return jsonResponse({ error: "Internal server error", detail: err.message }, 500);
+    }
+  }
+};
+async function handleRules(_req, env, _ctx) {
+  console.log(`[index.handleRules] ENTRY`);
+  try {
+    const [geo, asn, range] = await Promise.all([
+      loadGeoRules(env.SESSION_META),
+      loadAsnRules(env.SESSION_META),
+      loadRangeRules(env.SESSION_META)
+    ]);
+    const now = Date.now();
+    const activeGeo = geo.filter((r) => r.expiresAt === -1 || r.expiresAt > now);
+    const activeAsn = asn.filter((r) => r.expiresAt === -1 || r.expiresAt > now);
+    const activeRange = range.filter((r) => r.expiresAt === -1 || r.expiresAt > now);
+    console.log(`[index.handleRules] EXIT`);
+    return jsonResponse({
+      geo: activeGeo,
+      asn: activeAsn,
+      range: activeRange,
+      total: activeGeo.length + activeAsn.length + activeRange.length
+    }, 200);
+  } catch (err) {
+    console.error(`[index.handleRules] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Failed to load rules", detail: err.message }, 500);
+  }
+}
+__name(handleRules, "handleRules");
+async function handleStats(_req, env, _ctx) {
+  console.log(`[index.handleStats] ENTRY`);
+  try {
+    const stats = await recalcStats(env.SESSION_META);
+    console.log(`[index.handleStats] EXIT`);
+    return jsonResponse({
+      geoRules: stats.geoRules,
+      asnRules: stats.asnRules,
+      rangeRules: stats.rangeRules,
+      autoBlocks24h: stats.autoBlocks24h,
+      manualBlocks: stats.manualBlocks,
+      lastUpdated: stats.lastUpdated
+    }, 200);
+  } catch (err) {
+    console.error(`[index.handleStats] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Failed to load stats", detail: err.message }, 500);
+  }
+}
+__name(handleStats, "handleStats");
+async function handleBlock(request, env, _ctx) {
+  console.log(`[index.handleBlock] ENTRY`);
+  try {
+    const body = await request.json();
+    const type = body.type;
+    const target = body.target;
+    const reason = body.reason || "Manual block by Curtis";
+    const severity = body.severity || "HIGH";
+    const blockType = body.blockType || "full";
+    const durationHours = typeof body.durationHours === "number" ? body.durationHours : -1;
+    if (!type || !target) {
+      console.log(`[index.handleBlock] BRANCH missing type or target`);
+      return jsonResponse({ error: "Missing 'type' or 'target'" }, 400);
+    }
+    const now = Date.now();
+    const expiresAt = durationHours > 0 ? now + durationHours * 60 * 60 * 1e3 : -1;
+    if (type === "geo") {
+      if (isCurtisWhitelisted(target)) {
+        console.log(`[index.handleBlock] BRANCH refused to block whitelisted geo ${target}`);
+        return jsonResponse({ error: `Refusing to block whitelisted country ${target}` }, 403);
+      }
+      const rule = {
+        countryCode: target.toUpperCase(),
+        severity: severity ?? "HIGH",
+        reason,
+        effectiveAt: now,
+        expiresAt,
+        autoBlock: false
+      };
+      await saveGeoRule(env.SESSION_META, rule);
+      await logGeoAction(env.AURIS_LOGS, "manual_block_geo", target, reason, severity, "curtis_manual");
+      console.log(`[index.handleBlock] EXIT blocked geo ${target}`);
+      return jsonResponse({ success: true, type: "geo", target, rule }, 200);
+    }
+    if (type === "asn") {
+      const asnNum = parseInt(target, 10);
+      if (isNaN(asnNum)) {
+        return jsonResponse({ error: "Invalid ASN number" }, 400);
+      }
+      if (isAsnWhitelisted(asnNum)) {
+        console.log(`[index.handleBlock] BRANCH refused to block whitelisted ASN ${asnNum}`);
+        return jsonResponse({ error: `Refusing to block whitelisted ASN ${asnNum}` }, 403);
+      }
+      const asOrg = body.asOrganization || "Unknown";
+      const btype = blockType;
+      const rule = {
+        asn: asnNum,
+        asOrganization: asOrg,
+        severity,
+        reason,
+        effectiveAt: now,
+        expiresAt,
+        blockType: btype
+      };
+      await saveAsnRule(env.SESSION_META, rule);
+      await logAsnAction(env.AURIS_LOGS, "manual_block_asn", asnNum, asOrg, reason, severity, "curtis_manual");
+      console.log(`[index.handleBlock] EXIT blocked ASN ${asnNum}`);
+      return jsonResponse({ success: true, type: "asn", target: asnNum, rule }, 200);
+    }
+    if (type === "range") {
+      if (!/^\d+\.\d+\.\d+\.\d+\/\d{1,2}$/.test(target)) {
+        return jsonResponse({ error: "Invalid CIDR format" }, 400);
+      }
+      const rule = {
+        cidr: target,
+        reason,
+        effectiveAt: now,
+        expiresAt,
+        source: "manual"
+      };
+      await saveRangeRule(env.SESSION_META, rule);
+      await logRangeAction(env.AURIS_LOGS, "manual_block_range", target, reason, "manual", "curtis_manual");
+      console.log(`[index.handleBlock] EXIT blocked range ${target}`);
+      return jsonResponse({ success: true, type: "range", target, rule }, 200);
+    }
+    console.log(`[index.handleBlock] BRANCH unknown type ${type}`);
+    return jsonResponse({ error: `Unknown block type: ${type}` }, 400);
+  } catch (err) {
+    console.error(`[index.handleBlock] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Block failed", detail: err.message }, 500);
+  }
+}
+__name(handleBlock, "handleBlock");
+async function handleUnblock(request, env, _ctx) {
+  console.log(`[index.handleUnblock] ENTRY`);
+  try {
+    const body = await request.json();
+    const type = body.type;
+    const target = body.target;
+    if (!type || !target) {
+      return jsonResponse({ error: "Missing 'type' or 'target'" }, 400);
+    }
+    let removed = false;
+    if (type === "geo") {
+      removed = await removeGeoRule(env.SESSION_META, target);
+      await logGeoAction(env.AURIS_LOGS, "manual_unblock_geo", target, "Manual unblock by Curtis", "INFO", "curtis_manual");
+    } else if (type === "asn") {
+      const asnNum = parseInt(target, 10);
+      if (isNaN(asnNum))
+        return jsonResponse({ error: "Invalid ASN" }, 400);
+      removed = await removeAsnRule(env.SESSION_META, asnNum);
+      await logAsnAction(env.AURIS_LOGS, "manual_unblock_asn", asnNum, "", "Manual unblock by Curtis", "INFO", "curtis_manual");
+    } else if (type === "range") {
+      removed = await removeRangeRule(env.SESSION_META, target);
+      await logRangeAction(env.AURIS_LOGS, "manual_unblock_range", target, "Manual unblock by Curtis", "INFO", "curtis_manual");
+    } else {
+      return jsonResponse({ error: "Unknown unblock type" }, 400);
+    }
+    if (!removed) {
+      return jsonResponse({ error: "Rule not found" }, 404);
+    }
+    console.log(`[index.handleUnblock] EXIT unblocked ${type} ${target}`);
+    return jsonResponse({ success: true, type, target }, 200);
+  } catch (err) {
+    console.error(`[index.handleUnblock] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Unblock failed", detail: err.message }, 500);
+  }
+}
+__name(handleUnblock, "handleUnblock");
+async function handleEscalation(request, env, _ctx) {
+  console.log(`[index.handleEscalation] ENTRY`);
+  try {
+    const url = new URL(request.url);
+    const ip = url.searchParams.get("ip");
+    if (!ip) {
+      return jsonResponse({ error: "Missing 'ip' query param" }, 400);
+    }
+    const hist = await getEscalationHistory(env.SESSION_META, ip);
+    const level = hist ? hist.currentLevel : 0;
+    console.log(`[index.handleEscalation] EXIT level=${level} for ip=${ip}`);
+    return jsonResponse({
+      ip,
+      currentLevel: level,
+      currentLabel: LEVEL_LABELS[level] || "monitor",
+      history: hist
+    }, 200);
+  } catch (err) {
+    console.error(`[index.handleEscalation] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Escalation lookup failed", detail: err.message }, 500);
+  }
+}
+__name(handleEscalation, "handleEscalation");
+async function handleEvaluate(request, env, _ctx) {
+  console.log(`[index.handleEvaluate] ENTRY`);
+  try {
+    const body = await request.json();
+    const ip = body.ip;
+    const detections = typeof body.detections === "number" ? body.detections : 0;
+    const severity = body.severity || "LOW";
+    const triggeredBy = body.triggeredBy || "unknown";
+    if (!ip) {
+      return jsonResponse({ error: "Missing 'ip'" }, 400);
+    }
+    const action = evaluateAreaDenial(ip, detections, severity);
+    if (action.action !== "monitor") {
+      await recordEscalation(env.SESSION_META, ip, action.action, triggeredBy);
+    }
+    const [geoRules, asnRules, rangeRules] = await Promise.all([
+      loadGeoRules(env.SESSION_META),
+      loadAsnRules(env.SESSION_META),
+      loadRangeRules(env.SESSION_META)
+    ]);
+    const countryCode = body.countryCode || "??";
+    const asn = typeof body.asn === "number" ? body.asn : 0;
+    const asOrg = body.asOrganization || "";
+    const geoCheck = isGeoBlocked(countryCode, geoRules);
+    const asnCheck = evaluateAsnAction(asn, asOrg, detections, asnRules);
+    const rangeCheck = isRangeBlocked(ip, rangeRules);
+    const severityOrder = ["monitor", "challenge", "rate_limit", "block_range", "block_asn", "block_geo"];
+    let finalAction = action.action;
+    if (geoCheck.blocked)
+      finalAction = "block_geo";
+    else if (asnCheck.action === "full")
+      finalAction = "block_asn";
+    else if (rangeCheck.blocked)
+      finalAction = "block_range";
+    else if (severityOrder.indexOf(asnCheck.action) > severityOrder.indexOf(finalAction))
+      finalAction = asnCheck.action;
+    const finalReason = finalAction === "block_geo" ? geoCheck.rule?.reason ?? "Geo-blocked" : finalAction === "block_asn" ? asnCheck.reason : finalAction === "block_range" ? rangeCheck.rule?.reason ?? "Range-blocked" : action.reason;
+    console.log(`[index.handleEvaluate] EXIT action=${finalAction} ip=${ip}`);
+    return jsonResponse(
+      {
+        ip,
+        detections,
+        severity,
+        action: finalAction,
+        reason: finalReason,
+        escalated: action.action !== "monitor",
+        checks: {
+          geo: geoCheck,
+          asn: { action: asnCheck.action, reason: asnCheck.reason },
+          range: rangeCheck
+        }
+      },
+      200
+    );
+  } catch (err) {
+    console.error(`[index.handleEvaluate] BRANCH error: ${err.message}`);
+    return jsonResponse({ error: "Evaluation failed", detail: err.message }, 500);
+  }
+}
+__name(handleEvaluate, "handleEvaluate");
+function jsonResponse(body, status) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+__name(jsonResponse, "jsonResponse");
+export {
+  src_default as default,
+  evaluateAreaDenial,
+  getEscalationHistory,
+  loadStats,
+  recordEscalation,
+  saveStats
+};
+//# sourceMappingURL=index.js.map
+
+--3b73032ce12d7b4f797578ed2cca7b0677d0458260e409849f2c56aad981--

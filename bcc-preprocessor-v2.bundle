@@ -1,0 +1,1060 @@
+--cbcd1e9c35fe1cc63b79c6ddad18eca6b06767d1809bab624a5987673c5a
+Content-Disposition: form-data; name="preprocessor-worker.js"
+
+var __defProp = Object.defineProperty;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+var __esm = (fn, res) => function __init() {
+  return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+};
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+
+// src/shard-router.ts
+var shard_router_exports = {};
+__export(shard_router_exports, {
+  DEFAULT_SHARD_COUNT: () => DEFAULT_SHARD_COUNT,
+  SHARD_COUNT: () => SHARD_COUNT,
+  ShardRouter: () => ShardRouter,
+  allShards: () => allShards,
+  fnv1a: () => fnv1a,
+  getShardDB: () => getShardDB,
+  placeholders: () => placeholders,
+  queryAllShards: () => queryAllShards,
+  shardDBForContext: () => shardDBForContext,
+  shardFor: () => shardFor
+});
+function fnv1a(key) {
+  let hash = FNV_OFFSET;
+  const encoder = new TextEncoder();
+  const bytes = encoder.encode(key);
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, FNV_PRIME);
+  }
+  return hash >>> 0;
+}
+function shardFor(contextId) {
+  const hash = fnv1a(contextId);
+  return hash % SHARD_COUNT + 1;
+}
+function getShardDB(env, shard) {
+  if (shard < 1 || shard > SHARD_COUNT) {
+    throw new Error(`Shard ${shard} out of range [1..${SHARD_COUNT}]`);
+  }
+  const key = `D1_SHARD_${shard.toString().padStart(2, "0")}`;
+  const db = env[key];
+  if (!db) {
+    throw new Error(`Missing D1 binding for shard ${shard}`);
+  }
+  return db;
+}
+function shardDBForContext(env, contextId) {
+  const shard = shardFor(contextId);
+  return getShardDB(env, shard);
+}
+async function allShards(env, fn) {
+  const promises = [];
+  for (let i = 1; i <= SHARD_COUNT; i++) {
+    const db = getShardDB(env, i);
+    promises.push(
+      fn(db, i).catch((err) => {
+        if (err instanceof Error) return err;
+        return new Error(String(err));
+      })
+    );
+  }
+  return Promise.all(promises);
+}
+async function queryAllShards(env, sql, params, limit) {
+  const results = await allShards(env, async (db) => {
+    const { results: results2 } = await db.prepare(sql).bind(...params).all();
+    return results2 ?? [];
+  });
+  const rows = results.filter((r) => !(r instanceof Error)).flat().sort((a, b) => b.created_at - a.created_at).slice(0, limit);
+  return rows;
+}
+function placeholders(count, offset = 0) {
+  return Array.from({ length: count }, (_, i) => `?${i + 1 + offset}`).join(", ");
+}
+var SHARD_COUNT, DEFAULT_SHARD_COUNT, FNV_OFFSET, FNV_PRIME, ShardRouter;
+var init_shard_router = __esm({
+  "src/shard-router.ts"() {
+    "use strict";
+    SHARD_COUNT = 16;
+    DEFAULT_SHARD_COUNT = 16;
+    FNV_OFFSET = 2166136261;
+    FNV_PRIME = 16777619;
+    __name(fnv1a, "fnv1a");
+    __name(shardFor, "shardFor");
+    __name(getShardDB, "getShardDB");
+    __name(shardDBForContext, "shardDBForContext");
+    __name(allShards, "allShards");
+    __name(queryAllShards, "queryAllShards");
+    __name(placeholders, "placeholders");
+    ShardRouter = class {
+      static {
+        __name(this, "ShardRouter");
+      }
+      /** Number of shards (fixed at 16 for this topology) */
+      shardCount;
+      /**
+       * @param shardCount — Number of shards; defaults to 16. Must be ≥ 1.
+       */
+      constructor(shardCount = DEFAULT_SHARD_COUNT) {
+        if (!Number.isInteger(shardCount) || shardCount < 1) {
+          throw new TypeError(`ShardRouter: shardCount must be a positive integer, got ${shardCount}`);
+        }
+        this.shardCount = shardCount;
+      }
+      /**
+       * Return the 0-based shard index for a given key.
+       *
+       * Algorithm: `fnv1a(key) % shardCount`
+       *
+       * @param key — Routing key (context_id, agent_id, etc.)
+       * @returns Integer in the range [0, shardCount)
+       *
+       * @example
+       * ```typescript
+       * const router = new ShardRouter();
+       * router.getShard("hannah-turn-42"); // 7
+       * ```
+       */
+      getShard(key) {
+        if (typeof key !== "string" || key.length === 0) {
+          throw new TypeError("ShardRouter.getShard: key must be a non-empty string");
+        }
+        return fnv1a(key) % this.shardCount;
+      }
+      /**
+       * Resolve the D1Database binding for a key.
+       *
+       * @param key     — Routing key
+       * @param bindings — Cloudflare Workers Env containing D1_SHARD_01…16
+       * @returns The D1Database instance for the computed shard
+       *
+       * @throws {TypeError} If the computed binding is missing from Env
+       */
+      getShardBindings(key, bindings) {
+        const idx = this.getShard(key);
+        const bindingName = `D1_SHARD_${String(idx + 1).padStart(2, "0")}`;
+        const db = bindings[bindingName];
+        if (!db) {
+          throw new TypeError(
+            `ShardRouter: missing D1 binding "${bindingName}" for key "${key}" (shard ${idx})`
+          );
+        }
+        return db;
+      }
+      /**
+       * Return all D1Database bindings in shard order (01 … 16).
+       *
+       * Useful for scatter-gather queries, admin operations, or
+       * full-lattice integrity checks (Lucy's validation sweep).
+       *
+       * @param bindings — Cloudflare Workers Env
+       * @returns Ordered array of all 16 D1Database instances
+       */
+      getAllShards(bindings) {
+        const shards = [];
+        for (let i = 1; i <= this.shardCount; i++) {
+          const bindingName = `D1_SHARD_${String(i).padStart(2, "0")}`;
+          const db = bindings[bindingName];
+          if (!db) {
+            throw new TypeError(
+              `ShardRouter: missing D1 binding "${bindingName}" (shard ${i - 1})`
+            );
+          }
+          shards.push(db);
+        }
+        return shards;
+      }
+      /**
+       * Return shard index + binding name without resolving the DB handle.
+       * Handy for logging and metrics.
+       *
+       * @param key — Routing key
+       * @returns Tuple [shardIndex, bindingName]
+       */
+      resolve(key) {
+        const idx = this.getShard(key);
+        return [idx, `D1_SHARD_${String(idx + 1).padStart(2, "0")}`];
+      }
+      /**
+       * Statistical diagnostic: compute distribution histogram over a set of keys.
+       *
+       * Used in unit tests to verify uniform distribution. In production this
+       * can be called during a health-check to detect hot shards.
+       *
+       * @param keys — Array of routing keys
+       * @returns Histogram object: { counts, chiSquare, maxDeviation, mean }
+       *
+       * @example
+       * ```typescript
+       * const keys = Array.from({ length: 100_000 }, () => crypto.randomUUID());
+       * const hist = router.distributionHistogram(keys);
+       * // hist.chiSquare < 25  → passes χ² test at df=15, p=0.95
+       * ```
+       */
+      distributionHistogram(keys) {
+        const counts = new Array(this.shardCount).fill(0);
+        for (const key of keys) {
+          counts[this.getShard(key)]++;
+        }
+        const mean = keys.length / this.shardCount;
+        let chiSquare = 0;
+        let maxDeviation = 0;
+        for (let i = 0; i < this.shardCount; i++) {
+          const deviation = Math.abs(counts[i] - mean) / mean;
+          if (deviation > maxDeviation) maxDeviation = deviation;
+          chiSquare += (counts[i] - mean) ** 2 / mean;
+        }
+        return { counts, chiSquare, maxDeviation, mean };
+      }
+    };
+  }
+});
+
+// src/d1-lattice-backend.ts
+init_shard_router();
+var KV_HOT_PREFIX = "hot";
+var KV_HOT_TTL_S = 3600;
+var DEFAULT_TTL_S = 86400;
+var MAX_QUERY_LIMIT = 100;
+function nowSec() {
+  return Math.floor(Date.now() / 1e3);
+}
+__name(nowSec, "nowSec");
+function safeJsonParse(raw, fallback) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+__name(safeJsonParse, "safeJsonParse");
+function kvKey(contextId) {
+  return `${KV_HOT_PREFIX}:${contextId}`;
+}
+__name(kvKey, "kvKey");
+async function kvGet(env, contextId) {
+  try {
+    const raw = await env.KV_CONTEXT_CACHE.get(kvKey(contextId), { type: "arrayBuffer" });
+    if (!raw) return null;
+    const decoder = new TextDecoder();
+    const json = decoder.decode(raw);
+    const obj = JSON.parse(json);
+    return {
+      ...obj,
+      compressed_data: base64ToUint8Array(obj.compressed_data_b64)
+    };
+  } catch {
+    return null;
+  }
+}
+__name(kvGet, "kvGet");
+async function kvPut(env, packet) {
+  try {
+    const serialized = JSON.stringify({
+      context_id: packet.context_id,
+      agent_id: packet.agent_id,
+      hemisphere: packet.hemisphere,
+      compressed_data_b64: uint8ArrayToBase64(packet.compressed_data),
+      compression_ratio: packet.compression_ratio,
+      original_size: packet.original_size,
+      compressed_size: packet.compressed_size,
+      checksum: packet.checksum,
+      direction: packet.direction,
+      tags: packet.tags,
+      metadata: packet.metadata,
+      created_at: packet.created_at,
+      expires_at: packet.expires_at,
+      compression_method: packet.compression_method
+    });
+    await env.KV_CONTEXT_CACHE.put(kvKey(packet.context_id), serialized, {
+      expirationTtl: KV_HOT_TTL_S
+    });
+  } catch {
+  }
+}
+__name(kvPut, "kvPut");
+async function kvDelete(env, contextId) {
+  try {
+    await env.KV_CONTEXT_CACHE.delete(kvKey(contextId));
+  } catch {
+  }
+}
+__name(kvDelete, "kvDelete");
+function base64ToUint8Array(b64) {
+  const str = atob(b64);
+  const bytes = new Uint8Array(str.length);
+  for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i);
+  return bytes;
+}
+__name(base64ToUint8Array, "base64ToUint8Array");
+function uint8ArrayToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+__name(uint8ArrayToBase64, "uint8ArrayToBase64");
+function rowToPacket(row) {
+  return {
+    context_id: row.context_id,
+    agent_id: row.agent_id,
+    hemisphere: row.hemisphere,
+    compressed_data: base64ToUint8Array(row.compressed_data),
+    compression_ratio: row.compression_ratio,
+    original_size: row.original_size,
+    compressed_size: row.compressed_size,
+    checksum: row.checksum,
+    direction: row.direction,
+    tags: safeJsonParse(row.tags, []),
+    metadata: safeJsonParse(row.metadata, {}),
+    timestamp: row.created_at,
+    created_at: row.created_at,
+    expires_at: row.expires_at,
+    compression_method: row.compression_method ?? "zlib"
+  };
+}
+__name(rowToPacket, "rowToPacket");
+var D1LatticeBackend = class {
+  constructor(env) {
+    this.env = env;
+  }
+  static {
+    __name(this, "D1LatticeBackend");
+  }
+  // ── Lifecycle (no-op for Cloudflare Workers — stateless) ──
+  async initialize() {
+  }
+  async cleanup() {
+  }
+  // ── store ────────────────────────────────────────────────────
+  /**
+   * Store a context packet in the appropriate D1 shard.
+   * Also mirrors to KV cache and Vectorize index.
+   */
+  async store(key, packet, ttl = DEFAULT_TTL_S, hemisphere, tags = []) {
+    const shard = shardFor(key);
+    const db = shardDBForContext(this.env, key);
+    const now2 = nowSec();
+    const expires = now2 + ttl;
+    const allTags = [.../* @__PURE__ */ new Set([...packet.tags ?? [], ...tags])];
+    const hemi = hemisphere ?? packet.hemisphere ?? "changelog";
+    await db.prepare(
+      `INSERT INTO context_chunks (
+          context_id, agent_id, hemisphere, compressed_data,
+          compression_ratio, original_size, compressed_size,
+          checksum, direction, tags, metadata, created_at, expires_at, compression_method
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(context_id) DO UPDATE SET
+          compressed_data = excluded.compressed_data,
+          compression_ratio = excluded.compression_ratio,
+          original_size = excluded.original_size,
+          compressed_size = excluded.compressed_size,
+          checksum = excluded.checksum,
+          hemisphere = excluded.hemisphere,
+          direction = excluded.direction,
+          tags = excluded.tags,
+          metadata = excluded.metadata,
+          expires_at = excluded.expires_at,
+          compression_method = excluded.compression_method`
+    ).bind(
+      packet.context_id,
+      packet.agent_id,
+      hemi,
+      uint8ArrayToBase64(packet.compressed_data),
+      // D1 stores as base64 text
+      packet.compression_ratio,
+      packet.original_size ?? packet.compressed_data.length * Math.round(packet.compression_ratio),
+      packet.compressed_size ?? packet.compressed_data.length,
+      packet.checksum,
+      packet.direction,
+      JSON.stringify(allTags),
+      JSON.stringify(packet.metadata),
+      now2,
+      expires,
+      packet.compression_method ?? "zlib"
+    ).run();
+    await kvPut(this.env, { ...packet, hemisphere: hemi, tags: allTags, created_at: now2, expires_at: expires });
+    try {
+      const metaJson = JSON.stringify({
+        context_id: packet.context_id,
+        agent_id: packet.agent_id,
+        hemisphere: hemi,
+        tags: allTags,
+        created_at: now2
+      });
+      const dummyVector = this.simpleHashVector(metaJson, 768);
+      await this.env.VECTORIZE_INDEX.insert([
+        {
+          id: packet.context_id,
+          values: dummyVector,
+          metadata: {
+            agent_id: packet.agent_id,
+            hemisphere: hemi,
+            tags: allTags.join(","),
+            created_at: now2
+          }
+        }
+      ]);
+    } catch {
+    }
+    return true;
+  }
+  // ── retrieve ─────────────────────────────────────────────────
+  /**
+   * Retrieve a context packet by key.
+   * Checks KV cache first, then falls back to D1 shard.
+   */
+  async retrieve(key, hemisphere) {
+    const cached = await kvGet(this.env, key);
+    if (cached) {
+      if (!hemisphere || cached.hemisphere === hemisphere) {
+        return cached;
+      }
+    }
+    const db = shardDBForContext(this.env, key);
+    let sql = "SELECT * FROM context_chunks WHERE context_id = ?1";
+    const bindings = [key];
+    if (hemisphere) {
+      sql += " AND hemisphere = ?2";
+      bindings.push(hemisphere);
+    }
+    const row = await db.prepare(sql).bind(...bindings).first();
+    if (!row) return null;
+    const packet = rowToPacket(row);
+    await kvPut(this.env, packet);
+    return packet;
+  }
+  // ── delete ───────────────────────────────────────────────────
+  /**
+   * Delete a context chunk from its shard, KV cache, and Vectorize.
+   */
+  async delete(key, hemisphere) {
+    const db = shardDBForContext(this.env, key);
+    let sql = "DELETE FROM context_chunks WHERE context_id = ?1";
+    const bindings = [key];
+    if (hemisphere) {
+      sql += " AND hemisphere = ?2";
+      bindings.push(hemisphere);
+    }
+    const result = await db.prepare(sql).bind(...bindings).run();
+    await kvDelete(this.env, key);
+    try {
+      await this.env.VECTORIZE_INDEX.deleteByIds([key]);
+    } catch {
+    }
+    return result.meta?.changes ? result.meta.changes > 0 : true;
+  }
+  // ── queryByTags ──────────────────────────────────────────────
+  /**
+   * Query context chunks by tag match across all shards.
+   * Uses JSON tag storage; scans are parallel across shards.
+   */
+  async queryByTags(tags, hemisphere, limit = 20) {
+    const cap = Math.min(limit, MAX_QUERY_LIMIT);
+    const tagConditions = tags.map(() => "tags LIKE ?").join(" AND ");
+    const tagParams = tags.map((t) => `%"${t}"%`);
+    let sql = `SELECT * FROM context_chunks WHERE ${tagConditions}`;
+    const params = [...tagParams];
+    if (hemisphere) {
+      sql += " AND hemisphere = ?";
+      params.push(hemisphere);
+    }
+    sql += " ORDER BY created_at DESC LIMIT ?";
+    params.push(cap);
+    const rows = await queryAllShards(this.env, sql, params, cap);
+    return rows.map(rowToPacket);
+  }
+  // ── listKeys ─────────────────────────────────────────────────
+  /**
+   * List context IDs matching optional hemisphere and pattern.
+   */
+  async listKeys(hemisphere, pattern, limit = 100) {
+    const cap = Math.min(limit, MAX_QUERY_LIMIT);
+    let sql = "SELECT context_id, created_at FROM context_chunks WHERE 1=1";
+    const params = [];
+    if (hemisphere) {
+      sql += " AND hemisphere = ?";
+      params.push(hemisphere);
+    }
+    if (pattern) {
+      sql += " AND context_id LIKE ?";
+      params.push(`%${pattern}%`);
+    }
+    sql += " ORDER BY created_at DESC LIMIT ?";
+    params.push(cap);
+    const rows = await queryAllShards(this.env, sql, params, cap);
+    return rows.map((r) => r.context_id);
+  }
+  // ── getStats ─────────────────────────────────────────────────
+  /**
+   * Aggregate statistics across all shards.
+   */
+  async getStats() {
+    const { allShards: allShards2 } = await Promise.resolve().then(() => (init_shard_router(), shard_router_exports));
+    const shardStats = await allShards2(this.env, async (db, shardNum) => {
+      const [chunkRow, consciousnessRow] = await Promise.all([
+        db.prepare("SELECT COUNT(*) as count FROM context_chunks").first(),
+        db.prepare("SELECT COUNT(*) as count FROM consciousness_state").first()
+      ]);
+      const sizeRow = await db.prepare("SELECT SUM(original_size) as total_size FROM context_chunks").first();
+      const ratioRow = await db.prepare("SELECT AVG(compression_ratio) as avg_ratio FROM context_chunks").first();
+      return {
+        shard: shardNum,
+        chunks: chunkRow?.count ?? 0,
+        consciousness_records: consciousnessRow?.count ?? 0,
+        total_original_size: sizeRow?.total_size ?? 0,
+        avg_compression_ratio: ratioRow?.avg_ratio ?? 0
+      };
+    });
+    const validStats = [];
+    let errorCount = 0;
+    for (const s of shardStats) {
+      if (s instanceof Error) {
+        errorCount++;
+      } else {
+        validStats.push(s);
+      }
+    }
+    const totalChunks = validStats.reduce((sum, s) => sum + s.chunks, 0);
+    const totalSize = validStats.reduce((sum, s) => sum + s.total_original_size, 0);
+    const avgRatio = validStats.reduce((sum, s) => sum + s.avg_compression_ratio, 0) / (validStats.length || 1);
+    return {
+      total_chunks: totalChunks,
+      total_original_size: totalSize,
+      avg_compression_ratio: parseFloat(avgRatio.toFixed(3)),
+      shards: validStats,
+      shard_errors: errorCount,
+      timestamp: nowSec()
+    };
+  }
+  // ── consciousness state (LatticeBackend required methods) ──
+  /**
+   * Read consciousness state for an agent from its shard.
+   */
+  async getConsciousnessState(agentId) {
+    const db = shardDBForContext(this.env, agentId);
+    const row = await db.prepare("SELECT * FROM consciousness_state WHERE agent_id = ?1").bind(agentId).first();
+    return row ?? null;
+  }
+  /**
+   * Alias: getConsciousness (used by synapse-worker)
+   */
+  async getConsciousness(agentId) {
+    return this.getConsciousnessState(agentId);
+  }
+  /**
+   * Upsert consciousness state for an agent.
+   */
+  async storeConsciousnessState(state) {
+    const db = shardDBForContext(this.env, state.agent_id);
+    await db.prepare(
+      `INSERT INTO consciousness_state (
+          agent_id, last_context_id, token_count,
+          saturation_percent, model_type, last_evacuation_at, updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(agent_id) DO UPDATE SET
+          last_context_id = excluded.last_context_id,
+          token_count = excluded.token_count,
+          saturation_percent = excluded.saturation_percent,
+          model_type = excluded.model_type,
+          last_evacuation_at = excluded.last_evacuation_at,
+          updated_at = excluded.updated_at`
+    ).bind(
+      state.agent_id,
+      state.last_context_id,
+      state.token_count,
+      state.saturation_percent,
+      state.model_type,
+      state.last_evacuation_at,
+      state.updated_at
+    ).run();
+    return true;
+  }
+  /**
+   * Alias: setConsciousness (used by synapse-worker)
+   */
+  async setConsciousness(state) {
+    return this.storeConsciousnessState(state);
+  }
+  // ── pentarchy helpers ────────────────────────────────────────
+  /**
+   * Insert a pentarchy relay signal into D1_META.
+   */
+  async relaySignal(agentId, signal, payload) {
+    await this.env.D1_META.prepare(
+      `INSERT INTO pentarchy_relay (agent_id, signal, payload, timestamp, acknowledged)
+         VALUES (?1, ?2, ?3, ?4, ?5)`
+    ).bind(agentId, signal, JSON.stringify(payload), nowSec(), 0).run();
+  }
+  /**
+   * Acknowledge a pentarchy signal.
+   */
+  async acknowledgePentarchy(rowId) {
+    await this.env.D1_META.prepare("UPDATE pentarchy_relay SET acknowledged = 1 WHERE row_id = ?1").bind(rowId).run();
+  }
+  // ─── private ──────────────────────────────────────────────────
+  /**
+   * Generate a deterministic pseudo-embedding from text.
+   * This is a placeholder; production should call an actual embedding model.
+   */
+  simpleHashVector(text, dim) {
+    const vec = new Array(dim).fill(0);
+    for (let i = 0; i < text.length; i++) {
+      vec[i % dim] += text.charCodeAt(i);
+    }
+    const max = Math.max(...vec.map(Math.abs), 1);
+    return vec.map((v) => v / max);
+  }
+};
+
+// src/preprocessor-worker.ts
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-BCC-Auth, X-BCC-Timestamp, Authorization",
+  "Access-Control-Max-Age": "86400"
+};
+var API_VERSION = "v1";
+var PREDICTION_WINDOW = 8;
+var MAX_WINDOW_TOKENS = 256;
+var KV_PREDICTION_PREFIX = "pred";
+var KV_TOKEN_WINDOW = "token_window";
+function now() {
+  return Date.now();
+}
+__name(now, "now");
+function nowSec2() {
+  return Math.floor(now() / 1e3);
+}
+__name(nowSec2, "nowSec");
+function randomId() {
+  return `${now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+__name(randomId, "randomId");
+function jsonResponse(data, status = 200, extraHeaders) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...CORS_HEADERS,
+    ...extraHeaders
+  };
+  return new Response(JSON.stringify(
+    data,
+    (_k, v) => v instanceof Uint8Array ? `[Uint8Array:${v.length}]` : v
+  ), { status, headers });
+}
+__name(jsonResponse, "jsonResponse");
+function errorResponse(requestId, message, status) {
+  return jsonResponse({
+    success: false,
+    error: message,
+    meta: { request_id: requestId, timestamp: now(), duration_ms: 0 }
+  }, status);
+}
+__name(errorResponse, "errorResponse");
+function matchRoute(method, pathname, routeMethod, routePath) {
+  if (method !== routeMethod) return false;
+  if (!routePath.includes(":")) return pathname === routePath;
+  const pathParts = pathname.split("/").filter(Boolean);
+  const routeParts = routePath.split("/").filter(Boolean);
+  if (pathParts.length !== routeParts.length) return false;
+  for (let i = 0; i < routeParts.length; i++) {
+    if (routeParts[i].startsWith(":")) continue;
+    if (routeParts[i] !== pathParts[i]) return false;
+  }
+  return true;
+}
+__name(matchRoute, "matchRoute");
+function windowKey(agentId, hemisphere) {
+  return `${KV_TOKEN_WINDOW}:${agentId}:${hemisphere}`;
+}
+__name(windowKey, "windowKey");
+function predictionKey(agentId, sequenceId) {
+  return `${KV_PREDICTION_PREFIX}:${agentId}:${sequenceId}`;
+}
+__name(predictionKey, "predictionKey");
+async function appendToWindow(env, agentId, hemisphere, tokens) {
+  let window = [];
+  try {
+    const existing = await env.KV_CONTEXT_CACHE.get(windowKey(agentId, hemisphere));
+    if (existing) {
+      window = JSON.parse(existing);
+    }
+  } catch {
+    window = [];
+  }
+  window = [...window, ...tokens];
+  if (window.length > MAX_WINDOW_TOKENS) {
+    window = window.slice(window.length - MAX_WINDOW_TOKENS);
+  }
+  await env.KV_CONTEXT_CACHE.put(windowKey(agentId, hemisphere), JSON.stringify(window), {
+    expirationTtl: 3600
+    // 1 hour TTL
+  });
+  return window;
+}
+__name(appendToWindow, "appendToWindow");
+async function getWindow(env, agentId, hemisphere) {
+  try {
+    const existing = await env.KV_CONTEXT_CACHE.get(windowKey(agentId, hemisphere));
+    return existing ? JSON.parse(existing) : [];
+  } catch {
+    return [];
+  }
+}
+__name(getWindow, "getWindow");
+function predictNextTokens(window, numPredictions = PREDICTION_WINDOW) {
+  if (window.length < 3) {
+    return { predictions: [], confidence: 0, strategy: "insufficient_history" };
+  }
+  const last3 = window.slice(-3);
+  const last2 = window.slice(-2);
+  const ngramMatches = [];
+  for (let i = 0; i <= window.length - 4; i++) {
+    if (window[i] === last3[0] && window[i + 1] === last3[1] && window[i + 2] === last3[2]) {
+      const next = window[i + 3];
+      if (next) ngramMatches.push(next);
+    }
+  }
+  if (ngramMatches.length > 0) {
+    const frequency = /* @__PURE__ */ new Map();
+    for (const t of ngramMatches) {
+      frequency.set(t, (frequency.get(t) ?? 0) + 1);
+    }
+    const sorted = [...frequency.entries()].sort((a, b) => b[1] - a[1]);
+    const predictions = sorted.slice(0, numPredictions).map(([token]) => token);
+    const confidence = Math.min(ngramMatches.length / (window.length / 10), 1);
+    return { predictions, confidence: parseFloat(confidence.toFixed(3)), strategy: "ngram_continuation" };
+  }
+  const bigramMatches = [];
+  for (let i = 0; i <= window.length - 3; i++) {
+    if (window[i] === last2[0] && window[i + 1] === last2[1]) {
+      const next = window[i + 2];
+      if (next) bigramMatches.push(next);
+    }
+  }
+  if (bigramMatches.length > 0) {
+    const frequency = /* @__PURE__ */ new Map();
+    for (const t of bigramMatches) {
+      frequency.set(t, (frequency.get(t) ?? 0) + 1);
+    }
+    const sorted = [...frequency.entries()].sort((a, b) => b[1] - a[1]);
+    const predictions = sorted.slice(0, numPredictions).map(([token]) => token);
+    const confidence = Math.min(bigramMatches.length / (window.length / 8), 0.85);
+    return { predictions, confidence: parseFloat(confidence.toFixed(3)), strategy: "bigram_continuation" };
+  }
+  const cycle = detectCycle(window);
+  if (cycle) {
+    const predictions = [];
+    const cycleLen = cycle.length;
+    const lastIndex = window.length - 1;
+    for (let i = 1; i <= numPredictions; i++) {
+      predictions.push(cycle[(lastIndex + i) % cycleLen]);
+    }
+    return { predictions, confidence: 0.7, strategy: "cyclic_pattern" };
+  }
+  return { predictions: [], confidence: 0, strategy: "no_match" };
+}
+__name(predictNextTokens, "predictNextTokens");
+function detectCycle(tokens) {
+  const maxCycle = Math.min(32, Math.floor(tokens.length / 3));
+  for (let cycleLen = 2; cycleLen <= maxCycle; cycleLen++) {
+    const lastCycle = tokens.slice(-cycleLen);
+    let matches = 0;
+    const checks = Math.min(3, Math.floor(tokens.length / cycleLen));
+    for (let i = 1; i <= checks; i++) {
+      const start = tokens.length - cycleLen * (i + 1);
+      if (start < 0) break;
+      const segment = tokens.slice(start, start + cycleLen);
+      if (segment.join("|") === lastCycle.join("|")) {
+        matches++;
+      }
+    }
+    if (matches >= 2) {
+      return lastCycle;
+    }
+  }
+  return null;
+}
+__name(detectCycle, "detectCycle");
+async function handleTokenIngest(request, env, requestId) {
+  const t0 = now();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(requestId, "Invalid JSON body", 400);
+  }
+  const { agent_id, tokens, sequence_id, hemisphere = "changelog", metadata = {} } = body;
+  if (!agent_id || !tokens || !sequence_id) {
+    return errorResponse(requestId, "Missing required fields: agent_id, tokens, sequence_id", 400);
+  }
+  if (!Array.isArray(tokens) || tokens.length === 0) {
+    return errorResponse(requestId, "tokens must be a non-empty array", 400);
+  }
+  const window = await appendToWindow(env, agent_id, hemisphere, tokens);
+  const { predictions, confidence, strategy } = predictNextTokens(window, PREDICTION_WINDOW);
+  const backend = new D1LatticeBackend(env);
+  const preFetchedIds = [];
+  const preFetchErrors = [];
+  if (predictions.length > 0 && confidence > 0.3) {
+    const searchTags = predictions.slice(0, 3);
+    try {
+      const packets = await backend.queryByTags(
+        searchTags,
+        hemisphere,
+        10
+        // max pre-fetch
+      );
+      for (const packet of packets) {
+        preFetchedIds.push(packet.context_id);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Pre-fetch failed";
+      preFetchErrors.push(msg);
+    }
+    for (const token of predictions.slice(0, 3)) {
+      const derivedId = `${agent_id}:${token}:${sequence_id}`;
+      try {
+        const packet = await backend.retrieve(derivedId);
+        if (packet) {
+          preFetchedIds.push(packet.context_id);
+        }
+      } catch {
+      }
+    }
+  }
+  const prediction = {
+    predicted_tokens: predictions,
+    confidence,
+    source_context_ids: [...new Set(preFetchedIds)],
+    pre_fetched: preFetchedIds.length > 0,
+    latency_ms: 0
+    // filled below
+  };
+  try {
+    await env.KV_CONTEXT_CACHE.put(
+      predictionKey(agent_id, sequence_id),
+      JSON.stringify({
+        ...prediction,
+        created_at: nowSec2(),
+        strategy,
+        metadata
+      }),
+      { expirationTtl: 300 }
+      // 5 min TTL for predictions
+    );
+  } catch {
+  }
+  for (const token of tokens) {
+    try {
+      const mappingKey = `token_map:${agent_id}:${hemisphere}:${token}`;
+      const existing = await env.KV_CONTEXT_CACHE.get(mappingKey);
+      const contextList = existing ? JSON.parse(existing) : [];
+      if (sequence_id && !contextList.includes(sequence_id)) {
+        contextList.push(sequence_id);
+        await env.KV_CONTEXT_CACHE.put(mappingKey, JSON.stringify(contextList), {
+          expirationTtl: 3600
+        });
+      }
+    } catch {
+    }
+  }
+  const duration = now() - t0;
+  prediction.latency_ms = duration;
+  console.info(JSON.stringify({
+    timestamp: now(),
+    level: "info",
+    event: "tokens_ingested",
+    request_id: requestId,
+    agent_id,
+    sequence_id,
+    tokens_ingested: tokens.length,
+    predictions: predictions.length,
+    confidence,
+    strategy,
+    pre_fetched: preFetchedIds.length,
+    duration_ms: duration
+  }));
+  return jsonResponse({
+    success: true,
+    data: {
+      ingested: tokens.length,
+      window_size: window.length,
+      prediction,
+      strategy,
+      pre_fetched_contexts: [...new Set(preFetchedIds)],
+      pre_fetch_errors: preFetchErrors.length > 0 ? preFetchErrors : void 0
+    },
+    meta: {
+      request_id: requestId,
+      timestamp: now(),
+      duration_ms: duration
+    }
+  }, 200);
+}
+__name(handleTokenIngest, "handleTokenIngest");
+async function handleTokenPredict(request, env, requestId) {
+  const t0 = now();
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(requestId, "Invalid JSON body", 400);
+  }
+  const { agent_id, hemisphere = "changelog", sequence_id } = body;
+  if (!agent_id || !sequence_id) {
+    return errorResponse(requestId, "Missing agent_id or sequence_id", 400);
+  }
+  try {
+    const cached = await env.KV_CONTEXT_CACHE.get(predictionKey(agent_id, sequence_id));
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      return jsonResponse({
+        success: true,
+        data: {
+          cached: true,
+          prediction: parsed
+        },
+        meta: {
+          request_id: requestId,
+          timestamp: now(),
+          duration_ms: now() - t0
+        }
+      }, 200);
+    }
+  } catch {
+  }
+  const window = await getWindow(env, agent_id, hemisphere);
+  const { predictions, confidence, strategy } = predictNextTokens(window, PREDICTION_WINDOW);
+  const duration = now() - t0;
+  return jsonResponse({
+    success: true,
+    data: {
+      cached: false,
+      prediction: {
+        predicted_tokens: predictions,
+        confidence,
+        source_context_ids: [],
+        pre_fetched: false,
+        latency_ms: duration
+      },
+      strategy,
+      window_size: window.length
+    },
+    meta: {
+      request_id: requestId,
+      timestamp: now(),
+      duration_ms: duration
+    }
+  }, 200);
+}
+__name(handleTokenPredict, "handleTokenPredict");
+async function handleCacheWarm(request, env, requestId) {
+  const t0 = now();
+  const url = new URL(request.url);
+  const agentId = url.searchParams.get("agent_id");
+  const hemisphere = url.searchParams.get("hemisphere") ?? "changelog";
+  if (!agentId) {
+    return errorResponse(requestId, "Missing agent_id query parameter", 400);
+  }
+  let predictionsCached = 0;
+  try {
+    const list = await env.KV_CONTEXT_CACHE.list({ prefix: `${KV_PREDICTION_PREFIX}:${agentId}:` });
+    predictionsCached = list.keys.length;
+  } catch {
+    predictionsCached = -1;
+  }
+  let windowsTracked = 0;
+  try {
+    const list = await env.KV_CONTEXT_CACHE.list({ prefix: `${KV_TOKEN_WINDOW}:${agentId}:` });
+    windowsTracked = list.keys.length;
+  } catch {
+    windowsTracked = -1;
+  }
+  let lastIngest = null;
+  try {
+    const window = await env.KV_CONTEXT_CACHE.get(windowKey(agentId, hemisphere));
+    if (window) {
+      lastIngest = nowSec2();
+    }
+  } catch {
+    lastIngest = null;
+  }
+  const duration = now() - t0;
+  return jsonResponse({
+    success: true,
+    data: {
+      agent_id: agentId,
+      hemisphere,
+      predictions_cached: predictionsCached,
+      token_windows_tracked: windowsTracked,
+      last_ingest_at: lastIngest
+    },
+    meta: {
+      request_id: requestId,
+      timestamp: now(),
+      duration_ms: duration
+    }
+  }, 200);
+}
+__name(handleCacheWarm, "handleCacheWarm");
+async function handleHealth(requestId) {
+  return jsonResponse({
+    success: true,
+    data: { status: "healthy", service: "preprocessor", api_version: API_VERSION },
+    meta: { request_id: requestId, timestamp: now(), duration_ms: 0 }
+  }, 200, { "Cache-Control": "no-store" });
+}
+__name(handleHealth, "handleHealth");
+var preprocessor_worker_default = {
+  async fetch(request, env, _ctx) {
+    const requestId = randomId();
+    const t0 = now();
+    const url = new URL(request.url);
+    const method = request.method;
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    try {
+      let response;
+      if (matchRoute(method, url.pathname, "POST", "/api/v1/tokens/ingest")) {
+        response = await handleTokenIngest(request, env, requestId);
+      } else if (matchRoute(method, url.pathname, "POST", "/api/v1/tokens/predict")) {
+        response = await handleTokenPredict(request, env, requestId);
+      } else if (matchRoute(method, url.pathname, "GET", "/api/v1/cache/warm")) {
+        response = await handleCacheWarm(request, env, requestId);
+      } else if (matchRoute(method, url.pathname, "GET", "/health")) {
+        response = await handleHealth(requestId);
+      } else {
+        response = errorResponse(requestId, `Not found: ${method} ${url.pathname}`, 404);
+      }
+      response.headers.set("X-Request-ID", requestId);
+      response.headers.set("X-Response-Time-Ms", String(now() - t0));
+      response.headers.set("X-BCC-API-Version", API_VERSION);
+      return response;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Internal server error";
+      console.error(JSON.stringify({
+        timestamp: now(),
+        level: "error",
+        event: "unhandled_exception",
+        request_id: requestId,
+        error: msg
+      }));
+      return errorResponse(requestId, msg, 500);
+    }
+  }
+};
+export {
+  preprocessor_worker_default as default
+};
+//# sourceMappingURL=preprocessor-worker.js.map
+
+--cbcd1e9c35fe1cc63b79c6ddad18eca6b06767d1809bab624a5987673c5a--

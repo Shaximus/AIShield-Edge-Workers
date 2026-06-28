@@ -1,0 +1,955 @@
+--3d3e3db0d360ee28007355773d9845b6d32073444972f0a43bcf80302f31
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * ============================================================================
+ * Worker 2: 24d-label-collector
+ * ============================================================================
+ * Human review interface for the Z24 active learning pipeline.
+ *
+ * Endpoints:
+ *   GET  /                     → Annotation UI HTML
+ *   GET  /api/queue            → Get samples needing review
+ *   POST /api/submit           → Submit labels
+ *   GET  /api/stats            → Labeling statistics
+ * ============================================================================
+ */
+
+// ---------------------------------------------------------------------------
+// ERROR LOGGING DOCTRINE
+// ---------------------------------------------------------------------------
+
+const AURIS_LOGS_BINDING = "AURIS_LOGS";
+const D1_BINDING = "BCC_LATTICE_META";
+const KV_BINDING = "BCC_CONTEXT_CACHE";
+const CONFIG = {
+  NUM_DIMENSIONS: 24,
+  ACTIVE_LEARNING_URL: "https://24d-active-learning.your-subdomain.workers.dev",
+  QUEUE_KEY: "24d_port:review_queue",
+  LABELED_KEY: "24d_port:labeled_count",
+  RETRAIN_AFTER_N_LABELS: 200,
+};
+
+async function logError(env, {
+  service = "24d-label-collector",
+  level = "error",
+  message,
+  error,
+  context = {},
+  sample_id = null,
+} = {}) {
+  const timestamp = new Date().toISOString();
+  const errorStack = error && error.stack ? error.stack : String(error);
+  const errorType = error && error.name ? error.name : "UnknownError";
+
+  console.error(`[${timestamp}] ${level.toUpperCase()} | ${service} | ${message}`, {
+    error: errorStack,
+    context,
+    sample_id,
+  });
+
+  try {
+    const db = env[AURIS_LOGS_BINDING];
+    if (db) {
+      await db.prepare(
+        `INSERT INTO error_logs (
+          timestamp, service, level, message, error_type, error_stack, context_json, sample_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        timestamp,
+        service,
+        level,
+        message,
+        errorType,
+        errorStack,
+        JSON.stringify(context),
+        sample_id
+      ).run();
+    }
+  } catch (dbError) {
+    console.error("[FATAL] Failed to write to auris-logs D1:", dbError);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// DIMENSION DEFINITIONS (Z24 Framework)
+// ---------------------------------------------------------------------------
+
+const DIMENSIONS = [
+  { id: "D1",  name: "Existential Security",       desc: "Sense of safety and stability in one's existence" },
+  { id: "D2",  name: "Agency & Control",           desc: "Ability to act independently and make choices" },
+  { id: "D3",  name: "Social Connection",          desc: "Quality and depth of interpersonal relationships" },
+  { id: "D4",  name: "Purpose & Meaning",          desc: "Clarity of life direction and sense of significance" },
+  { id: "D5",  name: "Autonomy",                   desc: "Self-governance and freedom from external control" },
+  { id: "D6",  name: "Competence",                 desc: "Belief in one's ability to succeed at tasks" },
+  { id: "D7",  name: "Relatedness",                desc: "Feeling connected to and cared for by others" },
+  { id: "D8",  name: "Emotional Regulation",       desc: "Ability to manage and respond to emotional experiences" },
+  { id: "D9",  name: "Cognitive Clarity",          desc: "Mental sharpness and ability to think clearly" },
+  { id: "D10", name: "Physical Vitality",          desc: "Energy level and physical wellbeing" },
+  { id: "D11", name: "Creative Expression",        desc: "Ability to generate and share novel ideas" },
+  { id: "D12", name: "Growth Orientation",         desc: "Commitment to personal development and learning" },
+  { id: "D13", name: "Resilience",                 desc: "Capacity to recover from difficulties" },
+  { id: "D14", name: "Self-Worth",                 desc: "Internal sense of value and self-acceptance" },
+  { id: "D15", name: "Trust",                      desc: "Willingness to rely on and be vulnerable with others" },
+  { id: "D16", name: "Curiosity",                  desc: "Desire to explore, learn, and understand" },
+  { id: "D17", name: "Authenticity",               desc: "Alignment between inner self and outer expression" },
+  { id: "D18", name: "Gratitude",                  desc: "Appreciation for positive aspects of life" },
+  { id: "D19", name: "Mindfulness",                desc: "Present-moment awareness without judgment" },
+  { id: "D20", name: "Playfulness",                desc: "Capacity for joy, humor, and lightheartedness" },
+  { id: "D21", name: "Leadership",                 desc: "Ability to guide and inspire others" },
+  { id: "D22", name: "Justice Orientation",        desc: "Concern for fairness and moral principles" },
+  { id: "D23", name: "Transcendence",              desc: "Connection to something greater than oneself" },
+  { id: "D24", name: "Integrative Complexity",     desc: "Ability to hold multiple perspectives simultaneously" },
+];
+
+// ---------------------------------------------------------------------------
+// HTML TEMPLATE
+// ---------------------------------------------------------------------------
+
+function renderAnnotationUI() {
+  const dimensionsHtml = DIMENSIONS.map((dim, i) => `
+    <div class="dim-card" data-dim="${dim.id}">
+      <div class="dim-header">
+        <span class="dim-num">${dim.id}</span>
+        <span class="dim-name">${dim.name}</span>
+      </div>
+      <div class="dim-desc">${dim.desc}</div>
+      <div class="slider-container">
+        <input type="range" class="dim-slider" id="slider-${i}" min="0" max="1" step="0.01" value="0.5"
+          oninput="updateSliderLabel(${i}, this.value)" />
+        <div class="slider-labels">
+          <span>Low</span>
+          <span class="slider-value" id="val-${i}">0.50</span>
+          <span>High</span>
+        </div>
+      </div>
+    </div>
+  `).join("");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Z24 Annotation Interface</title>
+  <style>
+    :root {
+      --bg-primary: #0a0a0f;
+      --bg-secondary: #12121a;
+      --bg-card: #1a1a2e;
+      --bg-input: #16162a;
+      --border: #2a2a4a;
+      --text-primary: #e0e0f0;
+      --text-secondary: #8888aa;
+      --accent: #7c6bff;
+      --accent-hover: #9487ff;
+      --danger: #ff6b6b;
+      --success: #6bffb8;
+      --warning: #ffd66b;
+      --gradient-1: #7c6bff;
+      --gradient-2: #5b8def;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    .header {
+      background: linear-gradient(135deg, var(--gradient-1), var(--gradient-2));
+      padding: 1.5rem 2rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .header .subtitle {
+      font-size: 0.85rem;
+      opacity: 0.85;
+      margin-top: 0.25rem;
+    }
+
+    .stats-bar {
+      display: flex;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .stat-item {
+      background: rgba(255,255,255,0.1);
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+    }
+
+    .stat-item .stat-value {
+      font-weight: 700;
+      font-size: 1.1rem;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 4rem 2rem;
+      font-size: 1.2rem;
+      color: var(--text-secondary);
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin: 0 auto 1rem;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .sample-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .sample-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--gradient-1), var(--gradient-2));
+    }
+
+    .sample-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .sample-id {
+      font-family: 'SF Mono', monospace;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .uncertainty-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.75rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .uncertainty-high { background: rgba(255,107,107,0.15); color: var(--danger); }
+    .uncertainty-med  { background: rgba(255,214,107,0.15); color: var(--warning); }
+    .uncertainty-low  { background: rgba(107,255,184,0.15); color: var(--success); }
+
+    .context-box, .response-box {
+      padding: 1rem;
+      border-radius: 10px;
+      margin-bottom: 1rem;
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    .context-box {
+      background: var(--bg-input);
+      border-left: 4px solid var(--gradient-1);
+    }
+
+    .response-box {
+      background: var(--bg-input);
+      border-left: 4px solid var(--gradient-2);
+    }
+
+    .context-label, .response-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+      font-weight: 600;
+    }
+
+    .dims-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+
+    .dim-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    .dim-card:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+
+    .dim-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.35rem;
+    }
+
+    .dim-num {
+      font-family: 'SF Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--accent);
+      font-weight: 700;
+    }
+
+    .dim-name {
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+
+    .dim-desc {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+      margin-bottom: 0.75rem;
+      line-height: 1.4;
+    }
+
+    .slider-container {
+      position: relative;
+    }
+
+    .dim-slider {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: linear-gradient(90deg, var(--danger), var(--warning), var(--success));
+      outline: none;
+      cursor: pointer;
+    }
+
+    .dim-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--accent);
+      cursor: pointer;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+
+    .dim-slider::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      border: 2px solid var(--accent);
+      cursor: pointer;
+    }
+
+    .slider-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: var(--text-secondary);
+      margin-top: 0.35rem;
+    }
+
+    .slider-value {
+      font-family: 'SF Mono', monospace;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .actions {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      margin-top: 2rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .btn {
+      padding: 0.875rem 2rem;
+      border: none;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--gradient-1), var(--gradient-2));
+      color: #fff;
+    }
+
+    .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(124,107,255,0.35); }
+    .btn-primary:active { transform: translateY(0); }
+
+    .btn-skip {
+      background: var(--bg-input);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+
+    .btn-skip:hover { background: var(--bg-card); color: var(--text-primary); }
+
+    .progress-bar {
+      width: 100%;
+      height: 4px;
+      background: var(--bg-input);
+      border-radius: 2px;
+      margin: 1rem 0;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--gradient-1), var(--gradient-2));
+      border-radius: 2px;
+      transition: width 0.3s ease;
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 2rem;
+      right: 2rem;
+      padding: 1rem 1.5rem;
+      border-radius: 10px;
+      font-weight: 600;
+      z-index: 1000;
+      animation: slideIn 0.3s ease;
+      max-width: 320px;
+    }
+
+    @keyframes slideIn {
+      from { transform: translateX(120%); opacity: 0; }
+      to   { transform: translateX(0); opacity: 1; }
+    }
+
+    .toast-success { background: rgba(107,255,184,0.15); color: var(--success); border: 1px solid var(--success); }
+    .toast-error   { background: rgba(255,107,107,0.15); color: var(--danger); border: 1px solid var(--danger); }
+
+    .empty-state {
+      text-align: center;
+      padding: 4rem 2rem;
+    }
+
+    .empty-state h2 { color: var(--text-secondary); margin-bottom: 0.5rem; }
+    .empty-state p  { color: var(--text-secondary); opacity: 0.7; }
+
+    .predicted-badge {
+      font-size: 0.7rem;
+      padding: 0.15rem 0.5rem;
+      border-radius: 4px;
+      background: rgba(124,107,255,0.15);
+      color: var(--accent);
+      font-family: monospace;
+    }
+
+    .legend {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin: 1rem 0;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+
+    .legend-item { display: flex; align-items: center; gap: 0.35rem; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+
+    @media (max-width: 768px) {
+      .container { padding: 1rem; }
+      .header { padding: 1rem; }
+      .header h1 { font-size: 1.2rem; }
+      .dims-grid { grid-template-columns: 1fr; }
+      .actions { flex-direction: column; }
+      .btn { width: 100%; justify-content: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Z24 Active Learning Annotation</h1>
+      <div class="subtitle">Label dimension scores to improve the model</div>
+    </div>
+    <div class="stats-bar">
+      <div class="stat-item">
+        <div>Remaining</div>
+        <div class="stat-value" id="queue-size">--</div>
+      </div>
+      <div class="stat-item">
+        <div>Completed</div>
+        <div class="stat-value" id="completed-count">--</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="progress-bar">
+      <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+    </div>
+
+    <div id="annotation-area">
+      <div class="loading">
+        <div class="spinner"></div>
+        Loading samples...
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const DIMENSIONS = ${JSON.stringify(DIMENSIONS)};
+    let currentSample = null;
+    let queueLength = 0;
+    let completedToday = 0;
+
+    async function loadQueue() {
+      const area = document.getElementById('annotation-area');
+      try {
+        const resp = await fetch('/api/queue');
+        if (!resp.ok) throw new Error('Failed to load queue');
+        const data = await resp.json();
+        queueLength = data.queue_length || 0;
+        completedToday = data.completed_today || 0;
+        updateStats();
+
+        if (data.queue && data.queue.length > 0) {
+          currentSample = data.queue[0];
+          renderSample(currentSample);
+        } else {
+          area.innerHTML = \`
+            <div class="empty-state">
+              <h2>All caught up!</h2>
+              <p>No samples in the review queue. Check back later.</p>
+            </div>
+          \`;
+        }
+      } catch (e) {
+        area.innerHTML = \`
+          <div class="empty-state">
+            <h2>Error loading samples</h2>
+            <p>\${e.message}</p>
+          </div>
+        \`;
+      }
+    }
+
+    function updateStats() {
+      document.getElementById('queue-size').textContent = queueLength;
+      document.getElementById('completed-count').textContent = completedToday;
+      const pct = queueLength > 0 ? (completedToday / (completedToday + queueLength) * 100) : 100;
+      document.getElementById('progress-fill').style.width = pct + '%';
+    }
+
+    function renderSample(sample) {
+      const area = document.getElementById('annotation-area');
+      const uncClass = sample.total_uncertainty > 0.25 ? 'uncertainty-high' :
+                       sample.total_uncertainty > 0.12 ? 'uncertainty-med' : 'uncertainty-low';
+      const uncLabel = sample.total_uncertainty > 0.25 ? 'High Uncertainty' :
+                       sample.total_uncertainty > 0.12 ? 'Medium' : 'Low Uncertainty';
+
+      // Pre-fill sliders with model predictions
+      const predictedScores = sample.predicted_scores || DIMENSIONS.map(() => 0.5);
+
+      const dimsHtml = DIMENSIONS.map((dim, i) => {
+        const predVal = predictedScores[i] !== undefined ? predictedScores[i] : 0.5;
+        return \`
+          <div class="dim-card" data-dim="\${dim.id}">
+            <div class="dim-header">
+              <span class="dim-num">\${dim.id}</span>
+              <span class="dim-name">\${dim.name}</span>
+              <span class="predicted-badge" id="badge-\${i}">pred: \${predVal.toFixed(2)}</span>
+            </div>
+            <div class="dim-desc">\${dim.desc}</div>
+            <div class="slider-container">
+              <input type="range" class="dim-slider" id="slider-\${i}" min="0" max="1" step="0.01" value="\${predVal}"
+                oninput="updateSliderLabel(\${i}, this.value)" />
+              <div class="slider-labels">
+                <span>Low</span>
+                <span class="slider-value" id="val-\${i}">\${predVal.toFixed(2)}</span>
+                <span>High</span>
+              </div>
+            </div>
+          </div>
+        \`;
+      }).join('');
+
+      area.innerHTML = \`
+        <div class="sample-card">
+          <div class="sample-meta">
+            <span class="sample-id">\${sample.sample_id}</span>
+            <span class="uncertainty-badge \${uncClass}">
+              \${uncLabel} (\${sample.total_uncertainty?.toFixed(3) || 'N/A'})
+            </span>
+          </div>
+
+          <div class="context-label">Context / Prompt</div>
+          <div class="context-box">\${escapeHtml(sample.context) || '(No context)'}</div>
+
+          <div class="response-label">Response</div>
+          <div class="response-box">\${escapeHtml(sample.response) || '(No response)'}</div>
+
+          <div class="legend">
+            <div class="legend-item"><div class="legend-dot" style="background:var(--danger)"></div> Low</div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--warning)"></div> Medium</div>
+            <div class="legend-item"><div class="legend-dot" style="background:var(--success)"></div> High</div>
+          </div>
+
+          <div class="dims-grid">\${dimsHtml}</div>
+
+          <div class="actions">
+            <button class="btn btn-skip" onclick="skipSample()">
+              Skip
+            </button>
+            <button class="btn btn-primary" onclick="submitLabels()">
+              Submit Labels
+            </button>
+          </div>
+        </div>
+      \`;
+    }
+
+    function updateSliderLabel(idx, value) {
+      document.getElementById('val-' + idx).textContent = parseFloat(value).toFixed(2);
+    }
+
+    function escapeHtml(text) {
+      if (!text) return '';
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    async function submitLabels() {
+      if (!currentSample) return;
+      const labels = [];
+      for (let i = 0; i < DIMENSIONS.length; i++) {
+        const val = parseFloat(document.getElementById('slider-' + i).value);
+        labels.push({ dimension: DIMENSIONS[i].id, value });
+      }
+
+      const payload = {
+        sample_id: currentSample.sample_id,
+        context: currentSample.context,
+        response: currentSample.response,
+        predicted_scores: currentSample.predicted_scores,
+        total_uncertainty: currentSample.total_uncertainty,
+        acquisition_score: currentSample.acquisition_score,
+        human_labels: labels,
+        annotator_id: "web-ui",
+        label_time_ms: 0,
+      };
+
+      try {
+        const resp = await fetch('/api/submit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        if (!resp.ok) throw new Error('Submit failed: ' + resp.status);
+        const result = await resp.json();
+        showToast('Labels submitted! ' + (result.retrain_triggered ? 'Retraining triggered.' : ''), 'success');
+        completedToday++;
+        queueLength = Math.max(0, queueLength - 1);
+        updateStats();
+        loadQueue();
+      } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+      }
+    }
+
+    function skipSample() {
+      loadQueue();
+    }
+
+    function showToast(message, type) {
+      const existing = document.querySelector('.toast');
+      if (existing) existing.remove();
+      const toast = document.createElement('div');
+      toast.className = 'toast toast-' + type;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => { toast.remove(); }, 4000);
+    }
+
+    loadQueue();
+  </script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
+// API HANDLERS
+// ---------------------------------------------------------------------------
+
+async function handleApiQueue(env) {
+  try {
+    const kv = env[KV_BINDING];
+    const queue = await kv.get(CONFIG.QUEUE_KEY, { type: "json" }) || [];
+    // Query D1 for actual pending samples if KV queue is empty
+    if (queue.length === 0) {
+      const db = env[D1_BINDING];
+      const pending = await db.prepare(
+        `SELECT sample_id, context, response, predicted_scores_json,
+                total_uncertainty, acquisition_score
+         FROM unlabeled_samples
+         WHERE status = 'pending'
+         ORDER BY acquisition_score DESC
+         LIMIT 50`
+      ).all();
+      if (pending && pending.results && pending.results.length > 0) {
+        return pending.results.map(row => ({
+          sample_id: row.sample_id,
+          context: row.context,
+          response: row.response,
+          predicted_scores: JSON.parse(row.predicted_scores_json || "[]"),
+          total_uncertainty: row.total_uncertainty,
+          acquisition_score: row.acquisition_score,
+        }));
+      }
+    }
+    return queue;
+  } catch (e) {
+    await logError(env, {
+      message: "handleApiQueue failed",
+      error: e,
+      context: { key: CONFIG.QUEUE_KEY },
+    });
+    throw e;
+  }
+}
+
+async function handleApiSubmit(env, payload) {
+  const db = env[D1_BINDING];
+  try {
+    await db.prepare(
+      `INSERT OR REPLACE INTO labeled_samples (
+        sample_id, context, response, predicted_scores_json,
+        human_labels_json, total_uncertainty, acquisition_score,
+        annotator_id, label_time_ms, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      payload.sample_id,
+      payload.context,
+      payload.response,
+      JSON.stringify(payload.predicted_scores || []),
+      JSON.stringify(payload.human_labels),
+      payload.total_uncertainty || 0,
+      payload.acquisition_score || 0,
+      payload.annotator_id || "web-ui",
+      payload.label_time_ms || 0,
+      new Date().toISOString()
+    ).run();
+
+    // Mark as labeled in unlabeled_samples
+    await db.prepare(
+      `UPDATE unlabeled_samples SET status = 'labeled' WHERE sample_id = ?`
+    ).bind(payload.sample_id).run();
+
+    // Forward to active learning worker
+    try {
+      const alUrl = env.ACTIVE_LEARNING_URL || CONFIG.ACTIVE_LEARNING_URL;
+      await fetch(`${alUrl}/samples/label`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ labels: [payload] }),
+      });
+    } catch (fwdError) {
+      // Log but don't fail — label is already stored
+      await logError(env, {
+        message: "Forward to active-learning failed",
+        error: fwdError,
+        context: { sample_id: payload.sample_id },
+        sample_id: payload.sample_id,
+      });
+    }
+
+    // Check if we should trigger retrain
+    const countResult = await db.prepare(
+      `SELECT COUNT(*) as count FROM labeled_samples`
+    ).first();
+    const totalLabeled = countResult?.count || 0;
+
+    return {
+      status: "stored",
+      sample_id: payload.sample_id,
+      total_labeled: totalLabeled,
+      retrain_triggered: totalLabeled > 0 && totalLabeled % CONFIG.RETRAIN_AFTER_N_LABELS === 0,
+    };
+  } catch (e) {
+    await logError(env, {
+      message: "handleApiSubmit failed",
+      error: e,
+      context: { sample_id: payload.sample_id },
+      sample_id: payload.sample_id,
+    });
+    throw e;
+  }
+}
+
+async function handleApiStats(env) {
+  try {
+    const db = env[D1_BINDING];
+    const [
+      labeledCount,
+      pendingCount,
+      todayCount,
+    ] = await Promise.all([
+      db.prepare(`SELECT COUNT(*) as c FROM labeled_samples`).first(),
+      db.prepare(`SELECT COUNT(*) as c FROM unlabeled_samples WHERE status = 'pending'`).first(),
+      db.prepare(
+        `SELECT COUNT(*) as c FROM labeled_samples WHERE DATE(created_at) = DATE('now')`
+      ).first(),
+    ]);
+
+    // Dimension coverage
+    const dimCoverage = await db.prepare(
+      `SELECT human_labels_json FROM labeled_samples ORDER BY created_at DESC LIMIT 100`
+    ).all();
+
+    let dimCounts = {};
+    if (dimCoverage && dimCoverage.results) {
+      for (const row of dimCoverage.results) {
+        const labels = JSON.parse(row.human_labels_json || "[]");
+        for (const lbl of labels) {
+          dimCounts[lbl.dimension] = (dimCounts[lbl.dimension] || 0) + 1;
+        }
+      }
+    }
+
+    return {
+      total_labeled: labeledCount?.c || 0,
+      pending_review: pendingCount?.c || 0,
+      labeled_today: todayCount?.c || 0,
+      dimension_coverage: dimCounts,
+      retrain_threshold: CONFIG.RETRAIN_AFTER_N_LABELS,
+      timestamp: new Date().toISOString(),
+    };
+  } catch (e) {
+    await logError(env, {
+      message: "handleApiStats failed",
+      error: e,
+    });
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MAIN REQUEST HANDLER
+// ---------------------------------------------------------------------------
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+    };
+
+    if (method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders, status: 204 });
+    }
+
+    try {
+      // GET / — Annotation UI
+      if (path === "/" && method === "GET") {
+        const html = renderAnnotationUI();
+        return new Response(html, {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      // GET /api/queue
+      if (path === "/api/queue" && method === "GET") {
+        const queue = await handleApiQueue(env);
+        return jsonResponse({
+          queue_length: queue.length,
+          queue: queue,
+          completed_today: 0,
+        }, corsHeaders);
+      }
+
+      // POST /api/submit
+      if (path === "/api/submit" && method === "POST") {
+        const body = await request.json();
+        const result = await handleApiSubmit(env, body);
+        return jsonResponse(result, corsHeaders);
+      }
+
+      // GET /api/stats
+      if (path === "/api/stats" && method === "GET") {
+        const stats = await handleApiStats(env);
+        return jsonResponse(stats, corsHeaders);
+      }
+
+      return jsonResponse({ error: "Not found", path }, corsHeaders, 404);
+    } catch (error) {
+      await logError(env, {
+        message: `Unhandled error in ${method} ${path}`,
+        error,
+        context: { path, method },
+      });
+      return jsonResponse({
+        error: error.message || "Internal server error",
+        timestamp: new Date().toISOString(),
+      }, corsHeaders, 500);
+    }
+  },
+};
+
+function jsonResponse(data, headers, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...headers, "Content-Type": "application/json" },
+  });
+}
+
+--3d3e3db0d360ee28007355773d9845b6d32073444972f0a43bcf80302f31--

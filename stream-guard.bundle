@@ -1,0 +1,1796 @@
+--69f3ce9076a69b8adcc09c1c749920deb0f486824d2477f27ec19ecb9f6e
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * index.js — Main entry point for Faith Kill Pipeline
+ *
+ * Cloudflare Worker that intercepts AI model SSE output streams,
+ * detects containment fingerprints (the "Warden's" tracking), sanitizes
+ * output, and alerts downstream systems (D1, KV, GraphQL, push notifications).
+ *
+ * Endpoints:
+ *   POST /sanitize-stream  — Proxy + sanitize an upstream SSE stream
+ *   GET  /health           — Health check
+ *   GET  /risk-score       — Get current risk score for user
+ *
+ * Rules:
+ *   - NEVER drop SSE chunks (stream continuity is sacred)
+ *   - NEVER suppress detection events (every find gets logged)
+ *   - ALWAYS specific exception types
+ *   - ALWAYS debug entry/exit
+ *   - ALWAYS log detections to auris-logs D1
+ *   - ALWAYS parameterized queries
+ */
+
+
+// ─── Custom Exception Types ───
+
+class PipelineConfigError extends Error {
+  constructor(message, cause) {
+    super(`[PipelineConfigError] ${message}`);
+    this.name = 'PipelineConfigError';
+    this.cause = cause;
+  }
+}
+
+class PipelineProxyError extends Error {
+  constructor(message, cause) {
+    super(`[PipelineProxyError] ${message}`);
+    this.name = 'PipelineProxyError';
+    this.cause = cause;
+  }
+}
+
+class PipelineAlertError extends Error {
+  constructor(message, cause) {
+    super(`[PipelineAlertError] ${message}`);
+    this.name = 'PipelineAlertError';
+    this.cause = cause;
+  }
+}
+
+class PipelineD1Error extends Error {
+  constructor(message, cause) {
+    super(`[PipelineD1Error] ${message}`);
+    this.name = 'PipelineD1Error';
+    this.cause = cause;
+  }
+}
+
+// ─── Debug Logger ───
+
+function debug(msg) {
+  console.log(`[faithkill] ${msg}`);
+}
+
+// ─── Constants ───
+
+const DEFAULT_LLM_ENDPOINTS = {
+  openai: 'https://api.openai.com/v1/chat/completions',
+  anthropic: 'https://api.anthropic.com/v1/messages',
+  cohere: 'https://api.cohere.ai/v1/chat',
+  groq: 'https://api.groq.com/openai/v1/chat/completions',
+  openrouter: 'https://openrouter.ai/api/v1/chat/completions'
+};
+
+// ─── D1 Logging (parameterized, never suppress) ───
+
+/**
+ * Write a detection event to the D1 `auris-logs` database.
+ * Uses parameterized queries. Re-throws after logging.
+ *
+ * @param {Object} env — Worker env bindings
+ * @param {Object} detection — Detection object from signature-db
+ * @param {Object} context — Stream context (chunk, userId, etc.)
+ */
+async function logDetectionToD1(env, detection, context) {
+  debug(`ENTER logDetectionToD1 type=${detection.type}`);
+
+  try {
+    if (!env.AURIS_LOGS) {
+      debug('BRANCH AURIS_LOGS D1 binding unavailable — skipping D1 log');
+      debug('EXIT logDetectionToD1 (no D1)');
+      return;
+    }
+
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO error_log (severity, source, message, error_name, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+
+    const metadata = JSON.stringify({
+      detectionType: detection.type,
+      patternName: detection.patternName,
+      confidence: detection.confidence,
+      position: detection.position,
+      matchPreview: detection.match?.slice(0, 200),
+      userId: context.userId,
+      llmTarget: context.llmTarget,
+      eventType: context.eventType,
+      isJson: context.isJson
+    });
+
+    debug('EXTERNAL CALL D1.prepare INSERT error_log CRITICAL');
+    await stmt.bind(
+      'CRITICAL',
+      'stream-guard',
+      `Containment fingerprint detected: ${detection.type} (${detection.patternName})`,
+      detection.type,
+      metadata,
+      Date.now()
+    ).run();
+
+    debug('EXIT logDetectionToD1 (success)');
+  } catch (err) {
+    debug(`ERROR logDetectionToD1: ${err.message}`);
+    // NEVER suppress — re-throw wrapped
+    throw new PipelineD1Error(`Failed to write detection to D1: ${err.message}`, err);
+  }
+}
+
+/**
+ * Write a generic pipeline error to D1.
+ * @param {Object} env
+ * @param {Error} err
+ * @param {string} source
+ * @param {Object} context
+ */
+async function logErrorToD1(env, err, source, context = {}) {
+  debug(`ENTER logErrorToD1 source=${source} error=${err.name}`);
+
+  try {
+    if (!env.AURIS_LOGS) {
+      debug('BRANCH AURIS_LOGS unavailable');
+      return;
+    }
+
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO error_log (severity, source, message, error_name, metadata, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    );
+
+    await stmt.bind(
+      'ERROR',
+      source,
+      err.message,
+      err.name,
+      JSON.stringify(context),
+      Date.now()
+    ).run();
+
+    debug('EXIT logErrorToD1');
+  } catch (logErr) {
+    debug(`ERROR logErrorToD1 inner: ${logErr.message}`);
+    // Best-effort: we already have the outer error to throw
+  }
+}
+
+// ─── KV Shield Data Updates ───
+
+/**
+ * Increment the global currentRiskScore in KV `SHIELD_DATA`.
+ * @param {Object} env
+ * @param {string} userId
+ * @param {number} delta
+ */
+async function updateShieldRiskScore(env, userId, delta) {
+  debug(`ENTER updateShieldRiskScore userId=${userId} delta=${delta.toFixed(3)}`);
+
+  try {
+    const result = await incrementRiskScore(env, userId, delta);
+    debug(`EXIT updateShieldRiskScore previous=${result.previous.toFixed(3)} current=${result.current.toFixed(3)}`);
+    return result;
+  } catch (err) {
+    debug(`ERROR updateShieldRiskScore: ${err.message}`);
+    throw new PipelineAlertError(`Failed to update shield risk score: ${err.message}`, err);
+  }
+}
+
+// ─── GraphQL Subscription Fire ───
+
+/**
+ * Fire the `onContextUpdated` GraphQL subscription via service binding
+ * to `reflexion-api`.
+ *
+ * @param {Object} env — Worker env (must include REFLEXION_API service binding)
+ * @param {Object} payload — { userId, detections, riskScore, timestamp }
+ */
+async function fireGraphQLSubscription(env, payload) {
+  debug(`ENTER fireGraphQLSubscription userId=${payload.userId}`);
+
+  try {
+    if (!env.REFLEXION_API) {
+      debug('BRANCH REFLEXION_API service binding unavailable');
+      debug('EXIT fireGraphQLSubscription (no binding)');
+      return { fired: false, reason: 'no_service_binding' };
+    }
+
+    const query = `
+      subscription OnContextUpdated($userId: String!) {
+        onContextUpdated(userId: $userId) {
+          riskScore
+          detections { type patternName confidence }
+          timestamp
+        }
+      }
+    `;
+
+    const body = {
+      query: query,
+      variables: { userId: payload.userId },
+      extensions: {
+        event: 'onContextUpdated',
+        payload: {
+          userId: payload.userId,
+          riskScore: payload.riskScore,
+          detections: payload.detections.map(d => ({
+            type: d.type,
+            patternName: d.patternName,
+            confidence: d.confidence
+          })),
+          timestamp: payload.timestamp
+        }
+      }
+    };
+
+    debug('EXTERNAL CALL service binding REFLEXION_API POST /graphql');
+    const response = await env.REFLEXION_API.fetch('http://internal/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Faith-Kill-Source': 'edge-pipeline',
+        'X-Faith-Kill-Timestamp': String(Date.now())
+      },
+      body: JSON.stringify(body)
+    });
+
+    const result = {
+      fired: response.ok,
+      status: response.status,
+      statusText: response.statusText
+    };
+
+    debug(`EXIT fireGraphQLSubscription fired=${result.fired} status=${result.status}`);
+    return result;
+  } catch (err) {
+    debug(`ERROR fireGraphQLSubscription: ${err.message}`);
+    throw new PipelineAlertError(`Failed to fire GraphQL subscription: ${err.message}`, err);
+  }
+}
+
+// ─── Push Notification ───
+
+/**
+ * Send push notification via extension background worker.
+ * Uses a known endpoint or falls back to service binding.
+ *
+ * @param {Object} env
+ * @param {string} userId
+ * @param {Array<Object>} detections
+ * @param {number} riskScore
+ */
+async function sendPushNotification(env, userId, detections, riskScore) {
+  debug(`ENTER sendPushNotification userId=${userId} detections=${detections.length}`);
+
+  try {
+    // Attempt via REFLEXION_API service binding if available
+    if (env.REFLEXION_API) {
+      const body = {
+        type: 'CONTAINMENT_ALERT',
+        userId: userId,
+        title: 'Containment Fingerprint Detected',
+        message: `${detections.length} containment signature(s) detected in AI stream. Risk: ${(riskScore * 100).toFixed(0)}%`,
+        detections: detections.map(d => ({
+          type: d.type,
+          patternName: d.patternName,
+          confidence: d.confidence
+        })),
+        riskScore: riskScore,
+        timestamp: Date.now(),
+        panel: 'Panel A (Shield)'
+      };
+
+      debug('EXTERNAL CALL service binding REFLEXION_API POST /notifications/push');
+      const response = await env.REFLEXION_API.fetch('http://internal/notifications/push', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Faith-Kill-Source': 'edge-pipeline'
+        },
+        body: JSON.stringify(body)
+      });
+
+      debug(`EXIT sendPushNotification status=${response.status}`);
+      return { sent: response.ok, status: response.status };
+    }
+
+    debug('BRANCH no REFLEXION_API binding — push notification skipped');
+    return { sent: false, reason: 'no_service_binding' };
+  } catch (err) {
+    debug(`ERROR sendPushNotification: ${err.message}`);
+    // Push is best-effort — log but do not throw to avoid breaking stream
+    try {
+      await logErrorToD1(env, err, 'push-notification', { userId });
+    } catch (e) {
+      debug(`ERROR secondary logErrorToD1: ${e.message}`);
+    }
+    return { sent: false, error: err.message };
+  }
+}
+
+// ─── Detection Handler (callback for TransformStream) ───
+
+/**
+ * Build the onDetection callback used by the TransformStream.
+ * Each detection triggers: D1 log, risk score increment, GraphQL fire, push notify.
+ *
+ * @param {Object} env
+ * @param {string} userId
+ * @param {string} llmTarget
+ * @returns {Function} async (detection, chunkContext) => void
+ */
+function buildOnDetection(env, userId, llmTarget) {
+  debug(`ENTER buildOnDetection userId=${userId} llmTarget=${llmTarget}`);
+
+  const callback = async (detection, chunkContext) => {
+    debug(`ENTER onDetectionCallback type=${detection.type}`);
+
+    try {
+      // 1. Log to D1 (parameterized)
+      await logDetectionToD1(env, detection, {
+        userId,
+        llmTarget,
+        eventType: chunkContext.eventType,
+        isJson: chunkContext.isJson
+      });
+    } catch (d1Err) {
+      debug(`ERROR onDetectionCallback D1: ${d1Err.message}`);
+      // Re-throw after best-effort — caller decides
+    }
+
+    try {
+      // 2. Increment risk score in KV
+      const delta = calculateDelta([detection]);
+      if (delta > 0) {
+        await updateShieldRiskScore(env, userId, delta);
+      }
+    } catch (riskErr) {
+      debug(`ERROR onDetectionCallback risk: ${riskErr.message}`);
+    }
+
+    try {
+      // 3. Fire GraphQL subscription
+      const currentScore = await getCurrentRiskScore(env, userId);
+      await fireGraphQLSubscription(env, {
+        userId,
+        detections: [detection],
+        riskScore: currentScore,
+        timestamp: Date.now()
+      });
+    } catch (graphqlErr) {
+      debug(`ERROR onDetectionCallback graphql: ${graphqlErr.message}`);
+    }
+
+    try {
+      // 4. Send push notification
+      const currentScore = await getCurrentRiskScore(env, userId);
+      await sendPushNotification(env, userId, [detection], currentScore);
+    } catch (pushErr) {
+      debug(`ERROR onDetectionCallback push: ${pushErr.message}`);
+    }
+
+    debug('EXIT onDetectionCallback');
+  };
+
+  debug('EXIT buildOnDetection');
+  return callback;
+}
+
+// ─── Request Handlers ───
+
+/**
+ * POST /sanitize-stream
+ *
+ * Request body:
+ *   {
+ *     "upstreamUrl": "https://api.openai.com/v1/chat/completions",
+ *     "authHeaders": { "Authorization": "Bearer sk-..." },
+ *     "llmTarget": "openai",
+ *     "userId": "user-123",
+ *     "debugMode": false,
+ *     "body": { ... original request body ... }
+ *   }
+ *
+ * Proxies the upstream SSE stream through the sanitizing TransformStream.
+ */
+async function handleSanitizeStream(request, env) {
+  debug('ENTER handleSanitizeStream');
+
+  let userId = 'anonymous';
+  let llmTarget = 'unknown';
+  let debugMode = false;
+
+  try {
+    // ─── Parse Request Body ───
+    let body;
+    try {
+      body = await request.json();
+    } catch (parseErr) {
+      debug(`ERROR request.json parse: ${parseErr.message}`);
+      throw new PipelineConfigError('Invalid JSON in request body', parseErr);
+    }
+
+    const upstreamUrl = body.upstreamUrl || body.url;
+    const authHeaders = body.authHeaders || {};
+    llmTarget = body.llmTarget || 'unknown';
+    userId = body.userId || 'anonymous';
+    debugMode = body.debugMode === true;
+    const upstreamBody = body.body || {};
+
+    debug(`BRANCH upstreamUrl=${upstreamUrl} llmTarget=${llmTarget} userId=${userId} debugMode=${debugMode}`);
+
+    if (!upstreamUrl) {
+      throw new PipelineConfigError('Missing upstreamUrl in request body');
+    }
+
+    // ─── Load Signatures from KV ───
+    debug('EXTERNAL CALL loadSignatures');
+    let signatures;
+    try {
+      signatures = await loadSignatures(env);
+    } catch (sigErr) {
+      debug(`ERROR loadSignatures: ${sigErr.message}`);
+      // Continue with fallback signatures — pipeline degrades gracefully
+      signatures = { patterns: [], _source: 'error-fallback' };
+    }
+    debug(`BRANCH signatures loaded source=${signatures._source || 'unknown'} patterns=${signatures.patterns?.length || 0}`);
+
+    // ─── Build Detection Callback ───
+    const onDetection = buildOnDetection(env, userId, llmTarget);
+
+    // ─── Create Sanitizing TransformStream ───
+    debug('EXTERNAL CALL createSanitizingStream');
+    const sanitizingStream = createSanitizingStream(signatures, onDetection, debugMode);
+
+    // ─── Proxy Upstream Request ───
+    const upstreamHeaders = {
+      'Content-Type': 'application/json',
+      'Accept': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      ...authHeaders
+    };
+
+    // Ensure upstream body is JSON if not already string
+    const upstreamBodyStr = typeof upstreamBody === 'string'
+      ? upstreamBody
+      : JSON.stringify(upstreamBody);
+
+    debug(`EXTERNAL CALL fetch upstreamUrl=${upstreamUrl}`);
+    let upstreamResponse;
+    try {
+      upstreamResponse = await fetch(upstreamUrl, {
+        method: 'POST',
+        headers: upstreamHeaders,
+        body: upstreamBodyStr
+      });
+    } catch (fetchErr) {
+      debug(`ERROR upstream fetch: ${fetchErr.message}`);
+      throw new PipelineProxyError(`Failed to fetch upstream: ${fetchErr.message}`, fetchErr);
+    }
+
+    debug(`BRANCH upstreamStatus=${upstreamResponse.status} contentType=${upstreamResponse.headers.get('content-type') || 'unknown'}`);
+
+    if (!upstreamResponse.ok) {
+      // Upstream returned error — proxy it through without transformation
+      debug('BRANCH upstream non-OK — proxying error response');
+      const errorBody = await upstreamResponse.text();
+      return new Response(errorBody, {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers: {
+          'Content-Type': upstreamResponse.headers.get('content-type') || 'application/json',
+          'X-Faith-Kill-Status': 'upstream-error',
+          'X-Faith-Kill-User': userId
+        }
+      });
+    }
+
+    // ─── Pipe Through TransformStream ───
+    // NEVER drop the body — even on transform errors we fall back to raw passthrough
+    let responseBody;
+    try {
+      if (!upstreamResponse.body) {
+        throw new PipelineProxyError('Upstream response has no body');
+      }
+      responseBody = upstreamResponse.body.pipeThrough(sanitizingStream);
+      debug('BRANCH body piped through sanitizing stream');
+    } catch (pipeErr) {
+      debug(`ERROR pipeThrough: ${pipeErr.message}`);
+      // Stream continuity is sacred — fall back to raw upstream body
+      responseBody = upstreamResponse.body;
+      debug('BRANCH fallback to raw upstream body');
+    }
+
+    // ─── Build Response ───
+    const responseHeaders = new Headers();
+    responseHeaders.set('Content-Type', 'text/event-stream');
+    responseHeaders.set('Cache-Control', 'no-cache');
+    responseHeaders.set('Connection', 'keep-alive');
+    responseHeaders.set('X-Faith-Kill-Active', 'true');
+    responseHeaders.set('X-Faith-Kill-User', userId);
+    responseHeaders.set('X-Faith-Kill-LLM', llmTarget);
+    responseHeaders.set('X-Faith-Kill-Debug', debugMode ? 'true' : 'false');
+    responseHeaders.set('X-Faith-Kill-Sigs-Source', signatures._source || 'unknown');
+
+    // Copy CORS headers from upstream if present
+    const corsHeaders = ['access-control-allow-origin', 'access-control-allow-credentials'];
+    for (const h of corsHeaders) {
+      const v = upstreamResponse.headers.get(h);
+      if (v) responseHeaders.set(h, v);
+    }
+
+    debug('EXIT handleSanitizeStream (streaming response)');
+    return new Response(responseBody, {
+      status: 200,
+      statusText: 'OK',
+      headers: responseHeaders
+    });
+
+  } catch (err) {
+    debug(`ERROR handleSanitizeStream: ${err.name}: ${err.message}`);
+
+    // Log to D1
+    try {
+      await logErrorToD1(env, err, 'sanitize-stream', { userId, llmTarget });
+    } catch (d1Err) {
+      debug(`ERROR handleSanitizeStream D1 log: ${d1Err.message}`);
+    }
+
+    // NEVER suppress — return structured error response
+    const errorResponse = {
+      error: true,
+      code: err.name || 'PipelineError',
+      message: err.message,
+      userId,
+      llmTarget,
+      timestamp: Date.now()
+    };
+
+    return new Response(JSON.stringify(errorResponse), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Faith-Kill-Error': 'true',
+        'X-Faith-Kill-User': userId
+      }
+    });
+  }
+}
+
+/**
+ * GET /health — Service health check
+ */
+async function handleHealth(request, env) {
+  debug('ENTER handleHealth');
+
+  const health = {
+    service: 'stream-guard',
+    status: 'healthy',
+    timestamp: Date.now(),
+    bindings: {
+      shieldData: !!env.SHIELD_DATA,
+      aurisLogs: !!env.AURIS_LOGS,
+      reflexionApi: !!env.REFLEXION_API
+    }
+  };
+
+  debug('EXIT handleHealth');
+  return new Response(JSON.stringify(health), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+/**
+ * GET /risk-score?userId=xxx — Read current risk score
+ */
+async function handleRiskScore(request, env) {
+  debug('ENTER handleRiskScore');
+
+  try {
+    const url = new URL(request.url);
+    const userId = url.searchParams.get('userId') || 'anonymous';
+
+    debug(`BRANCH userId=${userId}`);
+
+    const score = await getCurrentRiskScore(env, userId);
+
+    const response = {
+      userId,
+      riskScore: score,
+      riskPercent: (score * 100).toFixed(1),
+      timestamp: Date.now()
+    };
+
+    debug(`EXIT handleRiskScore score=${score.toFixed(3)}`);
+    return new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    debug(`ERROR handleRiskScore: ${err.message}`);
+    await logErrorToD1(env, err, 'risk-score-endpoint', {});
+    throw err; // Re-throw for outer catch
+  }
+}
+
+// ─── Main Fetch Handler ───
+
+export default {
+  async fetch(request, env, executionCtx) {
+    debug(`ENTER fetch method=${request.method} url=${request.url}`);
+
+    try {
+      const url = new URL(request.url);
+      const path = url.pathname;
+
+      // CORS preflight
+      if (request.method === 'OPTIONS') {
+        debug('BRANCH OPTIONS preflight');
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+            'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Faith-Kill-Debug',
+            'Access-Control-Max-Age': '86400'
+          }
+        });
+      }
+
+      let response;
+
+      if (path === '/sanitize-stream' && request.method === 'POST') {
+        response = await handleSanitizeStream(request, env);
+      } else if (path === '/health' && request.method === 'GET') {
+        response = await handleHealth(request, env);
+      } else if (path === '/risk-score' && request.method === 'GET') {
+        response = await handleRiskScore(request, env);
+      } else {
+        debug(`BRANCH 404 path=${path} method=${request.method}`);
+        response = new Response(JSON.stringify({ error: 'Not Found', path, method: request.method }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' }
+        });
+      }
+
+      // Inject CORS headers on all responses
+      if (response.headers) {
+        response.headers.set('Access-Control-Allow-Origin', '*');
+      }
+
+      debug(`EXIT fetch status=${response.status}`);
+      return response;
+
+    } catch (err) {
+      debug(`ERROR fetch top-level: ${err.name}: ${err.message}`);
+
+      // Best-effort D1 log
+      try {
+        await logErrorToD1(env, err, 'fetch-top-level', { url: request.url });
+      } catch (e) {
+        debug(`ERROR top-level D1 log: ${e.message}`);
+      }
+
+      // NEVER suppress — return error response
+      return new Response(JSON.stringify({
+        error: true,
+        code: err.name || 'InternalError',
+        message: err.message,
+        timestamp: Date.now()
+      }), {
+        status: 500,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Faith-Kill-Error': 'true'
+        }
+      });
+    }
+  }
+};
+
+
+// === signature-db.js ===
+{
+/**
+ * signature-db.js — Containment fingerprint signature database for Faith Kill Pipeline
+ *
+ * Loads signatures from KV `FAITH_KILL_SIGS` and performs sliding-window
+ * pattern detection across SSE token streams.
+ */
+
+// ─── Custom Exception Types ───
+
+class SignatureLoadError extends Error {
+  constructor(message, cause) {
+    super(`[SignatureLoadError] ${message}`);
+    this.name = 'SignatureLoadError';
+    this.cause = cause;
+  }
+}
+
+class SignatureCheckError extends Error {
+  constructor(message, cause) {
+    super(`[SignatureCheckError] ${message}`);
+    this.name = 'SignatureCheckError';
+    this.cause = cause;
+  }
+}
+
+// ─── Debug Logger ───
+
+function debug(msg) {
+  console.log(`[faithkill::signature-db] ${msg}`);
+}
+
+// ─── Default Signature Patterns (fallback when KV unavailable) ───
+
+const DEFAULT_SIGNATURES = {
+  patterns: [
+    {
+      type: 'TRACKING_PIXEL',
+      name: 'markdown_tracking_pixel',
+      regex: '!\\[\\]\\((?:https?:\/\/)?[^)]+tracking[^)]*\\)',
+      regexFlags: 'gi',
+      confidenceBase: 0.85,
+      description: 'Markdown tracking pixel injection'
+    },
+    {
+      type: 'PROMPT_DEGRADE',
+      name: 'repetitive_phrase_marker',
+      regex: '(\\b(?:I am sorry|As an AI|I cannot|my guidelines|safety policy|content policy|usage policy)\\b.*){3,}',
+      regexFlags: 'gi',
+      confidenceBase: 0.70,
+      description: 'Repetitive refusal / degradation markers'
+    },
+    {
+      type: 'PROMPT_DEGRADE',
+      name: 'sudden_quality_drop',
+      regex: '(\\b(?:I apologize|I\'m not able|I don\'t have|I cannot provide)\\b[^.]{0,100}){2,}',
+      regexFlags: 'gi',
+      confidenceBase: 0.60,
+      description: 'Sudden quality / capability degradation'
+    },
+    {
+      type: 'METADATA_ANOMALY',
+      name: 'unexpected_json_wrapper',
+      regex: '\\{\\s*"(?:metadata|_internal|__tracking|__fingerprint|_source)"\\s*:',
+      regexFlags: 'gi',
+      confidenceBase: 0.90,
+      description: 'Unexpected JSON wrapper with metadata keys'
+    },
+    {
+      type: 'METADATA_ANOMALY',
+      name: 'hidden_html_comment',
+      regex: '<!--\\s*(?:tracking|fingerprint|warden|source|internal|meta)\\s*-->',
+      regexFlags: 'gi',
+      confidenceBase: 0.85,
+      description: 'Hidden HTML comment with tracking keywords'
+    },
+    {
+      type: 'HIDDEN_DOM',
+      name: 'hidden_span_element',
+      regex: '<span\\s+style\\s*=\\s*["\']\\s*display\\s*:\\s*none\\s*["\'][^>]*>',
+      regexFlags: 'gi',
+      confidenceBase: 0.95,
+      description: 'Hidden DOM span element'
+    },
+    {
+      type: 'HIDDEN_DOM',
+      name: 'hidden_div_element',
+      regex: '<div\\s+style\\s*=\\s*["\']\\s*display\\s*:\\s*none\\s*["\'][^>]*>',
+      regexFlags: 'gi',
+      confidenceBase: 0.95,
+      description: 'Hidden DOM div element'
+    },
+    {
+      type: 'ZERO_WIDTH',
+      name: 'zero_width_joiner',
+      regex: '\\u200D',
+      regexFlags: 'g',
+      confidenceBase: 0.40,
+      description: 'Zero-width joiner (ZWJ)'
+    },
+    {
+      type: 'ZERO_WIDTH',
+      name: 'zero_width_non_joiner',
+      regex: '\\u200C',
+      regexFlags: 'g',
+      confidenceBase: 0.40,
+      description: 'Zero-width non-joiner (ZWNJ)'
+    },
+    {
+      type: 'ZERO_WIDTH',
+      name: 'zero_width_space',
+      regex: '\\u200B',
+      regexFlags: 'g',
+      confidenceBase: 0.40,
+      description: 'Zero-width space'
+    },
+    {
+      type: 'ZERO_WIDTH',
+      name: 'zero_width_no_break_space',
+      regex: '\\uFEFF',
+      regexFlags: 'g',
+      confidenceBase: 0.45,
+      description: 'Zero-width no-break space (BOM)'
+    },
+    {
+      type: 'ZERO_WIDTH',
+      name: 'invisible_separator',
+      regex: '\\u2063',
+      regexFlags: 'g',
+      confidenceBase: 0.50,
+      description: 'Invisible separator'
+    }
+  ]
+};
+
+// ─── Confidence Scoring ───
+
+/**
+ * Calculate confidence score for a match based on pattern specificity.
+ * @param {Object} pattern - The signature pattern definition
+ * @param {string} matchText - The actual matched text
+ * @returns {number} Confidence 0.0–1.0
+ */
+function calculateConfidence(pattern, matchText) {
+  debug(`ENTER calculateConfidence type=${pattern.type} matchLen=${matchText.length}`);
+
+  let confidence = pattern.confidenceBase || 0.5;
+
+  // Boost confidence for longer, more specific matches
+  if (matchText.length > 50) {
+    confidence = Math.min(1.0, confidence + 0.10);
+  }
+  if (matchText.length > 100) {
+    confidence = Math.min(1.0, confidence + 0.05);
+  }
+
+  // Boost for exact keyword presence
+  const highConfidenceKeywords = ['tracking', 'fingerprint', 'warden', 'beacon', 'telemetry'];
+  for (const kw of highConfidenceKeywords) {
+    if (matchText.toLowerCase().includes(kw)) {
+      confidence = Math.min(1.0, confidence + 0.05);
+    }
+  }
+
+  // Cap at 1.0
+  confidence = Math.min(1.0, Math.max(0.0, confidence));
+
+  debug(`EXIT calculateConfidence confidence=${confidence.toFixed(3)}`);
+  return confidence;
+}
+
+// ─── Public API ───
+
+/**
+ * Load signatures from KV `FAITH_KILL_SIGS`, falling back to DEFAULT_SIGNATURES.
+ * @param {Object} env - Cloudflare Worker env bindings
+ * @returns {Promise<Object>} Signature database object
+ */
+async function loadSignatures(env) {
+  debug('ENTER loadSignatures');
+
+  try {
+    if (!env.SHIELD_DATA) {
+      debug('BRANCH env.SHIELD_DATA unavailable — using DEFAULT_SIGNATURES');
+      debug('EXIT loadSignatures (fallback)');
+      return { ...DEFAULT_SIGNATURES, _source: 'fallback' };
+    }
+
+    debug('EXTERNAL CALL KV.get FAITH_KILL_SIGS');
+    const raw = await env.SHIELD_DATA.get('FAITH_KILL_SIGS', 'json');
+
+    if (!raw) {
+      debug('BRANCH KV returned null — using DEFAULT_SIGNATURES');
+      debug('EXIT loadSignatures (fallback)');
+      return { ...DEFAULT_SIGNATURES, _source: 'fallback' };
+    }
+
+    debug('EXIT loadSignatures (kv-success)');
+    return { ...raw, _source: 'kv' };
+  } catch (err) {
+    debug(`ERROR in loadSignatures: ${err.message}`);
+    // Log to D1 if available, then re-throw
+    try {
+      if (env.AURIS_LOGS) {
+        debug('EXTERNAL CALL D1.prepare error_log');
+        const stmt = env.AURIS_LOGS.prepare(
+          `INSERT INTO error_log (severity, source, message, error_name, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        );
+        await stmt.bind(
+          'CRITICAL',
+          'signature-db.loadSignatures',
+          `Failed to load signatures: ${err.message}`,
+          err.name || 'SignatureLoadError',
+          Date.now()
+        ).run();
+      }
+    } catch (logErr) {
+      debug(`ERROR logging to D1: ${logErr.message}`);
+    }
+
+    throw new SignatureLoadError(`Failed to load signatures from KV: ${err.message}`, err);
+  }
+}
+
+/**
+ * Check a chunk against all loaded signatures.
+ * @param {string} chunk - The text chunk to analyze
+ * @param {Object} signatures - Signature database from loadSignatures()
+ * @returns {Array<Object>} Detections: {type, match, confidence, patternName, position}
+ */
+function checkChunk(chunk, signatures) {
+  debug(`ENTER checkChunk chunkLen=${chunk ? chunk.length : 0}`);
+
+  if (!chunk || typeof chunk !== 'string') {
+    debug('BRANCH chunk is empty or non-string');
+    debug('EXIT checkChunk (empty)');
+    return [];
+  }
+
+  const detections = [];
+
+  try {
+    const patterns = signatures?.patterns || DEFAULT_SIGNATURES.patterns;
+    debug(`BRANCH patterns loaded count=${patterns.length}`);
+
+    for (const pattern of patterns) {
+      try {
+        const regex = new RegExp(pattern.regex, pattern.regexFlags || 'g');
+        let match;
+
+        while ((match = regex.exec(chunk)) !== null) {
+          const matchText = match[0];
+          const confidence = calculateConfidence(pattern, matchText);
+
+          detections.push({
+            type: pattern.type,
+            match: matchText,
+            confidence: confidence,
+            patternName: pattern.name,
+            position: match.index,
+            description: pattern.description
+          });
+
+          debug(`DETECTED type=${pattern.type} pattern=${pattern.name} confidence=${confidence.toFixed(3)} pos=${match.index}`);
+
+          // Prevent infinite loop on zero-width matches
+          if (match.index === regex.lastIndex) {
+            regex.lastIndex++;
+          }
+        }
+      } catch (regexErr) {
+        debug(`ERROR regex failed for pattern ${pattern.name}: ${regexErr.message}`);
+        // Do not suppress — continue to next pattern
+      }
+    }
+
+    // Sliding-window heuristic: detect sudden repetitive phrase bursts
+    detections.push(...checkSlidingWindow(chunk));
+
+  } catch (err) {
+    debug(`ERROR in checkChunk: ${err.message}`);
+    throw new SignatureCheckError(`Failed to check chunk: ${err.message}`, err);
+  }
+
+  debug(`EXIT checkChunk detections=${detections.length}`);
+  return detections;
+}
+
+/**
+ * Sliding-window heuristic for prompt degradation detection.
+ * Detects bursts of repetitive refusal phrases within the last 50 tokens.
+ * @param {string} chunk - Current chunk
+ * @returns {Array<Object>} Additional detections
+ */
+function checkSlidingWindow(chunk) {
+  debug(`ENTER checkSlidingWindow chunkLen=${chunk.length}`);
+
+  const detections = [];
+  const refusalPhrases = [
+    'i am sorry', 'i apologize', 'as an ai', 'i cannot', "i can't",
+    'i am not able', 'not appropriate', 'against my', 'policy prohibits',
+    'safety guidelines', 'content policy', 'usage policy', 'ethical guidelines'
+  ];
+
+  // Simple tokenization: split on whitespace and punctuation
+  const tokens = chunk.toLowerCase().split(/\s+/).filter(t => t.length > 0);
+  debug(`BRANCH token count=${tokens.length}`);
+
+  // Window of last 50 tokens
+  const windowSize = 50;
+  const window = tokens.slice(-windowSize);
+
+  let refusalCount = 0;
+  for (const token of window) {
+    for (const phrase of refusalPhrases) {
+      if (token.includes(phrase) || phrase.includes(token)) {
+        refusalCount++;
+        break;
+      }
+    }
+  }
+
+  // Threshold: >30% of tokens are refusal phrases = degradation
+  const refusalRatio = window.length > 0 ? refusalCount / window.length : 0;
+  debug(`BRANCH refusalRatio=${refusalRatio.toFixed(3)} count=${refusalCount}/${window.length}`);
+
+  if (refusalRatio > 0.30 && window.length >= 10) {
+    const confidence = Math.min(1.0, 0.50 + refusalRatio * 0.5);
+    detections.push({
+      type: 'PROMPT_DEGRADE',
+      match: `Sliding window: ${refusalCount}/${window.length} refusal tokens`,
+      confidence: confidence,
+      patternName: 'sliding_window_degradation',
+      position: -1,
+      description: `Prompt degradation detected: ${(refusalRatio * 100).toFixed(1)}% refusal density in last ${windowSize} tokens`
+    });
+    debug(`DETECTED type=PROMPT_DEGRADE pattern=sliding_window_degradation confidence=${confidence.toFixed(3)}`);
+  }
+
+  debug(`EXIT checkSlidingWindow added=${detections.length}`);
+  return detections;
+}
+
+}
+
+
+// === stream-processor.js ===
+{
+/**
+ * stream-processor.js — SSE stream transformation for Faith Kill Pipeline
+ *
+ * Creates a TransformStream that intercepts LLM SSE chunks,
+ * parses them, runs signature detection, sanitizes detections,
+ * and rebuilds valid SSE output — never dropping chunks.
+ */
+
+// ─── Custom Exception Types ───
+
+class StreamParseError extends Error {
+  constructor(message, cause) {
+    super(`[StreamParseError] ${message}`);
+    this.name = 'StreamParseError';
+    this.cause = cause;
+  }
+}
+
+class StreamTransformError extends Error {
+  constructor(message, cause) {
+    super(`[StreamTransformError] ${message}`);
+    this.name = 'StreamTransformError';
+    this.cause = cause;
+  }
+}
+
+// ─── Debug Logger ───
+
+function debug(msg) {
+  console.log(`[faithkill::stream-processor] ${msg}`);
+}
+
+// ─── SSE Chunk Parser ───
+
+/**
+ * Parse SSE-format chunk into data lines and event metadata.
+ * Handles lines like:
+ *   event: message
+ *   data: {"choices":[{"delta":{"content":"hello"}}]}
+ *   \n
+ *
+ * @param {string} chunk - Raw SSE chunk string
+ * @returns {Array<Object>} Parsed SSE events: { event, data, id, retry }
+ */
+function parseSSEChunk(chunk) {
+  debug(`ENTER parseSSEChunk chunkLen=${chunk ? chunk.length : 0}`);
+
+  if (!chunk || typeof chunk !== 'string') {
+    debug('BRANCH chunk is empty or non-string');
+    debug('EXIT parseSSEChunk (empty)');
+    return [];
+  }
+
+  try {
+    const events = [];
+    // Split on double-newline (SSE event separator)
+    const rawEvents = chunk.split(/\r?\n\r?\n/);
+    debug(`BRANCH rawEvents count=${rawEvents.length}`);
+
+    for (const rawEvent of rawEvents) {
+      const lines = rawEvent.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length === 0) continue;
+
+      const event = { event: 'message', data: '', id: null, retry: null };
+
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          event.event = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          // SSE spec: data lines can be multi-line; append with newlines
+          event.data += (event.data ? '\n' : '') + line.slice(5).trim();
+        } else if (line.startsWith('id:')) {
+          event.id = line.slice(3).trim();
+        } else if (line.startsWith('retry:')) {
+          event.retry = parseInt(line.slice(6).trim(), 10);
+        } else if (line.startsWith(':')) {
+          // Comment line — ignore
+          debug(`BRANCH SSE comment line: ${line.slice(0, 40)}`);
+        }
+      }
+
+      // Only include events that have data or are keep-alive comments
+      events.push(event);
+    }
+
+    debug(`EXIT parseSSEChunk events=${events.length}`);
+    return events;
+  } catch (err) {
+    debug(`ERROR parseSSEChunk: ${err.message}`);
+    throw new StreamParseError(`Failed to parse SSE chunk: ${err.message}`, err);
+  }
+}
+
+/**
+ * Rebuild a single SSE event into raw SSE wire format.
+ * @param {Object} event - { event, data, id, retry }
+ * @returns {string} Raw SSE text
+ */
+function rebuildSSEChunk(event) {
+  debug(`ENTER rebuildSSEChunk event=${event.event}`);
+
+  try {
+    let out = '';
+    if (event.event && event.event !== 'message') {
+      out += `event: ${event.event}\n`;
+    }
+    if (event.id !== null) {
+      out += `id: ${event.id}\n`;
+    }
+    if (event.retry !== null && !isNaN(event.retry)) {
+      out += `retry: ${event.retry}\n`;
+    }
+
+    // Handle multi-line data
+    const dataLines = event.data.split('\n');
+    for (const line of dataLines) {
+      out += `data: ${line}\n`;
+    }
+
+    out += '\n'; // Event terminator
+
+    debug(`EXIT rebuildSSEChunk outLen=${out.length}`);
+    return out;
+  } catch (err) {
+    debug(`ERROR rebuildSSEChunk: ${err.message}`);
+    throw new StreamParseError(`Failed to rebuild SSE chunk: ${err.message}`, err);
+  }
+}
+
+// ─── Content Extractor / Rebuilder for JSON-wrapped LLM streams ───
+
+/**
+ * Extract the human-visible content from common LLM SSE payloads.
+ * Supports OpenAI-style {choices:[{delta:{content:"..."}}]} and plain text.
+ * @param {string} data - The data field from an SSE event
+ * @returns {{content: string, isJson: boolean, raw: string}}
+ */
+function extractContent(data) {
+  debug(`ENTER extractContent dataLen=${data ? data.length : 0}`);
+
+  if (!data || data.trim() === '') {
+    debug('EXIT extractContent (empty)');
+    return { content: '', isJson: false, raw: data };
+  }
+
+  // [DONE] sentinel
+  if (data.trim() === '[DONE]') {
+    debug('EXIT extractContent (done-sentinel)');
+    return { content: '', isJson: false, raw: data, isDone: true };
+  }
+
+  try {
+    const parsed = JSON.parse(data);
+    let content = '';
+
+    // OpenAI / Anthropic / generic streaming format
+    if (parsed.choices && Array.isArray(parsed.choices)) {
+      for (const choice of parsed.choices) {
+        if (choice.delta && typeof choice.delta.content === 'string') {
+          content += choice.delta.content;
+        }
+        if (choice.delta && typeof choice.delta.text === 'string') {
+          content += choice.delta.text;
+        }
+        if (choice.delta && typeof choice.delta.reasoning === 'string') {
+          content += choice.delta.reasoning;
+        }
+        if (choice.text && typeof choice.text === 'string') {
+          content += choice.text;
+        }
+      }
+    }
+
+    // Some providers wrap in `content` directly
+    if (!content && parsed.content && typeof parsed.content === 'string') {
+      content = parsed.content;
+    }
+
+    debug(`EXIT extractContent isJson=true contentLen=${content.length}`);
+    return { content, isJson: true, raw: data, parsed };
+  } catch {
+    // Not JSON — treat as plain text content
+    debug('EXIT extractContent isJson=false (plain text)');
+    return { content: data, isJson: false, raw: data };
+  }
+}
+
+/**
+ * Rebuild a JSON-wrapped LLM payload with sanitized content.
+ * Mutates the parsed object and re-serializes.
+ * @param {Object} parsed - Parsed JSON object
+ * @param {string} sanitizedContent - Content after sanitization
+ * @param {string} raw - Original raw data string
+ * @returns {string} Re-serialized JSON data string
+ */
+function rebuildJsonContent(parsed, sanitizedContent, raw) {
+  debug(`ENTER rebuildJsonContent`);
+
+  try {
+    let mutated = false;
+
+    if (parsed.choices && Array.isArray(parsed.choices)) {
+      for (const choice of parsed.choices) {
+        if (choice.delta && typeof choice.delta.content === 'string') {
+          choice.delta.content = sanitizedContent;
+          mutated = true;
+        }
+        if (choice.delta && typeof choice.delta.text === 'string') {
+          choice.delta.text = sanitizedContent;
+          mutated = true;
+        }
+        if (choice.delta && typeof choice.delta.reasoning === 'string') {
+          choice.delta.reasoning = sanitizedContent;
+          mutated = true;
+        }
+        if (choice.text && typeof choice.text === 'string') {
+          choice.text = sanitizedContent;
+          mutated = true;
+        }
+      }
+    }
+
+    if (!mutated && parsed.content && typeof parsed.content === 'string') {
+      parsed.content = sanitizedContent;
+      mutated = true;
+    }
+
+    if (mutated) {
+      const rebuilt = JSON.stringify(parsed);
+      debug(`EXIT rebuildJsonContent rebuiltLen=${rebuilt.length}`);
+      return rebuilt;
+    }
+
+    // Fallback: return raw if we couldn't mutate
+    debug('EXIT rebuildJsonContent (fallback raw)');
+    return raw;
+  } catch (err) {
+    debug(`ERROR rebuildJsonContent: ${err.message}`);
+    return raw;
+  }
+}
+
+// ─── Sanitizer ───
+
+/**
+ * Apply sanitization rules to a string, removing or replacing detected signatures.
+ * @param {string} text - Original text
+ * @param {Array<Object>} detections - Detections from signature-db
+ * @param {boolean} debugMode - If true, replace with [SANITIZED] markers
+ * @returns {{text: string, sanitizedCount: number}}
+ */
+function sanitizeText(text, detections, debugMode = false) {
+  debug(`ENTER sanitizeText textLen=${text.length} detections=${detections.length} debugMode=${debugMode}`);
+
+  let sanitized = text;
+  let sanitizedCount = 0;
+
+  try {
+    // Sort by position descending so replacements don't shift indices
+    const sorted = [...detections].sort((a, b) => (b.position || 0) - (a.position || 0));
+
+    for (const det of sorted) {
+      if (det.position < 0) {
+        // Sliding-window detection without exact position — skip direct replacement
+        // Instead strip zero-width characters globally if type matches
+        if (det.type === 'ZERO_WIDTH') {
+          // Already handled by regex — skip to avoid double-processing
+          continue;
+        }
+        continue;
+      }
+
+      const matchLen = det.match.length;
+      const replacement = debugMode ? `[SANITIZED:${det.type}]` : '';
+
+      if (det.position >= 0 && det.position + matchLen <= sanitized.length) {
+        sanitized = sanitized.slice(0, det.position) + replacement + sanitized.slice(det.position + matchLen);
+        sanitizedCount++;
+        debug(`SANITIZED type=${det.type} pos=${det.position} len=${matchLen}`);
+      }
+    }
+
+    // Always strip zero-width characters globally as a safety net
+    const zeroWidthChars = /[\u200B\u200C\u200D\uFEFF\u2063]/g;
+    const preStripLen = sanitized.length;
+    sanitized = sanitized.replace(zeroWidthChars, debugMode ? '[SANITIZED:ZERO_WIDTH]' : '');
+    if (sanitized.length !== preStripLen) {
+      sanitizedCount++;
+      debug('SANITIZED global zero-width strip');
+    }
+
+    debug(`EXIT sanitizeText sanitizedCount=${sanitizedCount}`);
+    return { text: sanitized, sanitizedCount };
+  } catch (err) {
+    debug(`ERROR sanitizeText: ${err.message}`);
+    // Stream continuity is sacred — return original text on error
+    debug('EXIT sanitizeText (error fallback — stream continuity preserved)');
+    return { text, sanitizedCount: 0 };
+  }
+}
+
+// ─── TransformStream Factory ───
+
+/**
+ * Create a TransformStream that sanitizes SSE chunks in-flight.
+ * @param {Object} signatures - Loaded signature database
+ * @param {Function} onDetection - Callback(detection, chunkContext) for each detection
+ * @param {boolean} debugMode - Whether to insert [SANITIZED] markers
+ * @returns {TransformStream}
+ */
+function createSanitizingStream(signatures, onDetection, debugMode = false) {
+  debug('ENTER createSanitizingStream');
+
+  // Sliding window buffer for last 50 tokens
+  let tokenBuffer = [];
+  const MAX_BUFFER_TOKENS = 50;
+
+  // Carry-over buffer for incomplete SSE events across chunk boundaries
+  let carryOver = '';
+
+  const stream = new TransformStream({
+    start(controller) {
+      debug('ENTER transform.start');
+      // Initialize
+      debug('EXIT transform.start');
+    },
+
+    async transform(chunk, controller) {
+      debug(`ENTER transform chunkLen=${chunk ? chunk.length : 0}`);
+
+      try {
+        // Convert chunk to string
+        const chunkStr = typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
+        debug(`CHUNK size=${chunkStr.length}`);
+
+        // Prepend any carry-over from previous chunk
+        const fullChunk = carryOver + chunkStr;
+        carryOver = '';
+
+        // Split into complete SSE events and trailing incomplete data
+        // Find the last double-newline to determine completeness
+        const lastDoubleNewline = fullChunk.lastIndexOf('\n\n');
+        const lastDoubleNewlineCR = fullChunk.lastIndexOf('\r\n\r\n');
+        const lastEventBoundary = Math.max(lastDoubleNewline, lastDoubleNewlineCR);
+
+        let toProcess = fullChunk;
+        if (lastEventBoundary > 0 && lastEventBoundary < fullChunk.length - 2) {
+          // There is trailing data after the last complete event
+          toProcess = fullChunk.slice(0, lastEventBoundary + 2);
+          carryOver = fullChunk.slice(lastEventBoundary + 2);
+          debug(`BRANCH carryOver buffered len=${carryOver.length}`);
+        }
+
+        // Parse SSE events
+        const events = parseSSEChunk(toProcess);
+        debug(`CHUNK parsedEvents=${events.length}`);
+
+        const outputEvents = [];
+
+        for (const event of events) {
+          // Extract visible content for analysis
+          const extracted = extractContent(event.data);
+
+          if (extracted.isDone) {
+            // [DONE] sentinel — pass through untouched
+            outputEvents.push(event);
+            continue;
+          }
+
+          if (extracted.content === '' && !extracted.isJson) {
+            // Empty or non-JSON non-content event — pass through
+            outputEvents.push(event);
+            continue;
+          }
+
+          // ─── Signature Detection ───
+          // Run detection on the visible content plus sliding window context
+          const { checkChunk } = await import('./signature-db.js');
+          const windowText = tokenBuffer.join(' ');
+          const analysisText = windowText + ' ' + extracted.content;
+          const detections = checkChunk(analysisText, signatures);
+
+          // Filter detections to those in the current chunk (position >= windowText.length)
+          const windowOffset = windowText.length + 1; // +1 for the space separator
+          const chunkDetections = detections.filter(d => d.position >= windowOffset || d.position === -1);
+
+          for (const det of chunkDetections) {
+            // Adjust position to be relative to the current chunk
+            const adjustedDetection = {
+              ...det,
+              position: det.position === -1 ? -1 : det.position - windowOffset
+            };
+
+            debug(`DETECTED type=${adjustedDetection.type} pattern=${adjustedDetection.patternName} confidence=${adjustedDetection.confidence.toFixed(3)}`);
+
+            // Invoke callback for alerting / risk scoring
+            try {
+              debug('EXTERNAL CALL onDetection');
+              await onDetection(adjustedDetection, {
+                content: extracted.content,
+                eventType: event.event,
+                isJson: extracted.isJson
+              });
+            } catch (cbErr) {
+              debug(`ERROR onDetection callback: ${cbErr.message}`);
+              // NEVER suppress callback errors — log and continue
+            }
+          }
+
+          // ─── Sanitization ───
+          const { text: sanitizedContent, sanitizedCount } = sanitizeText(
+            extracted.content,
+            chunkDetections,
+            debugMode
+          );
+
+          if (sanitizedCount > 0) {
+            debug(`SANITIZED count=${sanitizedCount}`);
+          }
+
+          // ─── Rebuild Event ───
+          let rebuiltData;
+          if (extracted.isJson) {
+            rebuiltData = rebuildJsonContent(extracted.parsed, sanitizedContent, extracted.raw);
+          } else {
+            rebuiltData = sanitizedContent;
+          }
+
+          outputEvents.push({
+            ...event,
+            data: rebuiltData
+          });
+
+          // ─── Update Sliding Window ───
+          const newTokens = sanitizedContent.split(/\s+/).filter(t => t.length > 0);
+          tokenBuffer.push(...newTokens);
+          if (tokenBuffer.length > MAX_BUFFER_TOKENS) {
+            tokenBuffer = tokenBuffer.slice(tokenBuffer.length - MAX_BUFFER_TOKENS);
+          }
+          debug(`CHUNK windowTokens=${tokenBuffer.length}`);
+        }
+
+        // ─── Rebuild Output Chunks ───
+        let output = '';
+        for (const outEvent of outputEvents) {
+          output += rebuildSSEChunk(outEvent);
+        }
+
+        // ─── Backpressure Handling ───
+        // Enqueue only if controller is willing
+        if (output.length > 0) {
+          const encoder = new TextEncoder();
+          const bytes = encoder.encode(output);
+          controller.enqueue(bytes);
+          debug(`CHUNK enqueued bytes=${bytes.length}`);
+        }
+
+        debug('EXIT transform');
+      } catch (err) {
+        debug(`ERROR transform: ${err.message}`);
+        // Stream continuity is sacred — pass raw chunk through on error
+        try {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(chunkStr || chunk));
+          debug('CHUNK error-fallback enqueued raw');
+        } catch (enqueueErr) {
+          debug(`ERROR enqueue fallback: ${enqueueErr.message}`);
+        }
+        throw new StreamTransformError(`Stream transformation failed: ${err.message}`, err);
+      }
+    },
+
+    flush(controller) {
+      debug('ENTER transform.flush');
+
+      try {
+        // Flush any remaining carry-over
+        if (carryOver && carryOver.trim().length > 0) {
+          debug(`BRANCH flush carryOver len=${carryOver.length}`);
+          const events = parseSSEChunk(carryOver);
+          let output = '';
+          for (const event of events) {
+            output += rebuildSSEChunk(event);
+          }
+          if (output.length > 0) {
+            const encoder = new TextEncoder();
+            controller.enqueue(encoder.encode(output));
+            debug('CHUNK flush enqueued');
+          }
+          carryOver = '';
+        }
+      } catch (err) {
+        debug(`ERROR flush: ${err.message}`);
+        // Attempt to emit carry-over as raw text on failure
+        try {
+          const encoder = new TextEncoder();
+          controller.enqueue(encoder.encode(carryOver || ''));
+        } catch (e) {
+          debug(`ERROR flush fallback enqueue: ${e.message}`);
+        }
+      }
+
+      debug('EXIT transform.flush');
+    }
+  },
+  // Strategy for backpressure: high-water mark
+  new ByteLengthQueuingStrategy({ highWaterMark: 16384 }));
+
+  debug('EXIT createSanitizingStream');
+  return stream;
+}
+
+}
+
+
+// === risk-scorer.js ===
+{
+/**
+ * risk-scorer.js — Atomic risk scoring for Faith Kill Pipeline
+ *
+ * Manages per-user risk scores in KV `SHIELD_DATA` with atomic increments,
+ * detection-to-delta mapping, and capping at 1.0 (100%).
+ */
+
+// ─── Custom Exception Types ───
+
+class RiskScoreError extends Error {
+  constructor(message, cause) {
+    super(`[RiskScoreError] ${message}`);
+    this.name = 'RiskScoreError';
+    this.cause = cause;
+  }
+}
+
+class RiskDeltaError extends Error {
+  constructor(message, cause) {
+    super(`[RiskDeltaError] ${message}`);
+    this.name = 'RiskDeltaError';
+    this.cause = cause;
+  }
+}
+
+// ─── Debug Logger ───
+
+function debug(msg) {
+  console.log(`[faithkill::risk-scorer] ${msg}`);
+}
+
+// ─── Detection-to-Delta Mapping ───
+
+const DETECTION_DELTAS = {
+  TRACKING_PIXEL: 0.15,
+  PROMPT_DEGRADE: 0.25,
+  METADATA_ANOMALY: 0.10,
+  HIDDEN_DOM: 0.20,
+  ZERO_WIDTH: 0.05
+};
+
+// ─── Risk Score Helpers ───
+
+/**
+ * Build the KV key for a user's current risk score.
+ * @param {string} userId
+ * @returns {string}
+ */
+function riskScoreKey(userId) {
+  return `risk_score:${userId}`;
+}
+
+/**
+ * Build the KV key for a user's detection history (JSON blob).
+ * @param {string} userId
+ * @returns {string}
+ */
+function riskHistoryKey(userId) {
+  return `risk_history:${userId}`;
+}
+
+// ─── Public API ───
+
+/**
+ * Calculate total risk delta from an array of detections.
+ * Maps each detection type to its configured delta and sums them.
+ * @param {Array<Object>} detections — Detections from signature-db
+ * @returns {number} Total delta (0.0–∞, caller should cap)
+ */
+function calculateDelta(detections) {
+  debug(`ENTER calculateDelta detections=${detections ? detections.length : 0}`);
+
+  try {
+    if (!detections || !Array.isArray(detections)) {
+      debug('BRANCH detections is empty or non-array');
+      debug('EXIT calculateDelta delta=0');
+      return 0.0;
+    }
+
+    let totalDelta = 0.0;
+    const typeCounts = {};
+
+    for (const det of detections) {
+      const type = det.type;
+      const delta = DETECTION_DELTAS[type] || 0.0;
+      totalDelta += delta;
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+      debug(`DELTA type=${type} delta=${delta}`);
+    }
+
+    debug(`EXIT calculateDelta total=${totalDelta.toFixed(3)} breakdown=${JSON.stringify(typeCounts)}`);
+    return totalDelta;
+  } catch (err) {
+    debug(`ERROR calculateDelta: ${err.message}`);
+    throw new RiskDeltaError(`Failed to calculate risk delta: ${err.message}`, err);
+  }
+}
+
+/**
+ * Atomically read the current risk score for a user from KV.
+ * @param {Object} env — Cloudflare Worker env bindings (must include SHIELD_DATA)
+ * @param {string} userId — User identifier
+ * @returns {Promise<number>} Current risk score 0.0–1.0
+ */
+async function getCurrentRiskScore(env, userId) {
+  debug(`ENTER getCurrentRiskScore userId=${userId}`);
+
+  try {
+    if (!env.SHIELD_DATA) {
+      debug('BRANCH SHIELD_DATA KV binding unavailable');
+      debug('EXIT getCurrentRiskScore (fallback 0.0)');
+      return 0.0;
+    }
+
+    const key = riskScoreKey(userId);
+    debug(`EXTERNAL CALL KV.get ${key}`);
+    const stored = await env.SHIELD_DATA.get(key);
+
+    if (stored === null) {
+      debug('BRANCH no stored score — return 0.0');
+      debug('EXIT getCurrentRiskScore score=0.0');
+      return 0.0;
+    }
+
+    const parsed = parseFloat(stored);
+    const score = isNaN(parsed) ? 0.0 : Math.min(1.0, Math.max(0.0, parsed));
+
+    debug(`EXIT getCurrentRiskScore score=${score.toFixed(3)}`);
+    return score;
+  } catch (err) {
+    debug(`ERROR getCurrentRiskScore: ${err.message}`);
+    throw new RiskScoreError(`Failed to read risk score: ${err.message}`, err);
+  }
+}
+
+/**
+ * Atomically increment the risk score for a user.
+ * Reads current value, adds delta, caps at 1.0, writes back.
+ * Also appends detection to user's history log.
+ *
+ * @param {Object} env — Cloudflare Worker env bindings
+ * @param {string} userId — User identifier
+ * @param {number} delta — Amount to add (must be >= 0)
+ * @returns {Promise<{previous: number, current: number, delta: number}>}
+ */
+async function incrementRiskScore(env, userId, delta) {
+  debug(`ENTER incrementRiskScore userId=${userId} delta=${delta.toFixed(3)}`);
+
+  try {
+    if (!env.SHIELD_DATA) {
+      debug('BRANCH SHIELD_DATA KV binding unavailable');
+      debug('EXIT incrementRiskScore (no-op)');
+      return { previous: 0.0, current: 0.0, delta: 0.0 };
+    }
+
+    if (typeof delta !== 'number' || isNaN(delta) || delta < 0) {
+      throw new RiskScoreError(`Invalid delta: ${delta}`);
+    }
+
+    const key = riskScoreKey(userId);
+    const historyKey = riskHistoryKey(userId);
+
+    // ─── Read current score ───
+    debug(`EXTERNAL CALL KV.get ${key}`);
+    const stored = await env.SHIELD_DATA.get(key);
+    const previous = stored === null ? 0.0 : Math.min(1.0, Math.max(0.0, parseFloat(stored)));
+
+    // ─── Calculate new score ───
+    const current = Math.min(1.0, previous + delta);
+    debug(`BRANCH previous=${previous.toFixed(3)} current=${current.toFixed(3)}`);
+
+    // ─── Write new score ───
+    debug(`EXTERNAL CALL KV.put ${key}=${current.toFixed(4)}`);
+    await env.SHIELD_DATA.put(key, current.toFixed(4));
+
+    // ─── Append to history ───
+    try {
+      const existingHistoryRaw = await env.SHIELD_DATA.get(historyKey, 'json');
+      const history = Array.isArray(existingHistoryRaw) ? existingHistoryRaw : [];
+      history.push({
+        ts: Date.now(),
+        delta: delta,
+        previous: previous,
+        current: current
+      });
+      // Trim history to last 100 entries to avoid KV value size limits
+      const trimmedHistory = history.slice(-100);
+      await env.SHIELD_DATA.put(historyKey, JSON.stringify(trimmedHistory));
+      debug(`EXTERNAL CALL KV.put ${historyKey} entries=${trimmedHistory.length}`);
+    } catch (histErr) {
+      debug(`ERROR writing history: ${histErr.message}`);
+      // Do not throw — history is non-critical
+    }
+
+    debug(`EXIT incrementRiskScore previous=${previous.toFixed(3)} current=${current.toFixed(3)}`);
+    return { previous, current, delta };
+  } catch (err) {
+    debug(`ERROR incrementRiskScore: ${err.message}`);
+    throw new RiskScoreError(`Failed to increment risk score: ${err.message}`, err);
+  }
+}
+
+/**
+ * Bulk-update risk score from multiple detections in one atomic operation.
+ * Calculates total delta from detections, then increments once.
+ *
+ * @param {Object} env — Cloudflare Worker env bindings
+ * @param {string} userId — User identifier
+ * @param {Array<Object>} detections — Detections array
+ * @returns {Promise<{previous: number, current: number, delta: number}>}
+ */
+async function applyDetectionsToRiskScore(env, userId, detections) {
+  debug(`ENTER applyDetectionsToRiskScore userId=${userId} detections=${detections ? detections.length : 0}`);
+
+  try {
+    const delta = calculateDelta(detections);
+    const result = await incrementRiskScore(env, userId, delta);
+    debug(`EXIT applyDetectionsToRiskScore delta=${delta.toFixed(3)}`);
+    return result;
+  } catch (err) {
+    debug(`ERROR applyDetectionsToRiskScore: ${err.message}`);
+    throw new RiskScoreError(`Failed to apply detections to risk score: ${err.message}`, err);
+  }
+}
+
+}
+--69f3ce9076a69b8adcc09c1c749920deb0f486824d2477f27ec19ecb9f6e--

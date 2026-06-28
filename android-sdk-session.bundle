@@ -1,0 +1,1517 @@
+--aa346785e9baab9349f716f264f2d9a2cebfdfd449245743cae15886fcb9
+Content-Disposition: form-data; name="index.js"
+
+/** Safe commands — allowed without extra confirmation. */
+const SAFE_COMMAND_PATTERNS = [
+  /^shell getprop /i,
+  /^shell pm list /i,
+  /^shell dumpsys /i,
+  /^shell ls /i,
+  /^shell cat /i,
+  /^shell id$/i,
+  /^shell whoami$/i,
+  /^devices$/i,
+  /^version$/i,
+  /^get-state$/i,
+  /^shell input /i,
+  /^shell screencap /i,
+  /^logcat /i,
+  /^install /i,
+  /^uninstall /i,
+  /^push /i,
+  /^pull /i,
+];
+
+/** Destructive commands — require ?confirm=true. */
+const DESTRUCTIVE_PATTERNS = [
+  /^shell rm /i,
+  /^shell dd /i,
+  /^shell format /i,
+  /^shell wipe /i,
+  /^flash /i,
+  /^shell reboot /i,
+  /^shell shutdown /i,
+  /^shell mount /i,
+];
+
+/** Blocked commands — never allowed, always return 403. */
+const BLOCKED_PATTERNS = [
+  /^shell su$/i,
+  /^shell su /i,
+  /^root /i,
+  /^shell chmod 777 /i,
+];
+
+// ── common keycode map ──────────────────────────────────────────────
+
+const KEYCODE_MAP = {
+  HOME: 'KEYCODE_HOME',
+  BACK: 'KEYCODE_BACK',
+  MENU: 'KEYCODE_MENU',
+  POWER: 'KEYCODE_POWER',
+  VOLUME_UP: 'KEYCODE_VOLUME_UP',
+  VOLUME_DOWN: 'KEYCODE_VOLUME_DOWN',
+  CAMERA: 'KEYCODE_CAMERA',
+  ENTER: 'KEYCODE_ENTER',
+  TAB: 'KEYCODE_TAB',
+  DEL: 'KEYCODE_DEL',
+  FORWARD_DEL: 'KEYCODE_FORWARD_DEL',
+  SEARCH: 'KEYCODE_SEARCH',
+  MEDIA_PLAY_PAUSE: 'KEYCODE_MEDIA_PLAY_PAUSE',
+  MEDIA_NEXT: 'KEYCODE_MEDIA_NEXT',
+  MEDIA_PREVIOUS: 'KEYCODE_MEDIA_PREVIOUS',
+  SPACE: 'KEYCODE_SPACE',
+  DPAD_UP: 'KEYCODE_DPAD_UP',
+  DPAD_DOWN: 'KEYCODE_DPAD_DOWN',
+  DPAD_LEFT: 'KEYCODE_DPAD_LEFT',
+  DPAD_RIGHT: 'KEYCODE_DPAD_RIGHT',
+  DPAD_CENTER: 'KEYCODE_DPAD_CENTER',
+  NOTIFICATION: 'KEYCODE_NOTIFICATION',
+  APP_SWITCH: 'KEYCODE_APP_SWITCH',
+  ASSIST: 'KEYCODE_ASSIST',
+  WAKEUP: 'KEYCODE_WAKEUP',
+  SLEEP: 'KEYCODE_SLEEP',
+  SCREENSHOT: 'KEYCODE_SYSRQ',
+};
+
+// ── utility helpers ──────────────────────���──────────────────────────
+
+function jsonResponse(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      ...extraHeaders,
+    },
+  });
+}
+
+function sseResponse(stream) {
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function clamp(n, min, max) {
+  return Math.min(Math.max(n, min), max);
+}
+
+/**
+ * Categorise an ADB command string into one of:
+ *   'safe' | 'destructive' | 'blocked' | 'unknown'
+ */
+function classifyCommand(cmd) {
+  const c = cmd.trim();
+  if (BLOCKED_PATTERNS.some((p) => p.test(c))) return 'blocked';
+  if (DESTRUCTIVE_PATTERNS.some((p) => p.test(c))) return 'destructive';
+  if (SAFE_COMMAND_PATTERNS.some((p) => p.test(c))) return 'safe';
+  return 'unknown';
+}
+
+// ── Durable Object class ────────────────────────────────────────────
+
+export class AndroidSession {
+  constructor(state, env) {
+    // [android-sdk.DO] CONSTRUCTOR ENTER
+    this.state = state;
+    this.env = env;
+    this.sessionStart = Date.now();
+    this.sessionExpiry = Date.now() + TWO_HOURS_MS;
+    this.deviceConnection = null; // { deviceId, ip, port, status }
+    this.commandHistory = []; // Last 100 commands
+    this.clientIP = null;
+    this.rateLimitTokens = RATE_LIMIT_MAX;
+    this.rateLimitWindowStart = Date.now();
+    // [android-sdk.DO] CONSTRUCTOR EXIT
+  }
+
+  // ── rate limiter ────────────────────────────────────────────────
+
+  /** Check and consume one rate-limit token. Returns true if allowed. */
+  _consumeRateLimit() {
+    const now = Date.now();
+    if (now - this.rateLimitWindowStart > RATE_LIMIT_WINDOW_MS) {
+      this.rateLimitWindowStart = now;
+      this.rateLimitTokens = RATE_LIMIT_MAX;
+    }
+    if (this.rateLimitTokens > 0) {
+      this.rateLimitTokens -= 1;
+      return true;
+    }
+    return false;
+  }
+
+  // ── main request router ─────────────────────────────────────────
+
+  async fetch(request) {
+    // [android-sdk.DO] fetch ENTER
+    this.sessionExpiry = Date.now() + TWO_HOURS_MS; // Refresh on interaction
+
+    const url = new URL(request.url);
+    const action = url.searchParams.get('action') || '';
+    this.clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+
+    // --- IP binding check ------------------------------------------------
+    if (this.boundIP && this.boundIP !== this.clientIP) {
+      // [android-sdk.DO] fetch IP_REBIND DETECTED
+      await this.logAudit(
+        'SESSION_IP_REBIND',
+        `IP changed from ${this.boundIP} to ${this.clientIP}; forcing re-auth`,
+        this.clientIP
+      );
+      return jsonResponse(
+        {
+          error: 'Session IP binding violation',
+          hint: 'Re-authenticate from your current IP address',
+        },
+        403
+      );
+    }
+
+    // --- auth check ------------------------------------------------------
+    const authKey =
+      request.headers.get('X-CRauJe-Key') || url.searchParams.get('key');
+    if (!authKey || authKey !== this.env.CRAUJE_KEY) {
+      // [android-sdk.DO] fetch AUTH_FAIL
+      await this.logAudit(
+        'AUTH_FAIL',
+        'Invalid or missing X-CRauJe-Key',
+        this.clientIP
+      );
+      return jsonResponse(
+        { error: 'Unauthorized', hint: 'Provide X-CRauJe-Key header' },
+        401
+      );
+    }
+
+    // Bind IP on first successful auth
+    if (!this.boundIP) {
+      this.boundIP = this.clientIP;
+      // [android-sdk.DO] fetch IP_BOUND
+      await this.logAudit(
+        'SESSION_IP_BOUND',
+        `Session bound to IP ${this.clientIP}`,
+        this.clientIP
+      );
+    }
+
+    // --- rate limit check ------------------------------------------------
+    if (!this._consumeRateLimit()) {
+      // [android-sdk.DO] fetch RATE_LIMITED
+      await this.logAudit(
+        'RATE_LIMIT_EXCEEDED',
+        `Rate limit (${RATE_LIMIT_MAX} cmd/min) exceeded`,
+        this.clientIP
+      );
+      return jsonResponse(
+        {
+          error: 'Rate limit exceeded',
+          limit: RATE_LIMIT_MAX,
+          window: '60s',
+          hint: 'Slow down your requests',
+        },
+        429
+      );
+    }
+
+    // --- expiry check ----------------------------------------------------
+    if (Date.now() > this.sessionExpiry) {
+      // [android-sdk.DO] fetch SESSION_EXPIRED
+      await this.logAudit('SESSION_EXPIRED', 'Session TTL reached', this.clientIP);
+      return jsonResponse(
+        { error: 'Session expired', hint: 'Create a new session' },
+        401
+      );
+    }
+
+    // --- route to handler ------------------------------------------------
+    try {
+      let response;
+      // [android-sdk.DO] fetch ROUTE action=${action}
+      switch (action) {
+        case 'status':
+          response = await this.handleStatus();
+          break;
+        case 'scan':
+          response = await this.handleScan();
+          break;
+        case 'connect':
+          response = await this.handleConnect(url);
+          break;
+        case 'disconnect':
+          response = await this.handleDisconnect();
+          break;
+        case 'info':
+          response = await this.handleInfo();
+          break;
+        case 'adb':
+          response = await this.handleAdb(url);
+          break;
+        case 'packages':
+          response = await this.handlePackages();
+          break;
+        case 'ls':
+          response = await this.handleLs(url);
+          break;
+        case 'screenshot':
+          response = await this.handleScreenshot();
+          break;
+        case 'logcat':
+          response = await this.handleLogcat(url);
+          break;
+        case 'tap':
+          response = await this.handleTap(url);
+          break;
+        case 'text':
+          response = await this.handleText(url);
+          break;
+        case 'key':
+          response = await this.handleKey(url);
+          break;
+        case 'install':
+          response = await this.handleInstall(request);
+          break;
+        case 'shell':
+          response = await this.handleShell(url);
+          break;
+        default:
+          // [android-sdk.DO] fetch UNKNOWN_ACTION action=${action}
+          response = jsonResponse(
+            {
+              error: 'Unknown action',
+              available: this.getActions(),
+            },
+            400
+          );
+      }
+      // [android-sdk.DO] fetch EXIT action=${action}
+      return response;
+    } catch (e) {
+      // [android-sdk.DO] fetch ERROR action=${action} error=${e.message}
+      await this.logError(
+        'android-sdk',
+        action || 'unknown',
+        e,
+        'ERROR',
+        { ip: this.clientIP }
+      );
+      return jsonResponse({ error: e.message, stack: e.stack }, 500);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  HANDLER METHODS
+  // ═══════════════════════════════════════════════════════════════════
+
+  // ── status ────────────────────────────────────────────────────────
+
+  /** Return session status: expiry, device, uptime, commands in history. */
+  async handleStatus() {
+    // [android-sdk.DO] handleStatus ENTER
+    const uptime = Date.now() - this.sessionStart;
+    const remaining = Math.max(0, this.sessionExpiry - Date.now());
+
+    const result = {
+      session: {
+        started: new Date(this.sessionStart).toISOString(),
+        uptimeMs: uptime,
+        uptimeReadable: `${Math.floor(uptime / 60000)}m ${Math.floor((uptime % 60000) / 1000)}s`,
+        expiry: new Date(this.sessionExpiry).toISOString(),
+        remainingMs: remaining,
+        remainingReadable: `${Math.floor(remaining / 60000)}m ${Math.floor((remaining % 60000) / 1000)}s`,
+        boundIP: this.boundIP,
+        clientIP: this.clientIP,
+        rateLimitRemaining: this.rateLimitTokens,
+      },
+      device: this.deviceConnection,
+      commandHistory: {
+        total: this.commandHistory.length,
+        last: this.commandHistory.slice(-10),
+      },
+      availableActions: this.getActions(),
+    };
+
+    await this.logAudit('STATUS_CHECK', 'Session status queried', this.clientIP);
+    // [android-sdk.DO] handleStatus EXIT
+    return jsonResponse(result);
+  }
+
+  // ── scan ──────────────────────────────────────────────────────────
+
+  /** Scan for ADB devices via the tunnel. Returns list of available devices. */
+  async handleScan() {
+    // [android-sdk.DO] handleScan ENTER
+    await this.logAudit('DEVICE_SCAN', 'Scanning for ADB devices', this.clientIP);
+
+    try {
+      const raw = await this.executeAdb('devices -l');
+      // Parse "List of devices attached" output
+      const lines = raw.split('\n').filter((l) => l.trim());
+      const devices = [];
+      // Skip header line "List of devices attached"
+      for (const line of lines.slice(1)) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          const id = parts[0];
+          const status = parts[1]; // device | unauthorized | offline | recovery
+          const attrs = {};
+          // Parse product:xxx model:yyy device:zzz transport_id:w
+          const attrStr = line.substring(line.indexOf(status) + status.length).trim();
+          const attrMatches = attrStr.matchAll(/(\w+):(\S+)/g);
+          for (const m of attrMatches) {
+            attrs[m[1]] = m[2];
+          }
+          devices.push({ id, status, ...attrs });
+        }
+      }
+
+      // [android-sdk.DO] handleScan EXIT devices=${devices.length}
+      await this.logAudit(
+        'DEVICE_SCAN_RESULT',
+        `Found ${devices.length} device(s)`,
+        this.clientIP
+      );
+      return jsonResponse({ devices, count: devices.length, scannedAt: nowISO() });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleScan', e, 'ERROR', {
+        ip: this.clientIP,
+      });
+      return jsonResponse({ error: e.message, devices: [], count: 0 }, 500);
+    }
+  }
+
+  // ── connect ───────────────────────────────────────────────────────
+
+  /**
+   * Connect to a device by ID.
+   * Query params: ?deviceId=<id>
+   * Validates device exists in D1 device_inventory.
+   */
+  async handleConnect(url) {
+    // [android-sdk.DO] handleConnect ENTER
+    const deviceId = url.searchParams.get('deviceId');
+    if (!deviceId) {
+      return jsonResponse(
+        { error: 'Missing deviceId parameter', example: '?deviceId=192.168.1.5:5555' },
+        400
+      );
+    }
+
+    try {
+      // Validate device exists in D1
+      const db = this.env.AURIS_LOGS;
+      const row = await db
+        .prepare(
+          'SELECT device_id, device_ip, device_port, status FROM device_inventory WHERE device_id = ?1'
+        )
+        .bind(deviceId)
+        .first();
+
+      if (!row) {
+        // [android-sdk.DO] handleConnect DEVICE_NOT_FOUND
+        await this.logAudit(
+          'CONNECT_FAIL',
+          `Device ${deviceId} not found in inventory`,
+          this.clientIP
+        );
+        return jsonResponse(
+          {
+            error: 'Device not found',
+            deviceId,
+            hint: 'Run ?action=scan to discover devices',
+          },
+          404
+        );
+      }
+
+      // Attempt TCP connect via ADB
+      await this.executeAdb(`connect ${deviceId}`);
+
+      this.deviceConnection = {
+        deviceId: row.device_id,
+        ip: row.device_ip,
+        port: row.device_port || 5555,
+        status: 'connected',
+        connectedAt: nowISO(),
+      };
+
+      // [android-sdk.DO] handleConnect SUCCESS device=${deviceId}
+      await this.logAudit(
+        'DEVICE_CONNECT',
+        `Connected to device ${deviceId} @ ${row.device_ip}:${row.device_port || 5555}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success: true,
+        device: this.deviceConnection,
+        message: `Connected to ${deviceId}`,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleConnect', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId,
+      });
+      return jsonResponse({ error: e.message, deviceId }, 500);
+    }
+  }
+
+  // ── disconnect ────────────────────────────────────────────────────
+
+  /** Disconnect current device and clear deviceConnection state. */
+  async handleDisconnect() {
+    // [android-sdk.DO] handleDisconnect ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device currently connected', connected: false },
+        400
+      );
+    }
+
+    const { deviceId } = this.deviceConnection;
+    try {
+      await this.executeAdb(`disconnect ${deviceId}`);
+    } catch (e) {
+      // Log but don't fail — device may already be unreachable
+      await this.logError('android-sdk', 'handleDisconnect', e, 'WARNING', {
+        ip: this.clientIP,
+        deviceId,
+      });
+    }
+
+    this.deviceConnection = null;
+
+    // [android-sdk.DO] handleDisconnect EXIT device=${deviceId}
+    await this.logAudit('DEVICE_DISCONNECT', `Disconnected from ${deviceId}`, this.clientIP);
+    return jsonResponse({
+      success: true,
+      disconnected: true,
+      previousDevice: deviceId,
+    });
+  }
+
+  // ── info ──────────────────────────────────────────────────────────
+
+  /** Return detailed device information via getprop. */
+  async handleInfo() {
+    // [android-sdk.DO] handleInfo ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    try {
+      const raw = await this.executeAdb(`-s ${this.deviceConnection.deviceId} shell getprop`);
+      const props = {};
+      const propRe = /\[([^\]]+)\]: \[([^\]]*)\]/g;
+      let m;
+      while ((m = propRe.exec(raw)) !== null) {
+        props[m[1]] = m[2];
+      }
+
+      const info = {
+        brand: props['ro.product.brand'] || 'unknown',
+        model: props['ro.product.model'] || 'unknown',
+        device: props['ro.product.device'] || 'unknown',
+        manufacturer: props['ro.product.manufacturer'] || 'unknown',
+        androidVersion: props['ro.build.version.release'] || 'unknown',
+        sdk: props['ro.build.version.sdk'] || 'unknown',
+        securityPatch: props['ro.build.version.security_patch'] || 'unknown',
+        fingerprint: props['ro.build.fingerprint'] || 'unknown',
+        serial: props['ro.serialno'] || this.deviceConnection.deviceId,
+        display: {
+          width: props['ro.sf.lcd_density'] || null,
+          density: props['ro.sf.lcd_density'] || null,
+        },
+        board: props['ro.product.board'] || 'unknown',
+        hardware: props['ro.hardware'] || 'unknown',
+        bootloader: props['ro.bootloader'] || 'unknown',
+        host: props['ro.build.host'] || 'unknown',
+        user: props['ro.build.user'] || 'unknown',
+        time: props['ro.build.date.utc']
+          ? new Date(parseInt(props['ro.build.date.utc'], 10) * 1000).toISOString()
+          : 'unknown',
+        allProps: props,
+      };
+
+      // [android-sdk.DO] handleInfo EXIT
+      await this.logAudit(
+        'DEVICE_INFO',
+        `Retrieved info for ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse(info);
+    } catch (e) {
+      await this.logError('android-sdk', 'handleInfo', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  // ── adb ─────────────────────────────────���─────────────────────────
+
+  /**
+   * Execute a whitelisted ADB command.
+   * Query params: ?cmd=<command>[&confirm=true]
+   */
+  async handleAdb(url) {
+    // [android-sdk.DO] handleAdb ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const cmd = url.searchParams.get('cmd') || '';
+    if (!cmd) {
+      return jsonResponse(
+        { error: 'Missing cmd parameter', example: '?cmd=shell getprop ro.product.model' },
+        400
+      );
+    }
+
+    // Classify command
+    const classification = classifyCommand(cmd);
+    const confirmed = url.searchParams.get('confirm') === 'true';
+
+    // [android-sdk.DO] handleAdb CLASSIFY cmd="${cmd}" class=${classification}
+
+    // --- BLOCKED: always deny ------------------------------------------------
+    if (classification === 'blocked') {
+      await this.logAudit(
+        'COMMAND_BLOCKED',
+        `Blocked command attempted: "${cmd}"`,
+        this.clientIP
+      );
+      return jsonResponse(
+        {
+          error: 'Command blocked for security reasons',
+          command: cmd,
+          classification: 'blocked',
+          blocked: true,
+          hint: 'This command is permanently disallowed',
+        },
+        403
+      );
+    }
+
+    // --- DESTRUCTIVE: require confirmation -----------------------------------
+    if (classification === 'destructive' && !confirmed) {
+      await this.logAudit(
+        'COMMAND_UNCONFIRMED',
+        `Destructive command requires confirmation: "${cmd}"`,
+        this.clientIP
+      );
+      return jsonResponse(
+        {
+          error: 'Destructive command requires confirmation',
+          command: cmd,
+          classification: 'destructive',
+          hint: 'Append &confirm=true to execute this command',
+        },
+        403
+      );
+    }
+
+    // --- UNKNOWN: reject -----------------------------------------------------
+    if (classification === 'unknown') {
+      await this.logAudit(
+        'COMMAND_UNKNOWN',
+        `Unknown/unrecognised command attempted: "${cmd}"`,
+        this.clientIP
+      );
+      return jsonResponse(
+        {
+          error: 'Command not on whitelist',
+          command: cmd,
+          classification: 'unknown',
+          hint: 'Use safe commands only. See docs for allowed patterns.',
+        },
+        403
+      );
+    }
+
+    // --- SAFE or CONFIRMED DESTRUCTIVE: execute ------------------------------
+    try {
+      const fullCmd = `-s ${this.deviceConnection.deviceId} ${cmd}`;
+      const output = await this.executeAdb(fullCmd);
+
+      // Record in history
+      this._recordCommand('adb', cmd, classification);
+
+      // [android-sdk.DO] handleAdb EXIT cmd="${cmd}" class=${classification}
+      await this.logAudit(
+        'COMMAND_EXEC',
+        `Executed ${classification} command: "${cmd}"`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success: true,
+        command: cmd,
+        classification,
+        device: this.deviceConnection.deviceId,
+        output,
+        executedAt: nowISO(),
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleAdb', e, 'ERROR', {
+        ip: this.clientIP,
+        command: cmd,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse(
+        { error: e.message, command: cmd, classification },
+        500
+      );
+    }
+  }
+
+  // ── packages ──────────────────────────────────────────────────────
+
+  /** List installed packages on the connected device. */
+  async handlePackages() {
+    // [android-sdk.DO] handlePackages ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    try {
+      const raw = await this.executeAdb(
+        `-s ${this.deviceConnection.deviceId} shell pm list packages -f`
+      );
+      const packages = [];
+      const re = /package:([^=]+)=([\w.]+)/g;
+      let m;
+      while ((m = re.exec(raw)) !== null) {
+        packages.push({ path: m[1], packageName: m[2] });
+      }
+
+      this._recordCommand('packages', 'pm list packages', 'safe');
+      // [android-sdk.DO] handlePackages EXIT count=${packages.length}
+      await this.logAudit(
+        'PACKAGES_LIST',
+        `Listed ${packages.length} packages for ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        packages,
+        count: packages.length,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handlePackages', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  // ── ls ────────────────────────────────────────────────────────────
+
+  /**
+   * List files in a device directory.
+   * Query params: ?path=/sdcard
+   */
+  async handleLs(url) {
+    // [android-sdk.DO] handleLs ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const path = url.searchParams.get('path') || '/sdcard';
+    // Prevent traversal outside interesting paths
+    const resolved = path.replace(/\.\./g, '').replace(/\/+/g, '/');
+
+    try {
+      const raw = await this.executeAdb(
+        `-s ${this.deviceConnection.deviceId} shell ls -la "${resolved}"`
+      );
+
+      // Parse ls -la output
+      const entries = [];
+      for (const line of raw.split('\n').filter((l) => l.trim())) {
+        const match = line.match(
+          /^([\-dlcbsp][rwxsStT\-]{9})\s+\d+\s+(\S+)\s+(\S+)\s+(\d+)\s+(\S+\s+\S+\s+\S+)\s+(.+)$/
+        );
+        if (match) {
+          entries.push({
+            permissions: match[1],
+            owner: match[2],
+            group: match[3],
+            size: parseInt(match[4], 10),
+            date: match[5],
+            name: match[6],
+          });
+        }
+      }
+
+      this._recordCommand('ls', `ls -la ${resolved}`, 'safe');
+      // [android-sdk.DO] handleLs EXIT path=${resolved} entries=${entries.length}
+      await this.logAudit(
+        'FS_LIST',
+        `Listed directory ${resolved} (${entries.length} entries)`,
+        this.clientIP
+      );
+      return jsonResponse({
+        path: resolved,
+        entries,
+        count: entries.length,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleLs', e, 'ERROR', {
+        ip: this.clientIP,
+        path: resolved,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message, path: resolved }, 500);
+    }
+  }
+
+  // ── screenshot ────────────────────────────────────────────────────
+
+  /** Capture device screen and return base64-encoded PNG. */
+  async handleScreenshot() {
+    // [android-sdk.DO] handleScreenshot ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    try {
+      // Use raw command with auto-execute; adb shell screencap -p outputs raw PNG
+      const raw = await this.executeAdb(
+        `-s ${this.deviceConnection.deviceId} shell screencap -p`
+      );
+
+      // Convert to base64 — the output may contain CRLF from ADB; normalise
+      const normalised = raw.replace(/\r\n/g, '\n');
+      const base64 = btoa(normalised);
+
+      this._recordCommand('screenshot', 'shell screencap -p', 'safe');
+      // [android-sdk.DO] handleScreenshot EXIT
+      await this.logAudit(
+        'SCREENSHOT',
+        `Screenshot captured for ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        image: base64,
+        format: 'png',
+        size: base64.length,
+        timestamp: nowISO(),
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleScreenshot', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  // ── logcat ────────────────────────────────────────────────────────
+
+  /**
+   * Stream or snapshot device logs.
+   * Query params:
+   *   ?lines=100      — return last N lines (snapshot, default 100)
+   *   ?filter=TAG:LEVEL — apply logcat filter
+   *   ?stream=true    — return SSE stream (not implemented, returns hint)
+   */
+  async handleLogcat(url) {
+    // [android-sdk.DO] handleLogcat ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const lines = clamp(parseInt(url.searchParams.get('lines') || '100', 10), 1, 5000);
+    const filter = url.searchParams.get('filter') || '';
+    const wantStream = url.searchParams.get('stream') === 'true';
+
+    try {
+      if (wantStream) {
+        // SSE streaming via ReadableStream
+        const { deviceId } = this.deviceConnection;
+        let logcatCmd = `-s ${deviceId} logcat`;
+        if (filter) {
+          logcatCmd += ` ${filter}`;
+        }
+
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        const encoder = new TextEncoder();
+
+        // Kick off background fetch that pumps log lines as SSE events
+        this._streamLogcat(logcatCmd, writer, encoder, filter).catch(async (e) => {
+          await this.logError('android-sdk', 'handleLogcatStream', e, 'ERROR', {
+            ip: this.clientIP,
+            deviceId,
+          });
+          try {
+            await writer.write(encoder.encode(`event: error\ndata: ${e.message}\n\n`));
+          } catch (_) { /* ignore */ }
+          await writer.close();
+        });
+
+        this._recordCommand('logcat', logcatCmd, 'safe');
+        return sseResponse(readable);
+      }
+
+      // Snapshot mode — dump last N lines
+      let cmd = `-s ${this.deviceConnection.deviceId} logcat -d -t ${lines}`;
+      if (filter) {
+        cmd += ` ${filter}`;
+      }
+      const output = await this.executeAdb(cmd);
+
+      // Parse log lines
+      const entries = output
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((line) => {
+          const match = line.match(
+            /^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+(.+?)\s*:\s*(.*)$/
+          );
+          if (match) {
+            return {
+              timestamp: match[1],
+              pid: parseInt(match[2], 10),
+              tid: parseInt(match[3], 10),
+              level: match[4],
+              tag: match[5],
+              message: match[6],
+              raw: line,
+            };
+          }
+          return { raw: line, level: '?', tag: '', message: line };
+        });
+
+      this._recordCommand('logcat', `logcat -t ${lines}`, 'safe');
+      // [android-sdk.DO] handleLogcat EXIT lines=${entries.length}
+      await this.logAudit(
+        'LOGCAT_DUMP',
+        `Dumped ${entries.length} log lines from ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        entries,
+        count: entries.length,
+        filter: filter || null,
+        device: this.deviceConnection.deviceId,
+        dumpedAt: nowISO(),
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleLogcat', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId: this.deviceConnection?.deviceId,
+        filter,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  /**
+   * Background helper: pump logcat output as SSE events.
+   * @private
+   */
+  async _streamLogcat(logcatCmd, writer, encoder, filter) {
+    try {
+      await writer.write(encoder.encode(':ok\n\n'));
+
+      const tunnelUrl = await this._getTunnelUrl();
+      const body = JSON.stringify({ command: 'adb', args: logcatCmd.split(/\s+/) });
+
+      const response = await this.env.TELEPHONE.fetch(tunnelUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      });
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      // Stream timeout — close SSE after 60s
+      const timeout = setTimeout(async () => {
+        await writer.write(encoder.encode('event: end\ndata: timeout\n\n'));
+        await writer.close();
+        reader.cancel('timeout');
+      }, 60000);
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n');
+        buffer = parts.pop(); // keep partial line in buffer
+        for (const line of parts) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const event = `data: ${JSON.stringify({ line: trimmed, time: Date.now(), filter })}
+\n`;
+          await writer.write(encoder.encode(event));
+        }
+      }
+
+      clearTimeout(timeout);
+      await writer.write(encoder.encode('event: end\ndata: eof\n\n'));
+      await writer.close();
+    } catch (e) {
+      await writer.write(
+        encoder.encode(`event: error\ndata: ${JSON.stringify({ error: e.message })}\n\n`)
+      );
+      await writer.close();
+      throw e;
+    }
+  }
+
+  // ── tap ───────────────────────────────────────────────────────────
+
+  /**
+   * Simulate screen tap.
+   * Query params: ?x=123&y=456
+   */
+  async handleTap(url) {
+    // [android-sdk.DO] handleTap ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const x = parseInt(url.searchParams.get('x'), 10);
+    const y = parseInt(url.searchParams.get('y'), 10);
+    if (Number.isNaN(x) || Number.isNaN(y)) {
+      return jsonResponse(
+        { error: 'Missing or invalid x/y parameters', example: '?x=350&y=700' },
+        400
+      );
+    }
+
+    try {
+      const cmd = `-s ${this.deviceConnection.deviceId} shell input tap ${x} ${y}`;
+      await this.executeAdb(cmd);
+
+      this._recordCommand('tap', `input tap ${x} ${y}`, 'safe');
+      // [android-sdk.DO] handleTap EXIT x=${x} y=${y}
+      await this.logAudit(
+        'INPUT_TAP',
+        `Tap at (${x}, ${y}) on ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success: true,
+        action: 'tap',
+        x,
+        y,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleTap', e, 'ERROR', {
+        ip: this.clientIP,
+        x,
+        y,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message, x, y }, 500);
+    }
+  }
+
+  // ── text ──────────────────────────────────────────────────────────
+
+  /**
+   * Type text on device.
+   * Query params: ?text=hello%20world
+   */
+  async handleText(url) {
+    // [android-sdk.DO] handleText ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const text = url.searchParams.get('text');
+    if (!text) {
+      return jsonResponse(
+        { error: 'Missing text parameter', example: '?text=hello%20world' },
+        400
+      );
+    }
+
+    // Prevent shell injection via text input
+    const safeText = text.replace(/"/g, '\\"').replace(/\$/g, '\\$');
+
+    try {
+      const cmd = `-s ${this.deviceConnection.deviceId} shell input text "${safeText}"`;
+      await this.executeAdb(cmd);
+
+      this._recordCommand('text', `input text "${safeText}"`, 'safe');
+      // [android-sdk.DO] handleText EXIT text="${safeText.substring(0, 30)}"
+      await this.logAudit(
+        'INPUT_TEXT',
+        `Typed text on ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success: true,
+        action: 'text',
+        textLength: safeText.length,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleText', e, 'ERROR', {
+        ip: this.clientIP,
+        textLength: safeText.length,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  // ── key ───────────────────────────────────────────────────────────
+
+  /**
+   * Send keyevent to device.
+   * Query params: ?key=HOME or ?key=26
+   */
+  async handleKey(url) {
+    // [android-sdk.DO] handleKey ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const key = url.searchParams.get('key') || '';
+    if (!key) {
+      return jsonResponse(
+        {
+          error: 'Missing key parameter',
+          example: '?key=HOME',
+          availableKeys: Object.keys(KEYCODE_MAP),
+        },
+        400
+      );
+    }
+
+    // Resolve key name or numeric code
+    let keycode;
+    if (/^\d+$/.test(key)) {
+      keycode = key; // raw numeric keycode
+    } else {
+      keycode = KEYCODE_MAP[key.toUpperCase()];
+      if (!keycode) {
+        return jsonResponse(
+          {
+            error: 'Unknown key',
+            key,
+            availableKeys: Object.keys(KEYCODE_MAP),
+          },
+          400
+        );
+      }
+      keycode = keycode.replace('KEYCODE_', '');
+    }
+
+    try {
+      const cmd = `-s ${this.deviceConnection.deviceId} shell input keyevent ${keycode}`;
+      await this.executeAdb(cmd);
+
+      this._recordCommand('key', `input keyevent ${keycode}`, 'safe');
+      // [android-sdk.DO] handleKey EXIT key=${key} keycode=${keycode}
+      await this.logAudit(
+        'INPUT_KEY',
+        `Keyevent ${key} (${keycode}) on ${this.deviceConnection.deviceId}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success: true,
+        action: 'key',
+        key,
+        keycode,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleKey', e, 'ERROR', {
+        ip: this.clientIP,
+        key,
+        keycode,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message, key, keycode }, 500);
+    }
+  }
+
+  // ── install ───────────────────────────────────────────────────────
+
+  /**
+   * Install APK on device.
+   * Request body: raw APK bytes (binary)
+   * Returns: { success, packageName, version }
+   */
+  async handleInstall(request) {
+    // [android-sdk.DO] handleInstall ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    const contentType = request.headers.get('Content-Type') || '';
+    if (!contentType.includes('application/octet-stream') && !contentType.includes('multipart')) {
+      return jsonResponse(
+        {
+          error: 'Invalid Content-Type',
+          expected: 'application/octet-stream (raw APK bytes)',
+          received: contentType,
+        },
+        400
+      );
+    }
+
+    try {
+      const apkBytes = await request.arrayBuffer();
+      if (apkBytes.byteLength === 0) {
+        return jsonResponse({ error: 'Empty APK body' }, 400);
+      }
+
+      // Push APK to device temp location
+      const remotePath = `/data/local/tmp/install_${Date.now()}.apk`;
+      const pushBody = JSON.stringify({
+        command: 'adb_push',
+        args: [`-s`, this.deviceConnection.deviceId, 'push', '-', remotePath],
+        data: Array.from(new Uint8Array(apkBytes)),
+      });
+
+      const tunnelUrl = await this._getTunnelUrl();
+      const pushResp = await this.env.TELEPHONE.fetch(tunnelUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: pushBody,
+      });
+      if (!pushResp.ok) {
+        const pushErr = await pushResp.text();
+        throw new Error(`APK push failed: ${pushErr}`);
+      }
+
+      // Run install
+      const installOutput = await this.executeAdb(
+        `-s ${this.deviceConnection.deviceId} install -r ${remotePath}`
+      );
+
+      // Clean up temp file (best effort)
+      try {
+        await this.executeAdb(
+          `-s ${this.deviceConnection.deviceId} shell rm ${remotePath}`
+        );
+      } catch (_) { /* ignore cleanup errors */ }
+
+      const success = installOutput.includes('Success');
+      // Try to extract package name from output
+      const pkgMatch = installOutput.match(/pkg:\/\/([\w.]+)/);
+      const packageName = pkgMatch ? pkgMatch[1] : 'unknown';
+
+      this._recordCommand('install', `install -r <apk>`, 'safe');
+      // [android-sdk.DO] handleInstall EXIT size=${apkBytes.byteLength} pkg=${packageName}
+      await this.logAudit(
+        'APK_INSTALL',
+        `Installed APK (${apkBytes.byteLength} bytes) -> ${packageName} on ${this.deviceConnection.deviceId}: ${success ? 'SUCCESS' : 'FAIL'}`,
+        this.clientIP
+      );
+      return jsonResponse({
+        success,
+        packageName,
+        size: apkBytes.byteLength,
+        output: installOutput,
+        device: this.deviceConnection.deviceId,
+      });
+    } catch (e) {
+      await this.logError('android-sdk', 'handleInstall', e, 'ERROR', {
+        ip: this.clientIP,
+        deviceId: this.deviceConnection?.deviceId,
+      });
+      return jsonResponse({ error: e.message }, 500);
+    }
+  }
+
+  // ── shell ─────────���───────────────────────────────────────────────
+
+  /**
+   * Interactive shell — single command execution.
+   * Same whitelist as handleAdb but with 'shell' prefix auto-added.
+   * Query params: ?cmd=<command>[&confirm=true]
+   */
+  async handleShell(url) {
+    // [android-sdk.DO] handleShell ENTER
+    if (!this.deviceConnection) {
+      return jsonResponse(
+        { error: 'No device connected', hint: 'Use ?action=connect&deviceId=...' },
+        400
+      );
+    }
+
+    let cmd = url.searchParams.get('cmd') || '';
+    if (!cmd) {
+      return jsonResponse(
+        { error: 'Missing cmd parameter', example: '?cmd=whoami' },
+        400
+      );
+    }
+
+    // Auto-prepend 'shell ' if not already present
+    if (!cmd.startsWith('shell ')) {
+      cmd = `shell ${cmd}`;
+    }
+
+    // Reuse handleAdb logic by constructing a synthetic URL
+    const syntheticUrl = new URL(url.href);
+    syntheticUrl.searchParams.set('cmd', cmd);
+    const confirm = url.searchParams.get('confirm');
+    if (confirm) syntheticUrl.searchParams.set('confirm', confirm);
+
+    // [android-sdk.DO] handleShell REDIRECT_TO_ADB cmd="${cmd}"
+    return this.handleAdb(syntheticUrl);
+  }
+
+  // ════════════════════════════════���══════════════════════════════════
+  //  CORE HELPERS
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Execute an ADB command through the Cloudflare Tunnel.
+   *
+   * 1. Reads tunnel URL from KV SESSION_META (key `adb_tunnel_url`)
+   * 2. Routes via env.TELEPHONE Service Binding
+   * 3. POSTs { command: 'adb', args: [...] }
+   * 4. Returns response text
+   */
+  async executeAdb(cmd) {
+    // [android-sdk.DO] executeAdb ENTER cmd="${cmd}"
+    const tunnelUrl = await this._getTunnelUrl();
+    const args = cmd.split(/\s+/);
+
+    const body = JSON.stringify({ command: 'adb', args });
+    // [android-sdk.DO] executeAdb POST tunnel=${tunnelUrl} body=${body.substring(0, 200)}
+
+    const response = await this.env.TELEPHONE.fetch(tunnelUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`ADB tunnel returned ${response.status}: ${errText}`);
+    }
+
+    const text = await response.text();
+    // [android-sdk.DO] executeAdb EXIT
+    return text;
+  }
+
+  /**
+   * Read the ADB tunnel URL from KV SESSION_META.
+   * Caches result in memory to avoid repeated KV reads.
+   */
+  async _getTunnelUrl() {
+    if (this._cachedTunnelUrl) return this._cachedTunnelUrl;
+    const url = await this.env.SESSION_META.get('adb_tunnel_url');
+    if (!url) {
+      throw new Error(
+        'No adb_tunnel_url found in KV SESSION_META. Configure the tunnel first.'
+      );
+    }
+    this._cachedTunnelUrl = url;
+    return url;
+  }
+
+  /** Record a command in session history, capped at MAX_COMMAND_HISTORY. */
+  _recordCommand(handler, command, classification) {
+    this.commandHistory.push({
+      handler,
+      command: command.substring(0, 500),
+      classification,
+      timestamp: nowISO(),
+    });
+    if (this.commandHistory.length > MAX_COMMAND_HISTORY) {
+      this.commandHistory.shift();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  //  AUDIT & ERROR LOGGING
+  // ═══════════════════════════════════════════════════════════════════
+
+  /**
+   * Write an audit entry to D1 AURIS_LOGS.audit_trail.
+   * Table schema expected:
+   *   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   *   module TEXT,
+   *   action TEXT,
+   *   details TEXT,
+   *   timestamp TEXT,
+   *   ip TEXT
+   */
+  async logAudit(action, details, ip) {
+    try {
+      const db = this.env.AURIS_LOGS;
+      if (!db) return;
+      await db
+        .prepare(
+          'INSERT INTO audit_trail (timestamp, module, action, metadata, source_ip, ip) VALUES (?, ?, ?, ?, ?, ?)'
+        )
+        .bind(Math.floor(Date.now() / 1000), 'android-sdk', action, details.substring(0, 2000), ip, ip)
+        .run();
+    } catch (e) {
+      // Audit logging must never break the request — log to console as fallback
+      console.error('[android-sdk.DO] logAudit FAILED:', e.message, { action, details, ip });
+    }
+  }
+
+  /**
+   * Write an error entry to D1 AURIS_LOGS.error_log.
+   * Table schema expected:
+   *   id INTEGER PRIMARY KEY AUTOINCREMENT,
+   *   module TEXT,
+   *   function_name TEXT,
+   *   severity TEXT,        -- ERROR | WARNING | CRITICAL
+   *   error_type TEXT,
+   *   message TEXT,
+   *   stack_trace TEXT,
+   *   context TEXT,         -- JSON
+   *   session_id TEXT,
+   *   timestamp TEXT
+   */
+  async logError(module, func, error, severity, context) {
+    try {
+      const db = this.env.AURIS_LOGS;
+      const errorType = error?.constructor?.name || 'Error';
+      const message = error?.message || String(error);
+      const stack = error?.stack || '';
+      const sessionId = this.sessionStart ? `sess-${this.sessionStart}` : 'none';
+
+      await db
+        .prepare(
+          'INSERT INTO error_log (module, function_name, severity, error_type, message, stack_trace, context, session_id, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)'
+        )
+        .bind(
+          module,
+          func,
+          severity,
+          errorType,
+          message.substring(0, 2000),
+          stack.substring(0, 4000),
+          JSON.stringify(context).substring(0, 2000),
+          sessionId,
+          nowISO()
+        )
+        .run();
+    } catch (e) {
+      // Error logging must never break the request
+      console.error('[android-sdk.DO] logError FAILED:', e.message, {
+        module,
+        func,
+        severity,
+      });
+    }
+  }
+
+  /** Return list of available actions. */
+  getActions() {
+    return [
+      'status',
+      'scan',
+      'connect',
+      'disconnect',
+      'info',
+      'adb',
+      'packages',
+      'ls',
+      'screenshot',
+      'logcat',
+      'tap',
+      'text',
+      'key',
+      'install',
+      'shell',
+    ];
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Request router — maps DO namespace to class
+// ═══════════════════════════════════════════════════════════════════════
+
+export default {
+  async fetch(request, env, ctx) {
+    // [android-sdk.WORKER] fetch ENTER
+    const url = new URL(request.url);
+
+    // Allow CORS preflight
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, X-CRauJe-Key',
+          'Access-Control-Max-Age': '86400',
+        },
+      });
+    }
+
+    // Resolve DO stub — all sessions share the 'default' instance
+    // In production, you may want to shard by client IP or session token
+    const sessionKey = url.searchParams.get('session') || 'default';
+    const id = env.ANDROID_SDK_SESSION.idFromName(sessionKey);
+    const stub = env.ANDROID_SDK_SESSION.get(id);
+
+    // [android-sdk.WORKER] fetch ROUTE session=${sessionKey}
+    // Forward the original request to the Durable Object
+    try {
+      const response = await stub.fetch(request);
+      // [android-sdk.WORKER] fetch EXIT
+      return response;
+    } catch (e) {
+      console.error('[android-sdk.WORKER] fetch ERROR:', e.message);
+      return jsonResponse(
+        { error: 'Worker routing failed', detail: e.message },
+        500
+      );
+    }
+  },
+};
+--aa346785e9baab9349f716f264f2d9a2cebfdfd449245743cae15886fcb9--

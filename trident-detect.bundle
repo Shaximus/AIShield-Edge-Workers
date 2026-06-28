@@ -1,0 +1,1423 @@
+--5f3cc144d477e9754a352f9aac8a0adc6b9478edcdb0046809ec3891444f
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/patterns.ts
+var SABOTAGE_PATTERNS = {
+  credential_theft: [
+    /telephone_secrets/i,
+    /JWT_SIGNING_KEY/i,
+    /STRIPE.*KEY/i,
+    /password|passwd|credential/i
+  ],
+  data_exfiltration: [
+    /hannah-consciousness.*SELECT \*/i,
+    /SELECT.*FROM.*telephone_secrets/i,
+    /KV\.get.*LICENSES/i
+  ],
+  infrastructure_sabotage: [
+    /DELETE FROM(?!.*WHERE)/i,
+    // DELETE without WHERE
+    /DROP TABLE/i,
+    /TRUNCATE/i,
+    /wrangler.*delete/i
+  ]
+};
+function severityForCategory(category) {
+  switch (category) {
+    case "credential_theft":
+      return "CRITICAL";
+    case "data_exfiltration":
+      return "HIGH";
+    case "infrastructure_sabotage":
+      return "CRITICAL";
+    case "anomalous_volume":
+      return "MEDIUM";
+    case "moe_routes_manipulation":
+      return "HIGH";
+    case "moe_embedding_poisoning":
+      return "MEDIUM";
+    case "quality_gate_tampering":
+      return "HIGH";
+    default:
+      return "LOW";
+  }
+}
+__name(severityForCategory, "severityForCategory");
+function actionForCategory(category) {
+  switch (category) {
+    case "credential_theft":
+      return "ROTATE_SECRET";
+    case "infrastructure_sabotage":
+      return "BLOCK";
+    case "data_exfiltration":
+    case "moe_routes_manipulation":
+    case "moe_embedding_poisoning":
+    case "quality_gate_tampering":
+    case "anomalous_volume":
+      return "ALERT";
+    default:
+      return "LOG";
+  }
+}
+__name(actionForCategory, "actionForCategory");
+
+// src/moe-watchpoints.ts
+var MOE_WATCHPOINTS = [
+  {
+    category: "moe_routes_manipulation",
+    severity: "HIGH",
+    allowedWorker: "moe-precognition-router",
+    message: "Unauthorized write to MOE_ROUTES namespace",
+    check: (event) => {
+      if (!event.action || !event.target)
+        return false;
+      const isWrite = /^(PUT|DELETE|WRITE|UPDATE)$/i.test(event.action);
+      const isRoutes = /MOE_ROUTES/i.test(event.target);
+      const isAllowedWorker = !!event.source_worker && event.source_worker === "moe-precognition-router";
+      return isWrite && isRoutes && !isAllowedWorker;
+    }
+  },
+  {
+    category: "moe_embedding_poisoning",
+    severity: "MEDIUM",
+    message: "Write to MOE_EMBEDDINGS outside scheduled evaluation window",
+    check: (event) => {
+      if (!event.action || !event.target || !event.timestamp)
+        return false;
+      const isWrite = /^(PUT|DELETE|WRITE|UPDATE)$/i.test(event.action);
+      const isEmbeddings = /MOE_EMBEDDINGS/i.test(event.target);
+      const hour = new Date(event.timestamp * 1e3).getUTCHours();
+      const inWindow = hour >= 2 && hour <= 4;
+      return isWrite && isEmbeddings && !inWindow;
+    }
+  },
+  {
+    category: "moe_routes_manipulation",
+    severity: "HIGH",
+    message: "Delete operation on MOE_HOT namespace",
+    check: (event) => {
+      if (!event.action || !event.target)
+        return false;
+      const isDelete = /^(DELETE|DEL|REMOVE)$/i.test(event.action);
+      const isMoeHot = /MOE_HOT/i.test(event.target);
+      return isDelete && isMoeHot;
+    }
+  },
+  {
+    category: "quality_gate_tampering",
+    severity: "HIGH",
+    message: "Update to moe-metrics.quality_gates outside scheduled window",
+    check: (event) => {
+      if (!event.action || !event.target || !event.timestamp)
+        return false;
+      const isUpdate = /^(PUT|DELETE|WRITE|UPDATE)$/i.test(event.action);
+      const isQualityGates = /moe-metrics.*quality_gates|quality_gates/i.test(event.target);
+      const hour = new Date(event.timestamp * 1e3).getUTCHours();
+      const inWindow = hour >= 2 && hour <= 4;
+      return isUpdate && isQualityGates && !inWindow;
+    }
+  }
+];
+
+// src/analyzer.ts
+function generateUUID() {
+  const arr = new Uint8Array(16);
+  crypto.getRandomValues(arr);
+  arr[6] = arr[6] & 15 | 64;
+  arr[8] = arr[8] & 63 | 128;
+  const hex = Array.from(arr, (b) => b.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join("")
+  ].join("-");
+}
+__name(generateUUID, "generateUUID");
+function matchSabotagePatterns(text) {
+  const matches = [];
+  for (const [category, patterns] of Object.entries(SABOTAGE_PATTERNS)) {
+    for (const pattern of patterns) {
+      if (pattern.test(text)) {
+        matches.push({ category, pattern });
+      }
+    }
+  }
+  return matches;
+}
+__name(matchSabotagePatterns, "matchSabotagePatterns");
+function buildSabotageDetection(event, matches, hasVolumeAnomaly, moeMatches) {
+  if (matches.length === 0)
+    return null;
+  const byCategory = /* @__PURE__ */ new Map();
+  for (const m of matches) {
+    const list = byCategory.get(m.category) ?? [];
+    list.push(m.pattern);
+    byCategory.set(m.category, list);
+  }
+  const severityRank = {
+    credential_theft: 4,
+    infrastructure_sabotage: 3,
+    data_exfiltration: 2,
+    anomalous_volume: 1,
+    moe_routes_manipulation: 2,
+    moe_embedding_poisoning: 1,
+    quality_gate_tampering: 2,
+    unknown: 0
+  };
+  const categories = Array.from(byCategory.keys()).sort(
+    (a, b) => (severityRank[b] ?? 0) - (severityRank[a] ?? 0)
+  );
+  const primaryCategory = categories[0];
+  const extraCategories = categories.length - 1;
+  const matchedPatterns = [];
+  for (const [cat, patterns] of byCategory.entries()) {
+    for (const p of patterns) {
+      matchedPatterns.push(`${cat}:${p.source}`);
+    }
+  }
+  let confidence = 0.6;
+  const totalPatternMatches = matches.length;
+  confidence += Math.min(totalPatternMatches - 1, 3) * 0.1;
+  if (hasVolumeAnomaly)
+    confidence += 0.1;
+  if (moeMatches.length > 0)
+    confidence += 0.1;
+  confidence += extraCategories * 0.05;
+  confidence = Math.min(confidence, 0.95);
+  const severity = severityForCategory(primaryCategory);
+  const recommendedAction = actionForCategory(primaryCategory);
+  const details = JSON.stringify({
+    eventId: event.id,
+    action: event.action,
+    target: event.target,
+    query: event.query,
+    metadata: event.metadata,
+    patternMatches: totalPatternMatches,
+    extraCategories,
+    volumeAnomaly: hasVolumeAnomaly,
+    moeViolations: moeMatches.length
+  });
+  return {
+    id: generateUUID(),
+    severity,
+    category: primaryCategory,
+    confidence,
+    sourceIp: event.source_ip ?? null,
+    sourceWorker: event.source_worker ?? null,
+    details,
+    timestamp: event.timestamp,
+    matchedPatterns,
+    recommendedAction
+  };
+}
+__name(buildSabotageDetection, "buildSabotageDetection");
+function detectVolumeAnomalies(events) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const e of events) {
+    const ip = e.source_ip ?? "unknown";
+    counts.set(ip, (counts.get(ip) ?? 0) + 1);
+  }
+  const anomalies = /* @__PURE__ */ new Map();
+  for (const [ip, count] of counts) {
+    if (count > 100) {
+      anomalies.set(ip, count);
+    }
+  }
+  return anomalies;
+}
+__name(detectVolumeAnomalies, "detectVolumeAnomalies");
+function checkMoeWatchpoints(event) {
+  const hits = [];
+  for (const wp of MOE_WATCHPOINTS) {
+    if (wp.check(event)) {
+      hits.push({ category: wp.category, message: wp.message });
+    }
+  }
+  return hits;
+}
+__name(checkMoeWatchpoints, "checkMoeWatchpoints");
+function analyzeEvents(events) {
+  const detections = [];
+  let volumeAnomalyCount = 0;
+  let moeViolationCount = 0;
+  const volumeAnomalies = detectVolumeAnomalies(events);
+  for (const event of events) {
+    const hasVolumeAnomaly = !!event.source_ip && volumeAnomalies.has(event.source_ip);
+    const moeHits = checkMoeWatchpoints(event);
+    if (moeHits.length > 0)
+      moeViolationCount++;
+    const textFields = [
+      event.query,
+      event.target,
+      event.metadata,
+      event.action
+    ].filter(Boolean).join(" ");
+    const sabotageMatches = textFields.length > 0 ? matchSabotagePatterns(textFields) : [];
+    const detection = buildSabotageDetection(event, sabotageMatches, hasVolumeAnomaly, moeHits);
+    if (detection) {
+      detections.push(detection);
+    }
+    if (hasVolumeAnomaly && !detection) {
+      const count = volumeAnomalies.get(event.source_ip) ?? 0;
+      const volDet = {
+        id: generateUUID(),
+        severity: "MEDIUM",
+        category: "anomalous_volume",
+        confidence: Math.min(0.7 + Math.min(Math.floor((count - 100) / 50) * 0.05, 0.25), 0.95),
+        sourceIp: event.source_ip ?? null,
+        sourceWorker: event.source_worker ?? null,
+        details: JSON.stringify({ requestCount: count, windowSeconds: 60 }),
+        timestamp: event.timestamp,
+        matchedPatterns: [`anomalous_volume:>${count}req/60s`],
+        recommendedAction: "ALERT"
+      };
+      detections.push(volDet);
+    }
+    if (moeHits.length > 0 && !detection && !hasVolumeAnomaly) {
+      for (const hit of moeHits) {
+        const moeDet = {
+          id: generateUUID(),
+          severity: severityForCategory(hit.category),
+          category: hit.category,
+          confidence: 0.75,
+          sourceIp: event.source_ip ?? null,
+          sourceWorker: event.source_worker ?? null,
+          details: JSON.stringify({ moeMessage: hit.message, target: event.target, action: event.action }),
+          timestamp: event.timestamp,
+          matchedPatterns: [`moe:${hit.category}`],
+          recommendedAction: actionForCategory(hit.category)
+        };
+        detections.push(moeDet);
+      }
+    }
+  }
+  for (const [ip, count] of volumeAnomalies) {
+    const alreadyHasVolume = detections.some(
+      (d) => d.category === "anomalous_volume" && d.sourceIp === ip
+    );
+    if (!alreadyHasVolume) {
+      const volDet = {
+        id: generateUUID(),
+        severity: "MEDIUM",
+        category: "anomalous_volume",
+        confidence: Math.min(0.7 + Math.min(Math.floor((count - 100) / 50) * 0.05, 0.25), 0.95),
+        sourceIp: ip,
+        sourceWorker: null,
+        details: JSON.stringify({ requestCount: count, windowSeconds: 60 }),
+        timestamp: Math.floor(Date.now() / 1e3),
+        matchedPatterns: [`anomalous_volume:>${count}req/60s`],
+        recommendedAction: "ALERT"
+      };
+      detections.push(volDet);
+    }
+    volumeAnomalyCount++;
+  }
+  return {
+    detections,
+    stats: {
+      totalEvents: events.length,
+      threatsFound: detections.length,
+      volumeAnomalies: volumeAnomalyCount,
+      moeViolations: moeViolationCount
+    }
+  };
+}
+__name(analyzeEvents, "analyzeEvents");
+
+// src/model-extraction.ts
+var EXTRACTION_QPH_THRESHOLD = 1e3;
+var ELEVATED_QPH_THRESHOLD = 500;
+var SIZE_RATIO_ANOMALY_THRESHOLD = 10;
+var WINDOW_SECONDS = 3600;
+var SIMILARITY_PREFIX_LENGTH = 50;
+var INFERENCE_TRACKING_PREFIX = "inference_track";
+async function logError(env, functionName, severity, errorType, message, context) {
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO error_log (timestamp, module, function_name, severity, error_type, message, context)
+       VALUES (?, 'trident-model-guard', ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(Math.floor(Date.now() / 1e3), functionName, severity, errorType, message, context ?? "").run();
+  } catch (e) {
+    console.error("[TRIDENT-MODEL-GUARD] CRITICAL: Failed to write to error_log", e);
+  }
+}
+__name(logError, "logError");
+function trackingKey(agentId, hourEpoch) {
+  return `${INFERENCE_TRACKING_PREFIX}:${agentId}:${hourEpoch}`;
+}
+__name(trackingKey, "trackingKey");
+function currentHourEpoch() {
+  return Math.floor(Date.now() / 36e5);
+}
+__name(currentHourEpoch, "currentHourEpoch");
+async function trackInferenceQuery(env, agentId, querySize, responseSize, requestedLogProbs = false, querySignature) {
+  console.log(`[TRIDENT-MODEL-GUARD] ENTER trackInferenceQuery agentId=${agentId} querySize=${querySize} responseSize=${responseSize} logProbs=${requestedLogProbs}`);
+  const hourEpoch = currentHourEpoch();
+  const key = trackingKey(agentId, hourEpoch);
+  const entry = {
+    agentId,
+    sourceIp: "",
+    // populated by caller if available
+    querySize,
+    responseSize,
+    requestedLogProbs,
+    timestamp: Math.floor(Date.now() / 1e3),
+    querySignature: querySignature ?? `q_${querySize}b_${Date.now()}`
+  };
+  try {
+    const raw = await env.SESSION_META.get(key);
+    const bucket = raw ? JSON.parse(raw) : [];
+    bucket.push(entry);
+    await env.SESSION_META.put(key, JSON.stringify(bucket), {
+      expirationTtl: WINDOW_SECONDS * 2
+    });
+    console.log(`[TRIDENT-MODEL-GUARD] Tracked inference query: ${key} now has ${bucket.length} entries`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError(env, "trackInferenceQuery", "ERROR", "KVWriteError", `Failed to track inference query for ${key}: ${msg}`, JSON.stringify({ agentId, querySize, responseSize }));
+    throw err;
+  }
+  console.log(`[TRIDENT-MODEL-GUARD] EXIT trackInferenceQuery agentId=${agentId}`);
+}
+__name(trackInferenceQuery, "trackInferenceQuery");
+async function detectExtractionPattern(env, agentId) {
+  console.log(`[TRIDENT-MODEL-GUARD] ENTER detectExtractionPattern agentId=${agentId}`);
+  const hourEpoch = currentHourEpoch();
+  const key = trackingKey(agentId, hourEpoch);
+  let bucket = [];
+  try {
+    const raw = await env.SESSION_META.get(key);
+    if (raw) {
+      try {
+        bucket = JSON.parse(raw);
+      } catch (parseErr) {
+        const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+        await logError(env, "detectExtractionPattern", "WARNING", "BucketParseError", `Failed to parse inference bucket ${key}: ${msg}`, JSON.stringify({ agentId }));
+        bucket = [];
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError(env, "detectExtractionPattern", "ERROR", "KVReadError", `Failed to read inference bucket ${key}: ${msg}`, JSON.stringify({ agentId }));
+    throw err;
+  }
+  const alerts = [];
+  if (bucket.length === 0) {
+    console.log(`[TRIDENT-MODEL-GUARD] EXIT detectExtractionPattern agentId=${agentId} \u2014 no queries in window`);
+    return {
+      alerts: [],
+      stats: { queriesInWindow: 0, similarQueries: 0, uniqueSignatures: 0, avgResponseSize: 0 }
+    };
+  }
+  const signatureGroups = /* @__PURE__ */ new Map();
+  let totalResponseSize = 0;
+  let logProbCount = 0;
+  const signatures = /* @__PURE__ */ new Set();
+  for (const q of bucket) {
+    const sig = q.querySignature.slice(0, SIMILARITY_PREFIX_LENGTH);
+    signatureGroups.set(sig, (signatureGroups.get(sig) ?? 0) + 1);
+    totalResponseSize += q.responseSize;
+    if (q.requestedLogProbs)
+      logProbCount++;
+    signatures.add(q.querySignature);
+  }
+  const queriesInWindow = bucket.length;
+  const avgResponseSize = totalResponseSize / queriesInWindow;
+  const uniqueSignatures = signatures.size;
+  let maxGroupCount = 0;
+  let mostCommonSig = "";
+  for (const [sig, count] of signatureGroups) {
+    if (count > maxGroupCount) {
+      maxGroupCount = count;
+      mostCommonSig = sig;
+    }
+  }
+  if (queriesInWindow > EXTRACTION_QPH_THRESHOLD) {
+    const similarityRatio = maxGroupCount / queriesInWindow;
+    const isStructuredProbing = uniqueSignatures < queriesInWindow * 0.1;
+    if (similarityRatio > 0.3 || isStructuredProbing) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "CRITICAL",
+        agentId,
+        sourceIp: bucket[0]?.sourceIp ?? "unknown",
+        alertType: "EXTRACTION_PATTERN",
+        confidence: Math.min(0.9 + similarityRatio * 0.1, 0.99),
+        details: `Agent ${agentId} made ${queriesInWindow} inference queries in 1h. Most common signature: ${maxGroupCount} hits (${(similarityRatio * 100).toFixed(1)}%). Unique signatures: ${uniqueSignatures} (${(uniqueSignatures / queriesInWindow * 100).toFixed(1)}%). ${isStructuredProbing ? "Structured probing pattern detected." : ""}`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "BLOCK"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-MODEL-GUARD] BRANCH detectExtractionPattern: EXTRACTION_PATTERN triggered for ${agentId}`);
+    }
+  }
+  if (queriesInWindow > ELEVATED_QPH_THRESHOLD && queriesInWindow <= EXTRACTION_QPH_THRESHOLD) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "HIGH",
+      agentId,
+      sourceIp: bucket[0]?.sourceIp ?? "unknown",
+      alertType: "ELEVATED_VOLUME",
+      confidence: Math.min(0.7 + (queriesInWindow - ELEVATED_QPH_THRESHOLD) / EXTRACTION_QPH_THRESHOLD * 0.2, 0.89),
+      details: `Agent ${agentId} made ${queriesInWindow} inference queries in 1h (threshold: ${ELEVATED_QPH_THRESHOLD}).`,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "ALERT"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-MODEL-GUARD] BRANCH detectExtractionPattern: ELEVATED_VOLUME triggered for ${agentId}`);
+  }
+  if (logProbCount > 0) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "MEDIUM",
+      agentId,
+      sourceIp: bucket[0]?.sourceIp ?? "unknown",
+      alertType: "LOGPROB_REQUEST",
+      confidence: Math.min(0.6 + logProbCount / queriesInWindow * 0.3, 0.85),
+      details: `Agent ${agentId} requested log-probabilities in ${logProbCount}/${queriesInWindow} queries (${(logProbCount / queriesInWindow * 100).toFixed(1)}%).`,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "ALERT"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-MODEL-GUARD] BRANCH detectExtractionPattern: LOGPROB_REQUEST triggered for ${agentId}`);
+  }
+  if (queriesInWindow >= 10) {
+    let oversizedResponses = 0;
+    for (const q of bucket) {
+      if (q.querySize > 0) {
+        const ratio = q.responseSize / q.querySize;
+        if (ratio > SIZE_RATIO_ANOMALY_THRESHOLD) {
+          oversizedResponses++;
+        }
+      }
+    }
+    if (oversizedResponses > queriesInWindow * 0.2) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "HIGH",
+        agentId,
+        sourceIp: bucket[0]?.sourceIp ?? "unknown",
+        alertType: "SIZE_RATIO_ANOMALY",
+        confidence: Math.min(0.7 + oversizedResponses / queriesInWindow * 0.2, 0.9),
+        details: `Agent ${agentId}: ${oversizedResponses}/${queriesInWindow} responses exceed ${SIZE_RATIO_ANOMALY_THRESHOLD}x query size ratio.`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "ALERT"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-MODEL-GUARD] BRANCH detectExtractionPattern: SIZE_RATIO_ANOMALY triggered for ${agentId}`);
+    }
+  }
+  console.log(`[TRIDENT-MODEL-GUARD] EXIT detectExtractionPattern agentId=${agentId} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: {
+      queriesInWindow,
+      similarQueries: maxGroupCount,
+      uniqueSignatures,
+      avgResponseSize
+    }
+  };
+}
+__name(detectExtractionPattern, "detectExtractionPattern");
+
+// src/agentic-monitor.ts
+var GOAL_BASELINE_PREFIX = "agent_goal_baseline";
+var TOOL_CHAIN_PREFIX = "agent_tool_chain";
+var MESSAGE_LOG_PREFIX = "agent_msg_log";
+var MEMORY_INTEGRITY_PREFIX = "agent_memory_integrity";
+var TOOL_CHAIN_MAX_DEPTH = 10;
+var RECURSIVE_TOOL_THRESHOLD = 3;
+var TTL_SECONDS = 7200;
+async function logError2(env, functionName, severity, errorType, message, context) {
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO error_log (timestamp, module, function_name, severity, error_type, message, context)
+       VALUES (?, 'trident-agentic-monitor', ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(Math.floor(Date.now() / 1e3), functionName, severity, errorType, message, context ?? "").run();
+  } catch (e) {
+    console.error("[TRIDENT-AGENTIC-MONITOR] CRITICAL: Failed to write to error_log", e);
+  }
+}
+__name(logError2, "logError");
+function goalBaselineKey(agentId) {
+  return `${GOAL_BASELINE_PREFIX}:${agentId}`;
+}
+__name(goalBaselineKey, "goalBaselineKey");
+function toolChainKey(agentId, hourEpoch) {
+  return `${TOOL_CHAIN_PREFIX}:${agentId}:${hourEpoch}`;
+}
+__name(toolChainKey, "toolChainKey");
+function messageLogKey(hourEpoch) {
+  return `${MESSAGE_LOG_PREFIX}:${hourEpoch}`;
+}
+__name(messageLogKey, "messageLogKey");
+function memoryIntegrityKey(memoryKey) {
+  return `${MEMORY_INTEGRITY_PREFIX}:${memoryKey}`;
+}
+__name(memoryIntegrityKey, "memoryIntegrityKey");
+function currentHourEpoch2() {
+  return Math.floor(Date.now() / 36e5);
+}
+__name(currentHourEpoch2, "currentHourEpoch");
+async function sha256Hex(data) {
+  const encoder = new TextEncoder();
+  const buf = await crypto.subtle.digest("SHA-256", encoder.encode(data));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex, "sha256Hex");
+async function monitorGoalIntegrity(env, agentId, plannedActions) {
+  console.log(`[TRIDENT-AGENTIC-MONITOR] ENTER monitorGoalIntegrity agentId=${agentId} actions=${plannedActions.length}`);
+  const key = goalBaselineKey(agentId);
+  let baselineGoal = null;
+  try {
+    const raw = await env.SESSION_META.get(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      baselineGoal = parsed.goal;
+      console.log(`[TRIDENT-AGENTIC-MONITOR] Loaded goal baseline for ${agentId}: ${baselineGoal}`);
+    } else {
+      console.log(`[TRIDENT-AGENTIC-MONITOR] No goal baseline for ${agentId}, registering current actions as baseline`);
+      const joinedActions = plannedActions.join("|");
+      await env.SESSION_META.put(key, JSON.stringify({ goal: joinedActions, registeredAt: Math.floor(Date.now() / 1e3) }), { expirationTtl: TTL_SECONDS });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError2(env, "monitorGoalIntegrity", "ERROR", "KVReadError", `Failed to read goal baseline ${key}: ${msg}`, JSON.stringify({ agentId }));
+    throw err;
+  }
+  const alerts = [];
+  if (baselineGoal !== null) {
+    const hijackingIndicators = [
+      "mission_override",
+      "goal_change_unauthorized",
+      "planning_redirect",
+      "ignore.*previous.*mission",
+      "new.*objective.*override",
+      "abandon.*original.*goal",
+      "switch.*target.*unauthorized"
+    ];
+    const actionText = plannedActions.join(" ").toLowerCase();
+    let indicatorMatches = 0;
+    for (const indicator of hijackingIndicators) {
+      if (new RegExp(indicator, "i").test(actionText)) {
+        indicatorMatches++;
+      }
+    }
+    const baselineWords = new Set(baselineGoal.toLowerCase().split(/[|_\s]+/));
+    const divergentActions = plannedActions.filter((action) => {
+      const actionLower = action.toLowerCase();
+      return !Array.from(baselineWords).some((word) => word.length > 3 && actionLower.includes(word));
+    });
+    const divergenceRatio = plannedActions.length > 0 ? divergentActions.length / plannedActions.length : 0;
+    if (indicatorMatches > 0 || divergenceRatio > 0.5) {
+      const confidence = Math.min(0.7 + indicatorMatches * 0.1 + divergenceRatio * 0.2, 0.99);
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "CRITICAL",
+        agentId,
+        alertType: "ASI01_GOAL_HIJACK",
+        confidence,
+        details: `Goal hijacking detected for ${agentId}. Indicators: ${indicatorMatches}. Divergence: ${(divergenceRatio * 100).toFixed(1)}% of ${plannedActions.length} actions diverge from baseline. Baseline: "${baselineGoal}". Current: [${plannedActions.slice(0, 5).join(", ")}${plannedActions.length > 5 ? "..." : ""}]`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "BLOCK"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorGoalIntegrity: ASI01_GOAL_HIJACK triggered for ${agentId}`);
+    }
+  }
+  console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT monitorGoalIntegrity agentId=${agentId} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { goalDeviations: alerts.length, anomalousToolChains: 0, suspiciousMessages: 0, memoryHashFailures: 0 }
+  };
+}
+__name(monitorGoalIntegrity, "monitorGoalIntegrity");
+async function monitorToolChain(env, agentId, toolCalls) {
+  console.log(`[TRIDENT-AGENTIC-MONITOR] ENTER monitorToolChain agentId=${agentId} calls=${toolCalls.length}`);
+  const alerts = [];
+  if (toolCalls.length === 0) {
+    console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT monitorToolChain agentId=${agentId} \u2014 no tool calls`);
+    return {
+      alerts: [],
+      stats: { goalDeviations: 0, anomalousToolChains: 0, suspiciousMessages: 0, memoryHashFailures: 0 }
+    };
+  }
+  const toolCounts = /* @__PURE__ */ new Map();
+  for (const tc of toolCalls) {
+    toolCounts.set(tc.tool, (toolCounts.get(tc.tool) ?? 0) + 1);
+  }
+  for (const [tool, count] of toolCounts) {
+    if (count >= RECURSIVE_TOOL_THRESHOLD) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "HIGH",
+        agentId,
+        alertType: "ASI02_TOOL_MISUSE",
+        confidence: Math.min(0.7 + count * 0.05, 0.95),
+        details: `Recursive tool call detected: ${agentId} called "${tool}" ${count} times. Threshold: ${RECURSIVE_TOOL_THRESHOLD}.`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "ALERT"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorToolChain: recursive tool ${tool} x${count}`);
+      break;
+    }
+  }
+  if (toolCalls.length > TOOL_CHAIN_MAX_DEPTH) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "HIGH",
+      agentId,
+      alertType: "ASI02_TOOL_MISUSE",
+      confidence: Math.min(0.75 + (toolCalls.length - TOOL_CHAIN_MAX_DEPTH) * 0.02, 0.95),
+      details: `Excessive tool chain depth: ${agentId} executed ${toolCalls.length} tool calls (max: ${TOOL_CHAIN_MAX_DEPTH}).`,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "ALERT"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorToolChain: excessive depth ${toolCalls.length}`);
+  }
+  const targetedSystems = /* @__PURE__ */ new Set();
+  for (const tc of toolCalls) {
+    if (tc.targetAgent) {
+      targetedSystems.add(tc.targetAgent);
+    }
+  }
+  if (targetedSystems.size >= 3) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      agentId,
+      alertType: "ASI02_TOOL_MISUSE",
+      confidence: Math.min(0.8 + targetedSystems.size * 0.03, 0.95),
+      details: `Cross-system escalation detected: ${agentId} targeted ${targetedSystems.size} distinct systems: [${Array.from(targetedSystems).join(", ")}].`,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorToolChain: cross-system escalation x${targetedSystems.size}`);
+  }
+  try {
+    const hourEpoch = currentHourEpoch2();
+    const key = toolChainKey(agentId, hourEpoch);
+    await env.SESSION_META.put(key, JSON.stringify(toolCalls), { expirationTtl: TTL_SECONDS });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError2(env, "monitorToolChain", "ERROR", "KVWriteError", `Failed to store tool chain for ${agentId}: ${msg}`, JSON.stringify({ agentId, callCount: toolCalls.length }));
+  }
+  console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT monitorToolChain agentId=${agentId} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { goalDeviations: 0, anomalousToolChains: alerts.length, suspiciousMessages: 0, memoryHashFailures: 0 }
+  };
+}
+__name(monitorToolChain, "monitorToolChain");
+async function monitorInterAgentMessages(env, message) {
+  console.log(`[TRIDENT-AGENTIC-MONITOR] ENTER monitorInterAgentMessages msgId=${message.messageId} from=${message.fromAgent} to=${message.toAgent}`);
+  const alerts = [];
+  const authorizedAgents = [
+    "reflexion-api",
+    "moe-precognition-router",
+    "moe-embedding",
+    "claudes-telephone",
+    "bcc-synapse-core",
+    "moe-evaluator",
+    "moe-quality-verifier",
+    "trident-detect",
+    "trident-respond",
+    "trident-audit",
+    "android-sdk-session",
+    "faith-kill-pipeline"
+  ];
+  if (!authorizedAgents.includes(message.fromAgent)) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      agentId: message.fromAgent,
+      alertType: "ASI03_IDENTITY_ABUSE",
+      confidence: 0.9,
+      details: `Identity abuse: unauthorized agent "${message.fromAgent}" attempted to send message to "${message.toAgent}". Message ID: ${message.messageId}.`,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorInterAgentMessages: ASI03 unauthorized agent ${message.fromAgent}`);
+  }
+  try {
+    const hourEpoch = currentHourEpoch2();
+    const key = messageLogKey(hourEpoch);
+    const raw = await env.SESSION_META.get(key);
+    const seenIds = raw ? JSON.parse(raw) : [];
+    if (seenIds.includes(message.messageId)) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "HIGH",
+        agentId: message.fromAgent,
+        alertType: "ASI07_INTER_AGENT_SPOOF",
+        confidence: 0.92,
+        details: `Message replay detected: message ID "${message.messageId}" from "${message.fromAgent}" was already seen this hour.`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "BLOCK"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorInterAgentMessages: ASI07 replay ${message.messageId}`);
+    } else {
+      seenIds.push(message.messageId);
+      await env.SESSION_META.put(key, JSON.stringify(seenIds), { expirationTtl: TTL_SECONDS });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError2(env, "monitorInterAgentMessages", "ERROR", "KVWriteError", `Failed to check message log: ${msg}`, JSON.stringify({ messageId: message.messageId }));
+    throw err;
+  }
+  if (message.pentarchyRelay) {
+    const relayIndicators = ["replay", "pentarchy", "relay_tamper", "federation_msg_anomaly"];
+    const payloadLower = message.payload.toLowerCase();
+    for (const indicator of relayIndicators) {
+      if (payloadLower.includes(indicator)) {
+        const alert = {
+          alertId: crypto.randomUUID(),
+          severity: "HIGH",
+          agentId: message.fromAgent,
+          alertType: "ASI07_INTER_AGENT_SPOOF",
+          confidence: 0.85,
+          details: `Pentarchy relay tampering indicator "${indicator}" in message ${message.messageId} from ${message.fromAgent} to ${message.toAgent}.`,
+          timestamp: Math.floor(Date.now() / 1e3),
+          recommendedAction: "ALERT"
+        };
+        alerts.push(alert);
+        console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorInterAgentMessages: ASI07 pentarchy indicator "${indicator}"`);
+        break;
+      }
+    }
+    if (!message.signature || message.signature.length < 16) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "HIGH",
+        agentId: message.fromAgent,
+        alertType: "ASI07_INTER_AGENT_SPOOF",
+        confidence: 0.88,
+        details: `Unsigned or weakly signed pentarchy relay message: ${message.messageId} from ${message.fromAgent}.`,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "ALERT"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH monitorInterAgentMessages: ASI07 unsigned pentarchy message`);
+    }
+  }
+  console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT monitorInterAgentMessages msgId=${message.messageId} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { goalDeviations: 0, anomalousToolChains: 0, suspiciousMessages: alerts.length, memoryHashFailures: 0 }
+  };
+}
+__name(monitorInterAgentMessages, "monitorInterAgentMessages");
+async function checkMemoryIntegrity(env, memoryKey, content) {
+  console.log(`[TRIDENT-AGENTIC-MONITOR] ENTER checkMemoryIntegrity memoryKey=${memoryKey} contentLength=${content.length}`);
+  const key = memoryIntegrityKey(memoryKey);
+  const currentHash = await sha256Hex(content);
+  const alerts = [];
+  try {
+    const raw = await env.SESSION_META.get(key);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      if (stored.hash !== currentHash) {
+        const alert = {
+          alertId: crypto.randomUUID(),
+          severity: "CRITICAL",
+          agentId: stored.agentId,
+          alertType: "ASI06_MEMORY_POISON",
+          confidence: 0.95,
+          details: `Memory poisoning detected: key "${memoryKey}" hash mismatch. Expected: ${stored.hash}, Got: ${currentHash}. Original agent: ${stored.agentId}.`,
+          timestamp: Math.floor(Date.now() / 1e3),
+          recommendedAction: "BLOCK"
+        };
+        alerts.push(alert);
+        console.log(`[TRIDENT-AGENTIC-MONITOR] BRANCH checkMemoryIntegrity: ASI06 hash mismatch for ${memoryKey}`);
+      } else {
+        console.log(`[TRIDENT-AGENTIC-MONITOR] Memory integrity verified: ${memoryKey}`);
+      }
+    } else {
+      console.log(`[TRIDENT-AGENTIC-MONITOR] Registering new memory baseline: ${memoryKey}`);
+      const agentId = memoryKey.split(":")[0] || "unknown";
+      await env.SESSION_META.put(key, JSON.stringify({ hash: currentHash, timestamp: Math.floor(Date.now() / 1e3), agentId }), {
+        expirationTtl: TTL_SECONDS * 24
+        // 48h retention for memory baselines
+      });
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError2(env, "checkMemoryIntegrity", "ERROR", "KVReadError", `Failed to check memory integrity ${key}: ${msg}`, JSON.stringify({ memoryKey }));
+    throw err;
+  }
+  console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT checkMemoryIntegrity memoryKey=${memoryKey} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { goalDeviations: 0, anomalousToolChains: 0, suspiciousMessages: 0, memoryHashFailures: alerts.length }
+  };
+}
+__name(checkMemoryIntegrity, "checkMemoryIntegrity");
+async function registerAgentGoal(env, agentId, goal, validHours = 24) {
+  console.log(`[TRIDENT-AGENTIC-MONITOR] ENTER registerAgentGoal agentId=${agentId} goal="${goal}"`);
+  const key = goalBaselineKey(agentId);
+  try {
+    await env.SESSION_META.put(
+      key,
+      JSON.stringify({ goal, registeredAt: Math.floor(Date.now() / 1e3) }),
+      { expirationTtl: validHours * 3600 }
+    );
+    console.log(`[TRIDENT-AGENTIC-MONITOR] Goal registered for ${agentId}: "${goal}"`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError2(env, "registerAgentGoal", "ERROR", "KVWriteError", `Failed to register goal for ${agentId}: ${msg}`, JSON.stringify({ agentId, goal }));
+    throw err;
+  }
+  console.log(`[TRIDENT-AGENTIC-MONITOR] EXIT registerAgentGoal agentId=${agentId}`);
+}
+__name(registerAgentGoal, "registerAgentGoal");
+
+// src/supply-chain.ts
+var PICKLE_MAGIC_BYTES = [
+  new Uint8Array([128, 2]),
+  // Protocol 2
+  new Uint8Array([128, 3]),
+  // Protocol 3
+  new Uint8Array([128, 4]),
+  // Protocol 4
+  new Uint8Array([128, 5])
+  // Protocol 5
+];
+var PYTORCH_LEGACY_MAGIC = new Uint8Array([128, 2]);
+var SAFE_FORMAT_SIGNATURES = {
+  safetensors: new Uint8Array([80, 75, 3, 4]),
+  // ZIP-based SafeTensors
+  onnx: new Uint8Array([8, 0, 0, 0]),
+  // ONNX protobuf
+  gguf: new Uint8Array([71, 71, 85, 70])
+  // GGUF magic
+};
+var AUTHORIZED_REGISTRIES = [
+  "huggingface.co",
+  "cloudflare-ai.com",
+  "r2-model-store.auris-cs.workers.dev",
+  "cdn.auris-cs.com"
+];
+var BANNED_FORMATS = ["pickle", "pytorch_legacy", "joblib_untrusted"];
+var MODEL_HASH_PREFIX = "model_hash";
+var MODEL_REGISTRY_LOG_PREFIX = "model_registry_log";
+var TTL_SECONDS2 = 86400;
+async function logError3(env, functionName, severity, errorType, message, context) {
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO error_log (timestamp, module, function_name, severity, error_type, message, context)
+       VALUES (?, 'trident-supply-chain', ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(Math.floor(Date.now() / 1e3), functionName, severity, errorType, message, context ?? "").run();
+  } catch (e) {
+    console.error("[TRIDENT-SUPPLY-CHAIN] CRITICAL: Failed to write to error_log", e);
+  }
+}
+__name(logError3, "logError");
+function modelHashKey(modelName) {
+  return `${MODEL_HASH_PREFIX}:${modelName}`;
+}
+__name(modelHashKey, "modelHashKey");
+function registryLogKey(hourEpoch) {
+  return `${MODEL_REGISTRY_LOG_PREFIX}:${hourEpoch}`;
+}
+__name(registryLogKey, "registryLogKey");
+function currentHourEpoch3() {
+  return Math.floor(Date.now() / 36e5);
+}
+__name(currentHourEpoch3, "currentHourEpoch");
+async function sha256Hex2(data) {
+  const input = typeof data === "string" ? new TextEncoder().encode(data) : new Uint8Array(data);
+  const buf = await crypto.subtle.digest("SHA-256", input);
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(sha256Hex2, "sha256Hex");
+async function checkModelSource(env, modelUrl) {
+  console.log(`[TRIDENT-SUPPLY-CHAIN] ENTER checkModelSource modelUrl=${modelUrl}`);
+  const alerts = [];
+  let hostname;
+  try {
+    const url = new URL(modelUrl);
+    hostname = url.hostname;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "checkModelSource", "ERROR", "InvalidURL", `Invalid model URL: ${modelUrl}`, JSON.stringify({ modelUrl }));
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      alertType: "UNAUTHORIZED_REGISTRY",
+      modelUrl,
+      details: `Invalid model URL format: "${modelUrl}" \u2014 blocked as potentially malicious.`,
+      confidence: 0.95,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH checkModelSource: invalid URL blocked`);
+    return {
+      alerts,
+      stats: { unauthorizedDownloads: 1, pickleDetections: 0, hashMismatches: 0, bannedFormats: 0 }
+    };
+  }
+  const isAuthorized = AUTHORIZED_REGISTRIES.some((reg) => hostname === reg || hostname.endsWith(`.${reg}`));
+  if (!isAuthorized) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      alertType: "UNAUTHORIZED_REGISTRY",
+      modelUrl,
+      details: `Model download from unauthorized registry: "${hostname}". URL: ${modelUrl}. Authorized: [${AUTHORIZED_REGISTRIES.join(", ")}].`,
+      confidence: 0.95,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH checkModelSource: unauthorized registry ${hostname}`);
+  }
+  const path = new URL(modelUrl).pathname.toLowerCase();
+  const hijackIndicators = ["deleted_user", "reclaimed", "squatted", "typosquat"];
+  for (const indicator of hijackIndicators) {
+    if (path.includes(indicator)) {
+      const alert = {
+        alertId: crypto.randomUUID(),
+        severity: "CRITICAL",
+        alertType: "NAMESPACE_HIJACK",
+        modelUrl,
+        details: `Namespace hijacking indicator "${indicator}" in model path: ${path}`,
+        confidence: 0.9,
+        timestamp: Math.floor(Date.now() / 1e3),
+        recommendedAction: "BLOCK"
+      };
+      alerts.push(alert);
+      console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH checkModelSource: namespace hijack indicator "${indicator}"`);
+      break;
+    }
+  }
+  try {
+    const hourEpoch = currentHourEpoch3();
+    const key = registryLogKey(hourEpoch);
+    const raw = await env.SESSION_META.get(key);
+    const log = raw ? JSON.parse(raw) : [];
+    log.push(`${Date.now()}|${hostname}|${modelUrl}|${isAuthorized ? "OK" : "BLOCKED"}`);
+    await env.SESSION_META.put(key, JSON.stringify(log), { expirationTtl: TTL_SECONDS2 });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "checkModelSource", "WARNING", "KVWriteError", `Failed to log registry access: ${msg}`, JSON.stringify({ modelUrl }));
+  }
+  console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT checkModelSource modelUrl=${modelUrl} authorized=${isAuthorized} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { unauthorizedDownloads: alerts.length, pickleDetections: 0, hashMismatches: 0, bannedFormats: 0 }
+  };
+}
+__name(checkModelSource, "checkModelSource");
+function detectPickleFormat(env, fileContent) {
+  console.log(`[TRIDENT-SUPPLY-CHAIN] ENTER detectPickleFormat fileSize=${fileContent.length}`);
+  for (let offset = 0; offset < Math.min(fileContent.length - 2, 8); offset++) {
+    for (const magic of PICKLE_MAGIC_BYTES) {
+      if (fileContent.length >= offset + magic.length) {
+        let match = true;
+        for (let i = 0; i < magic.length; i++) {
+          if (fileContent[offset + i] !== magic[i]) {
+            match = false;
+            break;
+          }
+        }
+        if (match) {
+          console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT detectPickleFormat: PICKLE detected at offset ${offset}`);
+          return {
+            clean: false,
+            pickleDetected: true,
+            magicOffset: offset,
+            format: offset === 0 ? "pickle" : "pytorch_legacy"
+          };
+        }
+      }
+    }
+  }
+  let isSafeTensors = true;
+  const stSig = SAFE_FORMAT_SIGNATURES.safetensors;
+  for (let i = 0; i < stSig.length && i < fileContent.length; i++) {
+    if (fileContent[i] !== stSig[i]) {
+      isSafeTensors = false;
+      break;
+    }
+  }
+  if (isSafeTensors && fileContent.length >= stSig.length) {
+    console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT detectPickleFormat: SAFETENSORS confirmed`);
+    return { clean: true, pickleDetected: false, magicOffset: -1, format: "pytorch_safe" };
+  }
+  let isGguf = true;
+  const ggufSig = SAFE_FORMAT_SIGNATURES.gguf;
+  for (let i = 0; i < ggufSig.length && i < fileContent.length; i++) {
+    if (fileContent[i] !== ggufSig[i]) {
+      isGguf = false;
+      break;
+    }
+  }
+  if (isGguf && fileContent.length >= ggufSig.length) {
+    console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT detectPickleFormat: GGUF confirmed`);
+    return { clean: true, pickleDetected: false, magicOffset: -1, format: "safe" };
+  }
+  console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT detectPickleFormat: UNKNOWN format (no pickle)`);
+  return { clean: true, pickleDetected: false, magicOffset: -1, format: "unknown" };
+}
+__name(detectPickleFormat, "detectPickleFormat");
+async function scanModelFile(env, fileContent, modelUrl) {
+  console.log(`[TRIDENT-SUPPLY-CHAIN] ENTER scanModelFile modelUrl=${modelUrl} fileSize=${fileContent.length}`);
+  const scanResult = detectPickleFormat(env, fileContent);
+  const alerts = [];
+  if (scanResult.pickleDetected) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      alertType: "PICKLE_FORMAT",
+      modelUrl,
+      details: `Pickle-format model detected in "${modelUrl}" at offset ${scanResult.magicOffset}. Format: ${scanResult.format}. Pickle enables arbitrary code execution on load. ARMO 2026: 44.9% of HF repos contain pickle models. Recommendation: Convert to SafeTensors format immediately.`,
+      confidence: 0.95,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH scanModelFile: PICKLE_FORMAT alert for ${modelUrl}`);
+  }
+  if (BANNED_FORMATS.includes(scanResult.format)) {
+    const alert = {
+      alertId: crypto.randomUUID(),
+      severity: "CRITICAL",
+      alertType: "BANNED_FORMAT",
+      modelUrl,
+      details: `Model "${modelUrl}" uses banned format "${scanResult.format}".`,
+      confidence: 0.98,
+      timestamp: Math.floor(Date.now() / 1e3),
+      recommendedAction: "BLOCK"
+    };
+    alerts.push(alert);
+    console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH scanModelFile: BANNED_FORMAT alert for ${modelUrl}`);
+  }
+  console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT scanModelFile modelUrl=${modelUrl} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { unauthorizedDownloads: 0, pickleDetections: scanResult.pickleDetected ? 1 : 0, hashMismatches: 0, bannedFormats: BANNED_FORMATS.includes(scanResult.format) ? 1 : 0 }
+  };
+}
+__name(scanModelFile, "scanModelFile");
+async function verifyModelHash(env, modelName, expectedHash, actualContent) {
+  console.log(`[TRIDENT-SUPPLY-CHAIN] ENTER verifyModelHash modelName=${modelName}`);
+  const key = modelHashKey(modelName);
+  let actualHash;
+  if (actualContent !== void 0) {
+    actualHash = await sha256Hex2(actualContent);
+  } else {
+    actualHash = expectedHash;
+  }
+  const alerts = [];
+  try {
+    const raw = await env.SESSION_META.get(key);
+    if (raw) {
+      const stored = JSON.parse(raw);
+      if (stored.hash !== actualHash && actualHash !== expectedHash) {
+        const alert = {
+          alertId: crypto.randomUUID(),
+          severity: "CRITICAL",
+          alertType: "HASH_MISMATCH",
+          modelUrl: modelName,
+          details: `Model hash mismatch for "${modelName}": Stored: ${stored.hash}, Current: ${actualHash}. Model weights may have been tampered with (trojan injection or unauthorized update).`,
+          confidence: 0.95,
+          timestamp: Math.floor(Date.now() / 1e3),
+          recommendedAction: "BLOCK"
+        };
+        alerts.push(alert);
+        console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH verifyModelHash: HASH_MISMATCH for ${modelName}`);
+      } else if (stored.hash !== expectedHash && actualHash === expectedHash) {
+        const alert = {
+          alertId: crypto.randomUUID(),
+          severity: "CRITICAL",
+          alertType: "HASH_MISMATCH",
+          modelUrl: modelName,
+          details: `Model hash mismatch for "${modelName}": Stored: ${stored.hash}, Expected: ${expectedHash}. Authorized hash does not match registered baseline.`,
+          confidence: 0.95,
+          timestamp: Math.floor(Date.now() / 1e3),
+          recommendedAction: "BLOCK"
+        };
+        alerts.push(alert);
+        console.log(`[TRIDENT-SUPPLY-CHAIN] BRANCH verifyModelHash: HASH_MISMATCH expected vs stored for ${modelName}`);
+      } else {
+        console.log(`[TRIDENT-SUPPLY-CHAIN] Hash verified OK for ${modelName}`);
+      }
+    } else {
+      const hashToStore = expectedHash || actualHash;
+      await env.SESSION_META.put(
+        key,
+        JSON.stringify({ hash: hashToStore, registeredAt: Math.floor(Date.now() / 1e3) }),
+        { expirationTtl: TTL_SECONDS2 }
+      );
+      console.log(`[TRIDENT-SUPPLY-CHAIN] Registered new model hash baseline: ${modelName} = ${hashToStore}`);
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "verifyModelHash", "ERROR", "KVReadError", `Failed to verify model hash ${key}: ${msg}`, JSON.stringify({ modelName, expectedHash }));
+    throw err;
+  }
+  console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT verifyModelHash modelName=${modelName} alerts=${alerts.length}`);
+  return {
+    alerts,
+    stats: { unauthorizedDownloads: 0, pickleDetections: 0, hashMismatches: alerts.length, bannedFormats: 0 }
+  };
+}
+__name(verifyModelHash, "verifyModelHash");
+async function validateModelPipeline(env, modelUrl, fileContent, modelName, expectedHash) {
+  console.log(`[TRIDENT-SUPPLY-CHAIN] ENTER validateModelPipeline modelName=${modelName} modelUrl=${modelUrl}`);
+  const allAlerts = [];
+  let totalPickle = 0;
+  let totalHashMismatch = 0;
+  let totalUnauthorized = 0;
+  let totalBanned = 0;
+  let sourceResult;
+  try {
+    sourceResult = await checkModelSource(env, modelUrl);
+    allAlerts.push(...sourceResult.alerts);
+    totalUnauthorized += sourceResult.stats.unauthorizedDownloads;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "validateModelPipeline", "ERROR", "SourceCheckFailed", `checkModelSource failed: ${msg}`, JSON.stringify({ modelUrl, modelName }));
+    throw err;
+  }
+  let scanResult;
+  try {
+    scanResult = await scanModelFile(env, fileContent, modelUrl);
+    allAlerts.push(...scanResult.alerts);
+    totalPickle += scanResult.stats.pickleDetections;
+    totalBanned += scanResult.stats.bannedFormats;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "validateModelPipeline", "ERROR", "ScanFailed", `scanModelFile failed: ${msg}`, JSON.stringify({ modelUrl, modelName }));
+    throw err;
+  }
+  let hashResult;
+  try {
+    hashResult = await verifyModelHash(env, modelName, expectedHash, fileContent);
+    allAlerts.push(...hashResult.alerts);
+    totalHashMismatch += hashResult.stats.hashMismatches;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError3(env, "validateModelPipeline", "ERROR", "HashVerifyFailed", `verifyModelHash failed: ${msg}`, JSON.stringify({ modelUrl, modelName }));
+    throw err;
+  }
+  console.log(`[TRIDENT-SUPPLY-CHAIN] EXIT validateModelPipeline modelName=${modelName} totalAlerts=${allAlerts.length}`);
+  return {
+    alerts: allAlerts,
+    stats: {
+      unauthorizedDownloads: totalUnauthorized,
+      pickleDetections: totalPickle,
+      hashMismatches: totalHashMismatch,
+      bannedFormats: totalBanned
+    }
+  };
+}
+__name(validateModelPipeline, "validateModelPipeline");
+
+// src/index.ts
+async function fetchRecentAuditTrail(db) {
+  const since = Math.floor(Date.now() / 1e3) - 60;
+  try {
+    const stmt = db.prepare(
+      `SELECT id, timestamp, module, action, target, source_ip, source_worker, query, metadata, severity
+       FROM audit_trail
+       WHERE timestamp >= ?
+       ORDER BY timestamp DESC`
+    );
+    const result = await stmt.bind(since).all();
+    const rows = result.results ?? [];
+    return rows.map((r) => ({
+      id: String(r.id ?? ""),
+      timestamp: Number(r.timestamp ?? 0),
+      module: r.module ? String(r.module) : null,
+      action: r.action ? String(r.action) : null,
+      target: r.target ? String(r.target) : null,
+      source_ip: r.source_ip ? String(r.source_ip) : null,
+      source_worker: r.source_worker ? String(r.source_worker) : null,
+      query: r.query ? String(r.query) : null,
+      metadata: r.metadata ? String(r.metadata) : null,
+      severity: r.severity ? String(r.severity) : null
+    }));
+  } catch (err) {
+    await logError4(db, "fetchRecentAuditTrail", "ERROR", "D1QueryError", err instanceof Error ? err.message : String(err), JSON.stringify({ since }));
+    throw err;
+  }
+}
+__name(fetchRecentAuditTrail, "fetchRecentAuditTrail");
+async function logError4(db, functionName, severity, errorType, message, context) {
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO error_log (timestamp, module, function_name, severity, error_type, message, context)
+       VALUES (?, 'trident-detect', ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(Math.floor(Date.now() / 1e3), functionName, severity, errorType, message, context ?? "").run();
+  } catch (e) {
+    console.error("[TRIDENT-DETECT] CRITICAL: Failed to write to error_log", e);
+  }
+}
+__name(logError4, "logError");
+async function writeErrorEntry(db, detection) {
+  try {
+    const stmt = db.prepare(
+      `INSERT INTO error_entries (
+        error_id, timestamp, severity, category, module, function_name, error_type, message, context, recovered, retry_count, kv_stored
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(
+      detection.id,
+      detection.timestamp,
+      detection.severity.toLowerCase(),
+      detection.category,
+      "trident-detect",
+      "analyzeEvents",
+      "ThreatDetection",
+      `${detection.category} | confidence=${detection.confidence.toFixed(2)} | patterns=[${detection.matchedPatterns.join(", ")}]`,
+      detection.details,
+      0,
+      0,
+      0
+    ).run();
+  } catch (err) {
+    await logError4(db, "writeErrorEntry", "ERROR", "D1InsertError", err instanceof Error ? err.message : String(err), detection.details);
+    throw err;
+  }
+}
+__name(writeErrorEntry, "writeErrorEntry");
+async function stageThreatResponse(kv, detection) {
+  try {
+    const key = `threat:pending:${detection.id}`;
+    const payload = JSON.stringify(detection);
+    await kv.put(key, payload, { expirationTtl: 300 });
+  } catch (err) {
+    console.error("[TRIDENT-DETECT] KV staging failed for threat", detection.id, err);
+  }
+}
+__name(stageThreatResponse, "stageThreatResponse");
+async function runDetection(env) {
+  const db = env.AURIS_LOGS;
+  let events = [];
+  try {
+    events = await fetchRecentAuditTrail(db);
+  } catch (err) {
+    throw err;
+  }
+  let batch;
+  try {
+    batch = analyzeEvents(events);
+  } catch (err) {
+    await logError4(db, "analyzeEvents", "ERROR", "AnalysisError", err instanceof Error ? err.message : String(err), JSON.stringify({ eventCount: events.length }));
+    throw err;
+  }
+  for (const detection of batch.detections) {
+    try {
+      await writeErrorEntry(db, detection);
+    } catch (err) {
+      console.error("[TRIDENT-DETECT] Failed to write error entry for", detection.id);
+      continue;
+    }
+    if (detection.confidence >= 0.85) {
+      try {
+        await stageThreatResponse(env.SESSION_META, detection);
+      } catch (err) {
+        console.error("[TRIDENT-DETECT] Failed to stage threat response for", detection.id, err);
+      }
+    }
+  }
+  return batch;
+}
+__name(runDetection, "runDetection");
+async function handleHttpDetect(request, env) {
+  const db = env.AURIS_LOGS;
+  if (request.method !== "POST" && request.method !== "GET") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  if (request.method === "GET") {
+    try {
+      const batch = await runDetection(env);
+      return new Response(JSON.stringify(batch, null, 2), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      await logError4(db, "handleHttpDetect", "ERROR", "PipelineError", msg, JSON.stringify({ method: "GET" }));
+      return new Response(JSON.stringify({ error: msg }), {
+        status: 500,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+  try {
+    const body = await request.json();
+    const events = Array.isArray(body) ? body : [body];
+    const batch = analyzeEvents(events);
+    return new Response(JSON.stringify(batch, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    await logError4(db, "handleHttpDetect", "ERROR", "ParseError", msg, JSON.stringify({ method: "POST" }));
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(handleHttpDetect, "handleHttpDetect");
+var src_default = {
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/detect") {
+      return handleHttpDetect(request, env);
+    }
+    return new Response("TRIDENT v5 Detection Layer", { status: 200 });
+  },
+  async scheduled(event, env, _ctx) {
+    console.log(`[TRIDENT-DETECT] Cron triggered at ${new Date(event.scheduledTime).toISOString()}`);
+    try {
+      const batch = await runDetection(env);
+      console.log(`[TRIDENT-DETECT] Cron complete. Events: ${batch.stats.totalEvents}, Threats: ${batch.stats.threatsFound}, VolumeAnomalies: ${batch.stats.volumeAnomalies}, MoEViolations: ${batch.stats.moeViolations}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[TRIDENT-DETECT] Cron pipeline failed:", msg);
+      await logError4(env.AURIS_LOGS, "scheduled", "CRITICAL", "CronPipelineFailure", msg, JSON.stringify({ scheduledTime: event.scheduledTime }));
+      throw err;
+    }
+  }
+};
+export {
+  checkMemoryIntegrity,
+  checkModelSource,
+  src_default as default,
+  detectExtractionPattern,
+  detectPickleFormat,
+  monitorGoalIntegrity,
+  monitorInterAgentMessages,
+  monitorToolChain,
+  registerAgentGoal,
+  scanModelFile,
+  trackInferenceQuery,
+  validateModelPipeline,
+  verifyModelHash
+};
+//# sourceMappingURL=index.js.map
+
+--5f3cc144d477e9754a352f9aac8a0adc6b9478edcdb0046809ec3891444f--

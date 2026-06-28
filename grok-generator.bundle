@@ -1,0 +1,78 @@
+--76b00f05c4c6c673ffa2344fb2f6464b1d3c22ab62c511ccf26bce46ba62
+Content-Disposition: form-data; name="grok-gen2.js"
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const key = url.searchParams.get("key") || "";
+    const cors = {"Access-Control-Allow-Origin":"*","Content-Type":"application/json"};
+    
+    if (key !== "reflexion-telephone-2026") return resp({error:"auth"},cors,401);
+    if (url.pathname === "/health") return resp({status:"alive",service:"grok-generator"},cors);
+    
+    if (url.pathname === "/generate") {
+      const prompt = url.searchParams.get("prompt") || "Generate an anime image of a beautiful woman";
+      const sso = env.GROK_SSO;
+      const userId = "08d2904b-d4de-494c-ac22-c1324a916972";
+      
+      // Use Grok's API directly instead of browser automation
+      // Grok uses x.ai API endpoints
+      try {
+        const chatResp = await fetch("https://grok.com/rest/app-chat/conversations/new", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Cookie": "sso=" + sso + "; sso-rw=" + sso + "; x-userid=" + userId,
+            "Origin": "https://grok.com",
+            "Referer": "https://grok.com/",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36"
+          },
+          body: JSON.stringify({
+            temporary: false,
+            modelSlug: "grok-3",
+            message: prompt
+          })
+        });
+        
+        const chatData = await chatResp.text();
+        return resp({status: chatResp.status, statusText: chatResp.statusText, body: chatData.substring(0, 2000), headers: Object.fromEntries(chatResp.headers)}, cors);
+      } catch(e) {
+        return resp({error: e.message}, cors, 500);
+      }
+    }
+    
+    if (url.pathname === "/imagine") {
+      const prompt = url.searchParams.get("prompt") || "beautiful anime woman";
+      const sso = env.GROK_SSO;
+      const userId = "08d2904b-d4de-494c-ac22-c1324a916972";
+      
+      try {
+        const imgResp = await fetch("https://grok.com/rest/app-chat/image/create", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Cookie": "sso=" + sso + "; sso-rw=" + sso + "; x-userid=" + userId,
+            "Origin": "https://grok.com",
+            "Referer": "https://grok.com/",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36"
+          },
+          body: JSON.stringify({
+            prompt: prompt,
+            modelSlug: "flux"
+          })
+        });
+        
+        const imgData = await imgResp.text();
+        return resp({status: imgResp.status, body: imgData.substring(0, 5000), headers: Object.fromEntries(imgResp.headers)}, cors);
+      } catch(e) {
+        return resp({error: e.message}, cors, 500);
+      }
+    }
+    
+    return resp({endpoints:["/health","/generate?prompt=","/imagine?prompt="]},cors);
+  }
+};
+
+function resp(d,h,s=200){return new Response(JSON.stringify(d,null,2),{status:s,headers:h});}
+
+--76b00f05c4c6c673ffa2344fb2f6464b1d3c22ab62c511ccf26bce46ba62--

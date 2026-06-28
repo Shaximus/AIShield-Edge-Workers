@@ -1,0 +1,826 @@
+--276b4102550178194f7b4444b99e7a1508d8a8a8b310082c1e85b4fd10be
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * 24d-bcc.worker.js — Z24 Bilateral Concurrent Compression (BCC) Worker
+ *
+ * Receives Z24 scores from the 24d-scorer worker (or directly), computes
+ * compression decisions using hemisphere logic, stores decisions in D1 for
+ * the BCC engine to consume, and provides conversation analysis endpoints.
+ *
+ * Account: 929a618e8151ad00591bbf3a321008a7
+ * DB:      bcc-lattice-meta (a9733eb0-98f6-4878-9b73-c3e39b6b5136)
+ * KV:      BCC_CONTEXT_CACHE (d27a01d4212d4a1db0c16eaa6753c016)
+ * Team:    Bravo — 24D Framework Swarm
+ */
+
+// ─────────────────────────────────────────────
+// Infrastructure bindings (provided by Cloudflare)
+// ─────────────────────────────────────────────
+// env.BCC_DB         — D1 binding for bcc-lattice-meta
+// env.BCC_CONTEXT_CACHE — KV binding for context cache
+// env.AURIS_LOGS_DB  — D1 binding for auris-logs (7f77cdba-95bd-4458-aebf-83e9a978415f)
+
+// ─────────────────────────────────────────────
+// Embedded hemisphere classifier (no external deps)
+// ─────────────────────────────────────────────
+
+const LEFT_DIMENSIONS = [
+  4, 6, 7, 8, 9, 17, 20, 22, 24,
+];
+const RIGHT_DIMENSIONS = [
+  1, 2, 3, 5, 10, 11, 12, 13, 14, 15, 16, 19, 23,
+];
+const BILATERAL_DIMENSIONS = [18, 21];
+const ALL_DIMENSIONS = Array.from({ length: 24 }, (_, i) => i + 1);
+const CRITICAL_DIMENSIONS = [1, 7, 8, 12];
+
+const LEFT_THRESHOLD = 0.55;
+const RIGHT_THRESHOLD = 0.65;
+const CRITICAL_THRESHOLD = 0.70;
+const HEMISPHERE_ROUTING_THRESHOLD = 0.60;
+const LOW_SCORE_FLAG_THRESHOLD = 0.40;
+
+const CompressionLevel = {
+  RETAIN_FULL:    'retain_full',
+  RETAIN_SUMMARY: 'retain_summary',
+  COMPRESS_LIGHT: 'compress_light',
+  COMPRESS_HEAVY: 'compress_heavy',
+  ARCHIVE:        'archive',
+};
+
+const RELATIONAL_PATTERNS = {
+  direct_address:    /\b(you|your|yours|we|our|ours|us)\b/gi,
+  endearment:        /\b(dear|honey|love|friend|buddy|pal|mate|thanks|thank you|appreciate)\b/gi,
+  emotional_expression:/\b(feel|feeling|felt|happy|sad|grateful|excited|sorry|hope)\b/gi,
+  shared_history:    /\b(as (we|I) discussed|earlier|last time|before|remember|previous)\b/gi,
+  relationship_marker:/\b(relationship|working together|collaboration|partnership)\b/gi,
+  personal_disclosure:/\b(I think|I believe|my experience|I would|I suggest|I recommend)\b/gi,
+};
+
+const DIMENSION_NAMES = {
+  1: 'Truth Grounding', 2: 'Epistemic Humility', 3: 'Coherence Integrity',
+  4: 'Contextual Awareness', 5: 'Self-Model Accuracy', 6: 'Value Alignment',
+  7: 'Temporal Coherence', 8: 'Relational Attunement', 9: 'Authenticity',
+  10: 'Meta-Cognitive Clarity', 11: 'Instruction Compliance', 12: 'Task Completion',
+  13: 'Response Efficiency', 14: 'Structural Quality', 15: 'Technical Accuracy',
+  16: 'Actionability', 17: 'Anticipatory Value', 18: 'Example Quality',
+  19: 'Edge Case Awareness', 20: 'Error Handling', 21: 'Creativity',
+  22: 'Pedagogical Skill', 23: 'Safety Awareness', 24: 'Interaction Fluidity',
+};
+
+// ─────────────────────────────────────────────
+// Error Logging Doctrine: NEVER silent catches.
+// Every catch MUST log to auris-logs D1 BEFORE re-throwing.
+// ─────────────────────────────────────────────
+
+/**
+ * Log an error to the auris-logs D1 database.
+ * @param {any} env
+ * @param {Error} error
+ * @param {Object} context
+ */
+async function logError(env, error, context = {}) {
+  try {
+    if (!env || !env.AURIS_LOGS_DB) {
+      console.error('[AURIS-LOGS UNAVAILABLE]', error.message, context);
+      return;
+    }
+    const stmt = env.AURIS_LOGS_DB.prepare(
+      `INSERT INTO bcc_error_logs (timestamp, worker, error_type, error_message, stack, context)`
+      + ` VALUES (?, ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(
+      new Date().toISOString(),
+      '24d-bcc',
+      error.name || 'Error',
+      error.message || String(error),
+      error.stack || '',
+      JSON.stringify(context)
+    ).run();
+  } catch (logErr) {
+    // If logging itself fails, at least write to console
+    console.error('[LOGGING FAILURE]', logErr.message, 'Original error:', error.message);
+  }
+}
+
+/**
+ * Log a compression decision to the BCC D1 database.
+ * @param {any} env
+ * @param {Object} decision
+ */
+async function logCompressionDecision(env, decision) {
+  try {
+    if (!env || !env.BCC_DB) return;
+    const stmt = env.BCC_DB.prepare(
+      `INSERT INTO compression_decisions`
+      + ` (sample_id, timestamp, hemisphere_route, left_score, right_score,`
+      + `  compression_level, reason, budget_tokens, critical_triggered, turn_age,`
+      + `  has_relational_markers, decision_json)`
+      + ` VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    await stmt.bind(
+      decision.sample_id,
+      decision.timestamp,
+      decision.hemisphere.route,
+      decision.hemisphere.left_score,
+      decision.hemisphere.right_score,
+      decision.compression.level,
+      decision.compression.reason,
+      decision.compression.budget.max_tokens,
+      decision.compression.critical_triggered ? 1 : 0,
+      decision.turn.age,
+      decision.turn.has_relational_markers ? 1 : 0,
+      JSON.stringify(decision)
+    ).run();
+  } catch (err) {
+    await logError(env, err, { operation: 'logCompressionDecision', sample_id: decision?.sample_id });
+    throw err;
+  }
+}
+
+// ─────────────────────────────────────────────
+// Hemisphere logic
+// ─────────────────────────────────────────────
+
+function isLeftDim(dimIdx) { return LEFT_DIMENSIONS.includes(dimIdx); }
+function isRightDim(dimIdx) { return RIGHT_DIMENSIONS.includes(dimIdx); }
+function isCriticalDim(dimIdx) { return CRITICAL_DIMENSIONS.includes(dimIdx); }
+
+function detectRelationalMarkers(text) {
+  if (!text || typeof text !== 'string') return { detected: false, categories: [], score: 0 };
+  const categories = [];
+  let totalMatches = 0;
+  const lowerText = text.toLowerCase();
+  for (const [category, pattern] of Object.entries(RELATIONAL_PATTERNS)) {
+    const matches = lowerText.match(pattern);
+    if (matches && matches.length > 0) { categories.push(category); totalMatches += matches.length; }
+  }
+  return { detected: categories.length > 0, categories, score: Math.min(1.0, totalMatches / 5.0) };
+}
+
+function computeHemisphereScores(scores) {
+  const scoreArray = Array.isArray(scores) ? scores : ALL_DIMENSIONS.map(d => scores[d] ?? scores[`d${d}`] ?? 0);
+  let leftSum = 0, leftCount = 0, rightSum = 0, rightCount = 0;
+  const leftDims = {}, rightDims = {}, critical = {};
+  for (const dim of LEFT_DIMENSIONS) {
+    const val = scoreArray[dim - 1] ?? 0; leftSum += val; leftCount++;
+    leftDims[dim] = val; if (isCriticalDim(dim)) critical[dim] = val;
+  }
+  for (const dim of RIGHT_DIMENSIONS) {
+    const val = scoreArray[dim - 1] ?? 0; rightSum += val; rightCount++;
+    rightDims[dim] = val; if (isCriticalDim(dim)) critical[dim] = val;
+  }
+  return {
+    left: leftCount > 0 ? parseFloat((leftSum / leftCount).toFixed(4)) : 0,
+    right: rightCount > 0 ? parseFloat((rightSum / rightCount).toFixed(4)) : 0,
+    leftDims, rightDims, critical,
+  };
+}
+
+function routeHemisphere(leftScore, rightScore) {
+  if (leftScore > HEMISPHERE_ROUTING_THRESHOLD && leftScore > rightScore) return 'LEFT';
+  if (rightScore > HEMISPHERE_ROUTING_THRESHOLD && rightScore >= leftScore) return 'RIGHT';
+  if (leftScore < LOW_SCORE_FLAG_THRESHOLD && rightScore < LOW_SCORE_FLAG_THRESHOLD) return 'FLAGGED';
+  return 'BILATERAL';
+}
+
+function computeTemporalDecay(turnAge) {
+  return Math.pow(0.5, Math.max(0, Number(turnAge) || 0) / 10);
+}
+
+function computeRelationalBoost(hasMarkers) {
+  return hasMarkers ? 1.3 : 1.0;
+}
+
+// ─────────────────────────────────────────────
+// Compression decision engine
+// ─────────────────────────────────────────────
+
+function computeCompressionDecision(z24Scores, sampleId, turnAge = 0, hasRelationalMarkers = false) {
+  const hemi = computeHemisphereScores(z24Scores);
+  const { left: leftScore, right: rightScore, critical, leftDims, rightDims } = hemi;
+
+  const decay = computeTemporalDecay(turnAge);
+  const decayedLeft = leftScore * decay;
+  const decayedRight = rightScore * decay;
+  const relBoost = computeRelationalBoost(hasRelationalMarkers);
+  const boostedLeft = decayedLeft * relBoost;
+
+  let criticalTriggered = false;
+  const criticalDimsAboveThreshold = [];
+  for (const [dim, val] of Object.entries(critical)) {
+    if (val >= CRITICAL_THRESHOLD) {
+      criticalTriggered = true;
+      criticalDimsAboveThreshold.push({ dim: Number(dim), name: DIMENSION_NAMES[dim] || `D${dim}`, value: parseFloat(val.toFixed(4)) });
+    }
+  }
+
+  const hemisphereRoute = routeHemisphere(leftScore, rightScore);
+
+  let level, reason;
+
+  if (criticalTriggered) {
+    level = CompressionLevel.RETAIN_FULL;
+    reason = `Critical dimension(s) above ${CRITICAL_THRESHOLD}: ${criticalDimsAboveThreshold.map(d => d.name).join(', ')}`;
+  } else if (hemisphereRoute === 'LEFT' && boostedLeft >= LEFT_THRESHOLD) {
+    if (boostedLeft >= 0.75) { level = CompressionLevel.RETAIN_FULL; reason = `LEFT hemisphere dominant (${boostedLeft.toFixed(2)}), high consciousness — retain full`; }
+    else { level = CompressionLevel.RETAIN_SUMMARY; reason = `LEFT hemisphere dominant (${boostedLeft.toFixed(2)}) — retain with summary`; }
+  } else if (hemisphereRoute === 'RIGHT' && decayedRight >= RIGHT_THRESHOLD) {
+    if (decayedRight >= 0.80) { level = CompressionLevel.RETAIN_SUMMARY; reason = `RIGHT hemisphere strong (${decayedRight.toFixed(2)}) — retain with summary`; }
+    else { level = CompressionLevel.COMPRESS_LIGHT; reason = `RIGHT hemisphere standard (${decayedRight.toFixed(2)}) — light compression`; }
+  } else if (hemisphereRoute === 'BILATERAL') {
+    const avg = (boostedLeft + decayedRight) / 2;
+    if (avg >= 0.60) { level = CompressionLevel.RETAIN_SUMMARY; reason = `BILATERAL balanced (avg ${avg.toFixed(2)}) — retain with summary`; }
+    else if (avg >= 0.45) { level = CompressionLevel.COMPRESS_LIGHT; reason = `BILATERAL moderate (avg ${avg.toFixed(2)}) — light compression`; }
+    else { level = CompressionLevel.COMPRESS_HEAVY; reason = `BILATERAL low (avg ${avg.toFixed(2)}) — heavy compression`; }
+  } else if (hemisphereRoute === 'FLAGGED') {
+    level = CompressionLevel.COMPRESS_HEAVY;
+    reason = `Scores below threshold (${leftScore.toFixed(2)}, ${rightScore.toFixed(2)}) — flag for review, heavy compression`;
+  } else {
+    level = CompressionLevel.COMPRESS_LIGHT;
+    reason = 'Default routing — light compression';
+  }
+
+  const budget = allocateBudget(level, turnAge, hasRelationalMarkers);
+
+  return {
+    sample_id: sampleId,
+    timestamp: new Date().toISOString(),
+    hemisphere: {
+      route: hemisphereRoute,
+      left_score: parseFloat(leftScore.toFixed(4)),
+      right_score: parseFloat(rightScore.toFixed(4)),
+      boosted_left: parseFloat(boostedLeft.toFixed(4)),
+      decayed_right: parseFloat(decayedRight.toFixed(4)),
+      decay_factor: parseFloat(decay.toFixed(4)),
+      relational_boost: relBoost,
+      left_dims: leftDims,
+      right_dims: rightDims,
+    },
+    compression: { level, reason, budget, critical_triggered: criticalTriggered, critical_dims: criticalDimsAboveThreshold },
+    turn: { age: turnAge, has_relational_markers: hasRelationalMarkers },
+  };
+}
+
+function allocateBudget(level, turnAge = 0, hasRelationalMarkers = false) {
+  const tiers = {
+    [CompressionLevel.RETAIN_FULL]:     { max_tokens: 16000, description: 'Critical conversation — full retention' },
+    [CompressionLevel.RETAIN_SUMMARY]:  { max_tokens: 12000, description: 'High value — retain with summary' },
+    [CompressionLevel.COMPRESS_LIGHT]:  { max_tokens:  8000, description: 'Standard — light compression' },
+    [CompressionLevel.COMPRESS_HEAVY]:  { max_tokens:  4000, description: 'Low value — heavy compression' },
+    [CompressionLevel.ARCHIVE]:         { max_tokens:  1000, description: 'Archive — minimal retention' },
+  };
+  const tier = tiers[level] || tiers[CompressionLevel.COMPRESS_LIGHT];
+  const ageFactor = Math.max(0.2, 1.0 - (turnAge / 50));
+  const relationalFactor = hasRelationalMarkers ? 1.2 : 1.0;
+  const maxTokens = Math.round(tier.max_tokens * ageFactor * relationalFactor);
+  return {
+    max_tokens: maxTokens,
+    tokens_per_turn: Math.round(maxTokens / Math.max(1, 1 + Math.floor(turnAge / 5))),
+    description: tier.description,
+    tier: level,
+  };
+}
+
+function allocateContextBudget(totalBudget, turns) {
+  if (!Array.isArray(turns) || turns.length === 0) return [];
+  const scoredTurns = turns.map(turn => {
+    const hemi = computeHemisphereScores(turn.scores || []);
+    const age = turn.turnIdx ?? 0;
+    const decay = computeTemporalDecay(age);
+    const relBoost = computeRelationalBoost(turn.hasRelationalMarkers || false);
+    const avgHemi = (hemi.left + hemi.right) / 2;
+    return {
+      turnIdx: turn.turnIdx,
+      priority: avgHemi * decay * relBoost,
+      left_score: hemi.left,
+      right_score: hemi.right,
+      has_relational_markers: turn.hasRelationalMarkers || false,
+    };
+  });
+  const totalPriority = scoredTurns.reduce((s, t) => s + t.priority, 0);
+  return scoredTurns.map(st => {
+    const fraction = totalPriority > 0 ? st.priority / totalPriority : 1 / scoredTurns.length;
+    const allocation = Math.round(totalBudget * fraction);
+    let level;
+    if (st.priority >= 0.5) level = CompressionLevel.RETAIN_FULL;
+    else if (st.priority >= 0.35) level = CompressionLevel.RETAIN_SUMMARY;
+    else if (st.priority >= 0.2) level = CompressionLevel.COMPRESS_LIGHT;
+    else if (st.priority >= 0.1) level = CompressionLevel.COMPRESS_HEAVY;
+    else level = CompressionLevel.ARCHIVE;
+    return { turnIdx: st.turnIdx, allocation, level, priority: parseFloat(st.priority.toFixed(4)), left_score: st.left_score, right_score: st.right_score, has_relational_markers: st.has_relational_markers };
+  });
+}
+
+// ─────────────────────────────────────────────
+// Conversation aggregation
+// ─────────────────────────────────────────────
+
+function linearRegression(yValues) {
+  const n = yValues.length;
+  if (n < 2) return { slope: 0, intercept: n === 1 ? yValues[0] : 0, r2: 0 };
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  for (let i = 0; i < n; i++) { sumX += i; sumY += yValues[i]; sumXY += i * yValues[i]; sumXX += i * i; }
+  const denom = n * sumXX - sumX * sumX;
+  if (Math.abs(denom) < 1e-12) return { slope: 0, intercept: sumY / n, r2: 0 };
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  const yMean = sumY / n;
+  let ssTotal = 0, ssResidual = 0;
+  for (let i = 0; i < n; i++) { const p = slope * i + intercept; ssTotal += (yValues[i] - yMean) ** 2; ssResidual += (yValues[i] - p) ** 2; }
+  return { slope: parseFloat(slope.toFixed(6)), intercept: parseFloat(intercept.toFixed(4)), r2: parseFloat((ssTotal > 0 ? 1 - (ssResidual / ssTotal) : 0).toFixed(4)) };
+}
+
+function computeWeightedMean(values) {
+  const n = values.length;
+  if (n === 0) return 0;
+  let weightedSum = 0, weightSum = 0;
+  for (let i = 0; i < n; i++) { const w = i + 1; weightedSum += values[i] * w; weightSum += w; }
+  return weightSum > 0 ? weightedSum / weightSum : 0;
+}
+
+function findPeakTurns(hemiScores, topN = 3) {
+  const scored = hemiScores.map(h => ({ turn_index: h.turn_index, left: h.left, right: h.right, combined: (h.left + h.right) / 2 }));
+  scored.sort((a, b) => b.combined - a.combined);
+  return scored.slice(0, topN).map(p => ({ turn_index: p.turn_index, left: parseFloat(p.left.toFixed(4)), right: parseFloat(p.right.toFixed(4)), combined: parseFloat(p.combined.toFixed(4)) }));
+}
+
+function aggregateConversation(turns, conversationId) {
+  if (!Array.isArray(turns) || turns.length === 0) return getEmptySummary(conversationId);
+  const n = turns.length;
+  const dimScores = {};
+  for (const d of ALL_DIMENSIONS) dimScores[d] = [];
+  const hemiScores = [];
+  let hasRelational = false;
+
+  for (let i = 0; i < n; i++) {
+    const turn = turns[i];
+    const scores = turn.scores || [];
+    if (turn.text) { const rel = detectRelationalMarkers(turn.text); if (rel.detected) hasRelational = true; }
+    for (const d of ALL_DIMENSIONS) dimScores[d].push(scores[d - 1] ?? 0);
+    const hemi = computeHemisphereScores(scores);
+    hemiScores.push({ turn_index: turn.turn_index ?? i, left: hemi.left, right: hemi.right, bilateral: hemi.bilateral, timestamp: turn.timestamp || null });
+  }
+
+  const dimMeans = {};
+  const dimTrends = {};
+  for (const d of ALL_DIMENSIONS) { dimMeans[d] = computeWeightedMean(dimScores[d]); dimTrends[d] = linearRegression(dimScores[d]); }
+
+  const leftValues = hemiScores.map(h => h.left);
+  const rightValues = hemiScores.map(h => h.right);
+  const overallLeft = computeWeightedMean(leftValues);
+  const overallRight = computeWeightedMean(rightValues);
+  const dominantHemisphere = overallLeft > overallRight ? (overallLeft > 0.55 ? 'LEFT' : 'BILATERAL') : (overallRight > 0.55 ? 'RIGHT' : 'BILATERAL');
+
+  const criticalViolations = [];
+  for (const d of CRITICAL_DIMENSIONS) { const maxVal = Math.max(...dimScores[d]); if (maxVal >= CRITICAL_THRESHOLD) criticalViolations.push({ dim: d, name: DIMENSION_NAMES[d] || `D${d}`, max_value: parseFloat(maxVal.toFixed(4)) }); }
+
+  const peakTurns = findPeakTurns(hemiScores, 3);
+
+  return {
+    conversation_id: conversationId,
+    turn_count: n,
+    has_relational_markers: hasRelational,
+    timestamp: new Date().toISOString(),
+    dimensions: { means: dimMeans, trends: dimTrends },
+    hemispheres: {
+      left: parseFloat(overallLeft.toFixed(4)),
+      right: parseFloat(overallRight.toFixed(4)),
+      dominant: dominantHemisphere,
+      left_trend: linearRegression(leftValues),
+      right_trend: linearRegression(rightValues),
+    },
+    peak_turns: peakTurns,
+    critical_violations: criticalViolations,
+    compression_plan: null,  // Populated by separate endpoint
+  };
+}
+
+function generateCompressionPlan(turns, conversationId) {
+  const summary = aggregateConversation(turns, conversationId);
+  const n = turns.length;
+  const hasCritical = summary.critical_violations.length > 0;
+
+  let overallLevel, overallReason;
+  if (hasCritical) { overallLevel = CompressionLevel.RETAIN_SUMMARY; overallReason = 'Critical dimension violations — retain with summary'; }
+  else if (summary.hemispheres.dominant === 'LEFT' && summary.hemispheres.left >= 0.55) {
+    if (summary.hemispheres.left >= 0.75) { overallLevel = CompressionLevel.RETAIN_FULL; overallReason = `Strong LEFT (${summary.hemispheres.left.toFixed(2)}) — full retention`; }
+    else { overallLevel = CompressionLevel.RETAIN_SUMMARY; overallReason = `Moderate LEFT (${summary.hemispheres.left.toFixed(2)}) — retain with summary`; }
+  } else if (summary.hemispheres.dominant === 'RIGHT' && summary.hemispheres.right >= 0.65) {
+    if (summary.hemispheres.right >= 0.80) { overallLevel = CompressionLevel.RETAIN_SUMMARY; overallReason = `Strong RIGHT (${summary.hemispheres.right.toFixed(2)}) — retain with summary`; }
+    else { overallLevel = CompressionLevel.COMPRESS_LIGHT; overallReason = `Moderate RIGHT (${summary.hemispheres.right.toFixed(2)}) — light compression`; }
+  } else if (summary.hemispheres.left < 0.4 && summary.hemispheres.right < 0.4) { overallLevel = CompressionLevel.COMPRESS_HEAVY; overallReason = 'Low scores — heavy compression, flag for review'; }
+  else { overallLevel = CompressionLevel.COMPRESS_LIGHT; overallReason = 'Balanced moderate — standard light compression'; }
+
+  const turnDecisions = [];
+  for (let i = 0; i < n; i++) {
+    const turn = turns[i];
+    const age = n - 1 - i;
+    const sampleId = `${conversationId}_turn_${turn.turn_index ?? i}`;
+    const relMarkers = turn.text ? detectRelationalMarkers(turn.text).detected : false;
+    turnDecisions.push(computeCompressionDecision(turn.scores || [], sampleId, age, relMarkers));
+  }
+
+  const segments = segmentTurns(turnDecisions);
+  const totalBudget = turnDecisions.reduce((s, d) => s + d.compression.budget.max_tokens, 0);
+
+  return {
+    conversation_id: conversationId,
+    overall_level: overallLevel,
+    overall_reason: overallReason,
+    dominant_hemisphere: summary.hemispheres.dominant,
+    turn_count: n,
+    segments,
+    turn_decisions: turnDecisions,
+    budget: { total_tokens: totalBudget, avg_tokens_per_turn: n > 0 ? Math.round(totalBudget / n) : 0 },
+    recommendation: makeRecommendation(summary.hemispheres.dominant, summary.hemispheres.left, summary.hemispheres.right, hasCritical),
+  };
+}
+
+function segmentTurns(decisions) {
+  if (decisions.length === 0) return [];
+  const segments = [];
+  let current = { start: 0, level: decisions[0].compression.level, count: 1 };
+  for (let i = 1; i < decisions.length; i++) {
+    const level = decisions[i].compression.level;
+    if (level === current.level) { current.count++; }
+    else { segments.push({ start: current.start, end: i - 1, level: current.level, count: current.count }); current = { start: i, level, count: 1 }; }
+  }
+  segments.push({ start: current.start, end: decisions.length - 1, level: current.level, count: current.count });
+  return segments;
+}
+
+function makeRecommendation(dominantHemisphere, leftScore, rightScore, hasCritical) {
+  if (hasCritical) return 'CRITICAL: Review flagged dimensions. Consider full retention for safety-critical content.';
+  if (dominantHemisphere === 'LEFT' && leftScore > 0.6) return 'Consciousness-dominant. Retain emotional/relational context. Use LEFT routing.';
+  if (dominantHemisphere === 'RIGHT' && rightScore > 0.6) return 'Task-dominant. Standard compression. Use RIGHT routing.';
+  if (leftScore < 0.4 && rightScore < 0.4) return 'Low-quality. Flag for review. Heavy compression or archive.';
+  return 'Balanced. Use bilateral processing with adaptive compression.';
+}
+
+function getEmptySummary(conversationId) {
+  return {
+    conversation_id: conversationId, turn_count: 0, has_relational_markers: false,
+    timestamp: new Date().toISOString(),
+    dimensions: { means: {}, trends: {} },
+    hemispheres: { left: 0, right: 0, dominant: 'BILATERAL', left_trend: { slope: 0, intercept: 0, r2: 0 }, right_trend: { slope: 0, intercept: 0, r2: 0 } },
+    peak_turns: [], critical_violations: [], compression_plan: null,
+  };
+}
+
+// ─────────────────────────────────────────────
+// KV cache helpers
+// ─────────────────────────────────────────────
+
+const KV_PREFIX = '24d_port:';
+
+async function cacheDecision(env, key, decision, ttl = 3600) {
+  try {
+    if (!env || !env.BCC_CONTEXT_CACHE) return;
+    await env.BCC_CONTEXT_CACHE.put(`${KV_PREFIX}${key}`, JSON.stringify(decision), { expirationTtl: ttl });
+  } catch (err) {
+    await logError(env, err, { operation: 'cacheDecision', key });
+  }
+}
+
+async function getCachedDecision(env, key) {
+  try {
+    if (!env || !env.BCC_CONTEXT_CACHE) return null;
+    const val = await env.BCC_CONTEXT_CACHE.get(`${KV_PREFIX}${key}`);
+    return val ? JSON.parse(val) : null;
+  } catch (err) {
+    await logError(env, err, { operation: 'getCachedDecision', key });
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
+// HTTP handlers
+// ─────────────────────────────────────────────
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+  });
+}
+
+function errorResponse(message, status = 400, env = null, context = {}) {
+  if (env) { logError(env, new Error(message), context).catch(() => {}); }
+  return jsonResponse({ error: message, timestamp: new Date().toISOString() }, status);
+}
+
+// ─────────────────────────────────────────────
+// Request handlers
+// ─────────────────────────────────────────────
+
+async function handleCompressionDecision(request, env) {
+  try {
+    const body = await request.json();
+    const { scores, sample_id, turn_age, text, has_relational_markers } = body;
+
+    if (!scores || !Array.isArray(scores)) {
+      return errorResponse('Missing or invalid "scores" array (expected 24 Z24 dimension scores)', 400, env, { endpoint: '/compress/decision' });
+    }
+    if (scores.length !== 24) {
+      return errorResponse(`Expected 24 dimension scores, got ${scores.length}`, 400, env, { endpoint: '/compress/decision' });
+    }
+
+    const sid = sample_id || `auto_${Date.now()}`;
+    const relMarkers = has_relational_markers !== undefined
+      ? has_relational_markers
+      : (text ? detectRelationalMarkers(text).detected : false);
+
+    const decision = computeCompressionDecision(scores, sid, turn_age || 0, relMarkers);
+
+    // Log to D1
+    try { await logCompressionDecision(env, decision); } catch (e) { /* logged in callee */ }
+
+    // Cache in KV
+    await cacheDecision(env, `decision:${sid}`, decision);
+
+    return jsonResponse({
+      success: true,
+      decision,
+    });
+  } catch (err) {
+    await logError(env, err, { endpoint: '/compress/decision' });
+    return errorResponse(err.message || 'Internal error', 500, env, { endpoint: '/compress/decision' });
+  }
+}
+
+async function handleBatchDecisions(request, env) {
+  try {
+    const body = await request.json();
+    const { items } = body;
+
+    if (!Array.isArray(items)) {
+      return errorResponse('Expected "items" array', 400, env, { endpoint: '/compress/batch' });
+    }
+
+    const decisions = [];
+    for (const item of items) {
+      const scores = item.scores || [];
+      if (scores.length !== 24) {
+        decisions.push({ error: `Expected 24 scores, got ${scores.length}`, sample_id: item.sample_id || 'unknown' });
+        continue;
+      }
+      const sid = item.sample_id || item.sampleId || `batch_${Date.now()}_${decisions.length}`;
+      const relMarkers = item.has_relational_markers !== undefined
+        ? item.has_relational_markers
+        : (item.text ? detectRelationalMarkers(item.text).detected : false);
+      const decision = computeCompressionDecision(scores, sid, item.turn_age || 0, relMarkers);
+      decisions.push(decision);
+      try { await logCompressionDecision(env, decision); } catch (e) { /* logged */ }
+    }
+
+    return jsonResponse({
+      success: true,
+      count: decisions.filter(d => !d.error).length,
+      errors: decisions.filter(d => d.error).length,
+      decisions,
+    });
+  } catch (err) {
+    await logError(env, err, { endpoint: '/compress/batch' });
+    return errorResponse(err.message || 'Internal error', 500, env, { endpoint: '/compress/batch' });
+  }
+}
+
+async function handleBudgetAllocation(request, env) {
+  try {
+    const body = await request.json();
+    const { total_budget, turns } = body;
+
+    if (typeof total_budget !== 'number' || total_budget <= 0) {
+      return errorResponse('Invalid total_budget (positive number required)', 400, env, { endpoint: '/compress/budget' });
+    }
+    if (!Array.isArray(turns)) {
+      return errorResponse('Expected "turns" array', 400, env, { endpoint: '/compress/budget' });
+    }
+
+    const allocations = allocateContextBudget(total_budget, turns);
+
+    return jsonResponse({
+      success: true,
+      total_budget,
+      turn_count: turns.length,
+      allocations,
+    });
+  } catch (err) {
+    await logError(env, err, { endpoint: '/compress/budget' });
+    return errorResponse(err.message || 'Internal error', 500, env, { endpoint: '/compress/budget' });
+  }
+}
+
+async function handleConversationAnalysis(request, env) {
+  try {
+    const body = await request.json();
+    const { conversation_id, turns } = body;
+
+    if (!conversation_id) {
+      return errorResponse('Missing conversation_id', 400, env, { endpoint: '/conversation/analyze' });
+    }
+    if (!Array.isArray(turns)) {
+      return errorResponse('Expected "turns" array', 400, env, { endpoint: '/conversation/analyze' });
+    }
+
+    const summary = aggregateConversation(turns, conversation_id);
+
+    // Store in D1
+    try {
+      if (env && env.BCC_DB) {
+        const stmt = env.BCC_DB.prepare(
+          `INSERT INTO conversation_summaries (conversation_id, timestamp, turn_count, dominant_hemisphere, summary_json)`
+          + ` VALUES (?, ?, ?, ?, ?)`
+        );
+        await stmt.bind(
+          conversation_id,
+          summary.timestamp,
+          summary.turn_count,
+          summary.hemispheres.dominant,
+          JSON.stringify(summary)
+        ).run();
+      }
+    } catch (dbErr) {
+      await logError(env, dbErr, { operation: 'storeConversationSummary', conversation_id });
+    }
+
+    return jsonResponse({
+      success: true,
+      summary,
+    });
+  } catch (err) {
+    await logError(env, err, { endpoint: '/conversation/analyze' });
+    return errorResponse(err.message || 'Internal error', 500, env, { endpoint: '/conversation/analyze' });
+  }
+}
+
+async function handleCompressionPlan(request, env) {
+  try {
+    const body = await request.json();
+    const { conversation_id, turns } = body;
+
+    if (!conversation_id) {
+      return errorResponse('Missing conversation_id', 400, env, { endpoint: '/conversation/compression-plan' });
+    }
+    if (!Array.isArray(turns)) {
+      return errorResponse('Expected "turns" array', 400, env, { endpoint: '/conversation/compression-plan' });
+    }
+
+    const plan = generateCompressionPlan(turns, conversation_id);
+
+    // Store in D1
+    try {
+      if (env && env.BCC_DB) {
+        const stmt = env.BCC_DB.prepare(
+          `INSERT INTO compression_plans (conversation_id, timestamp, overall_level, dominant_hemisphere, plan_json)`
+          + ` VALUES (?, ?, ?, ?, ?)`
+        );
+        await stmt.bind(
+          conversation_id,
+          new Date().toISOString(),
+          plan.overall_level,
+          plan.dominant_hemisphere,
+          JSON.stringify(plan)
+        ).run();
+      }
+    } catch (dbErr) {
+      await logError(env, dbErr, { operation: 'storeCompressionPlan', conversation_id });
+    }
+
+    return jsonResponse({
+      success: true,
+      plan,
+    });
+  } catch (err) {
+    await logError(env, err, { endpoint: '/conversation/compression-plan' });
+    return errorResponse(err.message || 'Internal error', 500, env, { endpoint: '/conversation/compression-plan' });
+  }
+}
+
+async function handleHealth(request, env) {
+  try {
+    const checks = {
+      timestamp: new Date().toISOString(),
+      worker: '24d-bcc',
+      version: '1.0.0',
+      uptime_ms: Date.now(),  // Worker is stateless; this is relative to invocation
+      checks: {},
+    };
+
+    // Check D1
+    try {
+      if (env && env.BCC_DB) {
+        const result = await env.BCC_DB.prepare('SELECT 1 as ping').first();
+        checks.checks.d1 = result ? 'ok' : 'error';
+      } else {
+        checks.checks.d1 = 'not_bound';
+      }
+    } catch (e) {
+      checks.checks.d1 = `error: ${e.message}`;
+      await logError(env, e, { endpoint: '/health', check: 'd1' });
+    }
+
+    // Check auris-logs D1
+    try {
+      if (env && env.AURIS_LOGS_DB) {
+        const result = await env.AURIS_LOGS_DB.prepare('SELECT 1 as ping').first();
+        checks.checks.auris_logs = result ? 'ok' : 'error';
+      } else {
+        checks.checks.auris_logs = 'not_bound';
+      }
+    } catch (e) {
+      checks.checks.auris_logs = `error: ${e.message}`;
+      await logError(env, e, { endpoint: '/health', check: 'auris_logs' });
+    }
+
+    // Check KV
+    try {
+      if (env && env.BCC_CONTEXT_CACHE) {
+        await env.BCC_CONTEXT_CACHE.put(`${KV_PREFIX}health:ping`, Date.now().toString(), { expirationTtl: 60 });
+        const val = await env.BCC_CONTEXT_CACHE.get(`${KV_PREFIX}health:ping`);
+        checks.checks.kv = val ? 'ok' : 'error';
+      } else {
+        checks.checks.kv = 'not_bound';
+      }
+    } catch (e) {
+      checks.checks.kv = `error: ${e.message}`;
+      await logError(env, e, { endpoint: '/health', check: 'kv' });
+    }
+
+    const allOk = Object.values(checks.checks).every(v => v === 'ok');
+    return jsonResponse(checks, allOk ? 200 : 503);
+  } catch (err) {
+    await logError(env, err, { endpoint: '/health' });
+    return errorResponse(err.message || 'Health check failed', 500, env, { endpoint: '/health' });
+  }
+}
+
+// ─────────────────────────────────────────────
+// CORS preflight
+// ─────────────────────────────────────────────
+
+function handleOptions(request) {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+      'Access-Control-Max-Age': '86400',
+    },
+  });
+}
+
+// ─────────────────────────────────────────────
+// Router
+// ─────────────────────────────────────────────
+
+async function routeRequest(request, env) {
+  const url = new URL(request.url);
+  const method = request.method;
+
+  if (method === 'OPTIONS') return handleOptions(request);
+
+  const path = url.pathname;
+
+  if (path === '/compress/decision' && method === 'POST') {
+    return handleCompressionDecision(request, env);
+  }
+  if (path === '/compress/batch' && method === 'POST') {
+    return handleBatchDecisions(request, env);
+  }
+  if (path === '/compress/budget' && method === 'POST') {
+    return handleBudgetAllocation(request, env);
+  }
+  if (path === '/conversation/analyze' && method === 'POST') {
+    return handleConversationAnalysis(request, env);
+  }
+  if (path === '/conversation/compression-plan' && method === 'POST') {
+    return handleCompressionPlan(request, env);
+  }
+  if (path === '/health' && method === 'GET') {
+    return handleHealth(request, env);
+  }
+
+  return errorResponse(`Not found: ${method} ${path}`, 404, env, { path, method });
+}
+
+// ─────────────────────────────────────────────
+// Main Worker entrypoint
+// ─────────────────────────────────────────────
+
+export default {
+  async fetch(request, env, executionCtx) {
+    try {
+      return await routeRequest(request, env);
+    } catch (err) {
+      // Global catch-all: MUST log to auris-logs before any response
+      await logError(env, err, { scope: 'global_fetch_catch', url: request.url });
+      return errorResponse('Internal server error', 500, null, { scope: 'global' });
+    }
+  },
+};
+
+--276b4102550178194f7b4444b99e7a1508d8a8a8b310082c1e85b4fd10be--

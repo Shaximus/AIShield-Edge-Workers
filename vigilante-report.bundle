@@ -1,0 +1,1274 @@
+--b812b9480568c225303e9b716d41b41e2611faac443b7fedb53d85fd4880
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.ts
+async function logError(db, worker, endpoint, error, context) {
+  const message = error instanceof Error ? error.message : String(error);
+  const stack = error instanceof Error ? error.stack : null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  try {
+    await db.prepare(
+      `INSERT INTO logs (timestamp, service, level, message, metadata, worker, endpoint)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      now,
+      "vigilante-report",
+      "ERROR",
+      message,
+      JSON.stringify({ stack, ...context }),
+      worker,
+      endpoint
+    ).run();
+  } catch {
+    console.error("[logError FAILED]", now, worker, endpoint, message);
+  }
+}
+__name(logError, "logError");
+var ZipBuilder = class {
+  static {
+    __name(this, "ZipBuilder");
+  }
+  entries = [];
+  addFile(name, data) {
+    const bytes = typeof data === "string" ? new TextEncoder().encode(data) : data;
+    this.entries.push({ name, data: bytes });
+  }
+  async deflate(data) {
+    const cs = new CompressionStream("deflate");
+    const writer = cs.writable.getWriter();
+    writer.write(data).catch((e) => {
+      void e;
+    });
+    writer.close().catch((e) => {
+      void e;
+    });
+    const reader = cs.readable.getReader();
+    const chunks = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+    }
+    const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+    const out = new Uint8Array(totalLen);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.length;
+    }
+    return out;
+  }
+  crc32Table = null;
+  getCrc32Table() {
+    if (this.crc32Table) return this.crc32Table;
+    const table = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = c & 1 ? 3988292384 ^ c >>> 1 : c >>> 1;
+      }
+      table[i] = c >>> 0;
+    }
+    this.crc32Table = table;
+    return table;
+  }
+  crc32(data) {
+    const table = this.getCrc32Table();
+    let crc = ~0;
+    for (let i = 0; i < data.length; i++) {
+      crc = crc >>> 8 ^ table[(crc ^ data[i]) & 255];
+    }
+    return ~crc >>> 0;
+  }
+  writeUint16(v) {
+    const b = new Uint8Array(2);
+    b[0] = v & 255;
+    b[1] = v >>> 8 & 255;
+    return b;
+  }
+  writeUint32(v) {
+    const b = new Uint8Array(4);
+    b[0] = v & 255;
+    b[1] = v >>> 8 & 255;
+    b[2] = v >>> 16 & 255;
+    b[3] = v >>> 24 & 255;
+    return b;
+  }
+  async build() {
+    const centralDir = [];
+    let localOffset = 0;
+    const now = /* @__PURE__ */ new Date();
+    const dosTime = (now.getHours() & 31) << 11 | (now.getMinutes() & 63) << 5 | (now.getSeconds() & 31) >>> 1;
+    const dosDate = (now.getFullYear() - 1980 & 127) << 9 | (now.getMonth() + 1 & 15) << 5 | now.getDate() & 31;
+    const parts = [];
+    for (const entry of this.entries) {
+      const nameBytes = new TextEncoder().encode(entry.name);
+      const uncompressedSize = entry.data.length;
+      const compressedData = await this.deflate(entry.data);
+      const crc = this.crc32(entry.data);
+      const localHeader = new Uint8Array([
+        ...[80, 75, 3, 4],
+        // signature
+        ...this.writeUint16(20),
+        // version needed
+        ...this.writeUint16(0),
+        // general purpose bit flag
+        ...this.writeUint16(8),
+        // compression method (deflate)
+        ...this.writeUint16(dosTime),
+        // mod time
+        ...this.writeUint16(dosDate),
+        // mod date
+        ...this.writeUint32(crc),
+        // crc32
+        ...this.writeUint32(compressedData.length),
+        // compressed size
+        ...this.writeUint32(uncompressedSize),
+        // uncompressed size
+        ...this.writeUint16(nameBytes.length),
+        // name length
+        ...this.writeUint16(0),
+        // extra length
+        ...Array.from(nameBytes)
+      ]);
+      parts.push(localHeader);
+      parts.push(compressedData);
+      const centralHeader = new Uint8Array([
+        ...[80, 75, 1, 2],
+        // signature
+        ...this.writeUint16(20),
+        // version made by
+        ...this.writeUint16(20),
+        // version needed
+        ...this.writeUint16(0),
+        // general purpose bit flag
+        ...this.writeUint16(8),
+        // compression method
+        ...this.writeUint16(dosTime),
+        // mod time
+        ...this.writeUint16(dosDate),
+        // mod date
+        ...this.writeUint32(crc),
+        // crc32
+        ...this.writeUint32(compressedData.length),
+        // compressed size
+        ...this.writeUint32(uncompressedSize),
+        // uncompressed size
+        ...this.writeUint16(nameBytes.length),
+        // name length
+        ...this.writeUint16(0),
+        // extra length
+        ...this.writeUint16(0),
+        // comment length
+        ...this.writeUint16(0),
+        // disk number start
+        ...this.writeUint16(0),
+        // internal file attributes
+        ...this.writeUint32(0),
+        // external file attributes
+        ...this.writeUint32(localOffset),
+        // local header offset
+        ...Array.from(nameBytes)
+      ]);
+      centralDir.push(centralHeader);
+      localOffset += localHeader.length + compressedData.length;
+    }
+    const centralDirSize = centralDir.reduce((s, c) => s + c.length, 0);
+    const centralDirOffset = localOffset;
+    for (const cd of centralDir) {
+      parts.push(cd);
+    }
+    const numEntries = this.entries.length;
+    const eocdr = new Uint8Array([
+      ...[80, 75, 5, 6],
+      // signature
+      ...this.writeUint16(0),
+      // disk number
+      ...this.writeUint16(0),
+      // disk with central dir
+      ...this.writeUint16(numEntries),
+      // entries on this disk
+      ...this.writeUint16(numEntries),
+      // total entries
+      ...this.writeUint32(centralDirSize),
+      // central dir size
+      ...this.writeUint32(centralDirOffset),
+      // central dir offset
+      ...this.writeUint16(0)
+      // comment length
+    ]);
+    parts.push(eocdr);
+    const totalLen = parts.reduce((s, p) => s + p.length, 0);
+    const result = new Uint8Array(totalLen);
+    let off = 0;
+    for (const p of parts) {
+      result.set(p, off);
+      off += p.length;
+    }
+    return result;
+  }
+};
+function generateHTMLReport(report) {
+  const s = report.summary;
+  const scan = report.scan_details;
+  const generatedAt = new Date(report.generated_at).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+  const highH = Math.min(100, s.threat_levels.high * 5);
+  const medH = Math.min(100, s.threat_levels.medium * 5);
+  const lowH = Math.min(100, s.threat_levels.low * 5);
+  let threatRows = "";
+  for (let i = 0; i < Math.min(20, report.top_threats.length); i++) {
+    const bot = report.top_threats[i];
+    const score = Number(bot.bot_score ?? 0);
+    const cls = score >= 7 ? "high" : score >= 4 ? "medium" : "low";
+    const typeStr = String(bot.bot_type ?? "UNKNOWN");
+    threatRows += `
+          <tr>
+            <td>${i + 1}</td>
+            <td class="td-user">
+              <span class="user-icon">@${String(bot.username ?? "unknown").charAt(0)}</span>
+              @${String(bot.username ?? "unknown")}
+            </td>
+            <td><span class="score-badge score-${cls}">${score.toFixed(2)}</span></td>
+            <td><span class="type-tag type-${typeStr.toLowerCase().replace(/[^a-z0-9]/g, "-")}">${typeStr}</span></td>
+            <td class="mono">${Number(bot.followers_count ?? 0).toLocaleString()}</td>
+            <td class="mono">${Number(bot.following_count ?? 0).toLocaleString()}</td>
+          </tr>`;
+  }
+  let typeBars = "";
+  const maxTypeCount = Math.max(1, ...Object.values(report.bot_types));
+  for (const [type, count] of Object.entries(report.bot_types)) {
+    const pct = (count / s.total_bots * 100).toFixed(1);
+    const barW = (count / maxTypeCount * 100).toFixed(1);
+    typeBars += `
+          <div class="type-row">
+            <span class="type-label">${type}</span>
+            <div class="type-track">
+              <div class="type-fill" style="width:${barW}%">${count}</div>
+            </div>
+            <span class="type-pct mono">${pct}%</span>
+          </div>`;
+  }
+  let recs = "";
+  const botRate = scan.bot_rate ?? 0;
+  if (botRate > 30) {
+    recs += `<li class="rec-high"><span class="rec-icon">\u{1F6A8}</span><div><strong>Critical Bot Infiltration:</strong> Over 30% of followers are bot accounts. Immediate action recommended \u2014 audit your follower list and consider removing suspicious accounts. Your engagement metrics may be severely skewed.</div></li>`;
+  } else if (botRate > 15) {
+    recs += `<li class="rec-medium"><span class="rec-icon">\u26A0\uFE0F</span><div><strong>Moderate Bot Presence:</strong> 15\u201330% of followers are bots. Monitor engagement patterns and audit recently followed accounts. Consider periodic scans.</div></li>`;
+  } else {
+    recs += `<li class="rec-low"><span class="rec-icon">\u2705</span><div><strong>Low Bot Presence:</strong> Under 15% bot followers \u2014 your audience health is good. Continue monitoring with periodic scans.</div></li>`;
+  }
+  if (s.threat_levels.high > 10) {
+    recs += `<li class="rec-high"><span class="rec-icon">\u{1F6A8}</span><div><strong>High-Threat Network:</strong> ${s.threat_levels.high} high-threat bots detected with combined reach of ${s.total_reach.toLocaleString()} followers. These accounts may be coordinating in a botnet.</div></li>`;
+  }
+  if (s.total_reach > 1e5) {
+    recs += `<li class="rec-medium"><span class="rec-icon">\u26A0\uFE0F</span><div><strong>Bot Network Reach:</strong> Detected bot accounts have a combined follower reach of ${s.total_reach.toLocaleString()}. This amplifies their potential for disinformation.</div></li>`;
+  }
+  if (botRate > 50) {
+    recs += `<li class="rec-high"><span class="rec-icon">\u{1F6A8}</span><div><strong>Platform Risk:</strong> Bot rate exceeds 50%. Your account may be flagged by platform algorithms. Consider a full audit and cleanup.</div></li>`;
+  }
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vigilante Report \u2014 @${report.customer}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-deep: #020617;
+      --bg-surface: #0f172a;
+      --bg-card: #1e293b;
+      --bg-card-hover: #26334d;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #06b6d4;
+      --accent-light: #22d3ee;
+      --accent-dark: #0891b2;
+      --accent-glow: rgba(6, 182, 212, 0.15);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --border: rgba(148, 163, 184, 0.1);
+      --radius-sm: 8px;
+      --radius-lg: 12px;
+    }
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, var(--bg-deep) 0%, var(--bg-surface) 50%, rgba(6,182,212,0.05) 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 48px 0 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    .header::before {
+      content: '';
+      position: absolute;
+      top: -100px; right: -100px;
+      width: 400px; height: 400px;
+      background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .header-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      border-radius: 100px;
+      background: rgba(6, 182, 212, 0.1);
+      border: 1px solid rgba(6, 182, 212, 0.2);
+      color: var(--accent);
+      font-size: 0.8rem;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 20px;
+    }
+    .header-badge .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: pulse-dot 2s ease-in-out infinite;
+    }
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(6,182,212,0.4); }
+      50% { opacity: 0.8; box-shadow: 0 0 0 6px rgba(6,182,212,0); }
+    }
+    .header h1 {
+      font-size: 2.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .header .target {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.1rem;
+      color: var(--accent-light);
+      font-weight: 600;
+    }
+    .header .date {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      margin-top: 12px;
+    }
+    .header-grid {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: start;
+      gap: 40px;
+    }
+    .header-score {
+      text-align: center;
+      padding: 24px 32px;
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+      min-width: 180px;
+    }
+    .header-score .score-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .header-score .score-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 3rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .header-score .score-value.danger { color: var(--danger); }
+    .header-score .score-value.warning { color: var(--warning); }
+    .header-score .score-value.success { color: var(--success); }
+    .header-score .score-desc {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin-top: 8px;
+    }
+
+    /* Section */
+    .section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+    .section:last-child { border-bottom: none; }
+    .section-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .section-title .icon {
+      width: 36px; height: 36px;
+      border-radius: var(--radius-sm);
+      background: var(--accent-glow);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1rem;
+    }
+
+    /* Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+    .stat-card {
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      border: 1px solid var(--border);
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .stat-card:hover {
+      border-color: rgba(6, 182, 212, 0.2);
+      transform: translateY(-2px);
+    }
+    .stat-card .stat-label {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 1.2px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .stat-card .stat-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+    .stat-card .stat-value.accent { color: var(--accent-light); }
+    .stat-card .stat-value.danger { color: var(--danger); }
+    .stat-card .stat-value.warning { color: var(--warning); }
+    .stat-card .stat-value.success { color: var(--success); }
+    .stat-card .stat-bar {
+      height: 4px;
+      border-radius: 2px;
+      background: var(--bg-deep);
+      margin-top: 12px;
+      overflow: hidden;
+    }
+    .stat-card .stat-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      background: var(--accent);
+      transition: width 1s ease-out;
+    }
+
+    /* Category Grid */
+    .cat-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .cat-card {
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      border: 1px solid var(--border);
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .cat-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+    }
+    .cat-card.danger::before { background: var(--danger); }
+    .cat-card.warning::before { background: var(--warning); }
+    .cat-card.success::before { background: var(--success); }
+    .cat-card.accent::before { background: var(--accent); }
+    .cat-card .cat-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+    .cat-card .cat-label {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+    .cat-card .cat-pct {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Threat Bars */
+    .threat-bars-wrap {
+      display: flex;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .threat-bar-card {
+      flex: 1;
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      padding: 20px;
+      border: 1px solid var(--border);
+      text-align: center;
+    }
+    .threat-bar-track {
+      height: 140px;
+      background: var(--bg-deep);
+      border-radius: var(--radius-sm);
+      position: relative;
+      overflow: hidden;
+      margin-bottom: 12px;
+    }
+    .threat-bar-fill {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      border-radius: var(--radius-sm);
+      transition: height 1s ease-out;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .threat-bar-fill.high { background: linear-gradient(to top, rgba(239,68,68,0.8), rgba(239,68,68,0.3)); }
+    .threat-bar-fill.medium { background: linear-gradient(to top, rgba(245,158,11,0.8), rgba(245,158,11,0.3)); }
+    .threat-bar-fill.low { background: linear-gradient(to top, rgba(6,182,212,0.8), rgba(6,182,212,0.3)); }
+    .threat-bar-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+    }
+    .threat-bar-label {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+
+    /* Table */
+    .table-wrap {
+      overflow-x: auto;
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border);
+    }
+    .threats-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    .threats-table thead th {
+      background: var(--bg-surface);
+      padding: 14px 16px;
+      text-align: left;
+      font-weight: 600;
+      color: var(--text-secondary);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border);
+    }
+    .threats-table tbody td {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-primary);
+    }
+    .threats-table tbody tr:hover td {
+      background: var(--bg-card-hover);
+    }
+    .threats-table tbody tr:last-child td { border-bottom: none; }
+    .td-user {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 500;
+    }
+    .user-icon {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: var(--accent-glow);
+      color: var(--accent);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+    .score-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 100px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+    .score-badge.high { background: rgba(239,68,68,0.15); color: #f87171; }
+    .score-badge.medium { background: rgba(245,158,11,0.15); color: #fbbf24; }
+    .score-badge.low { background: rgba(6,182,212,0.15); color: var(--accent-light); }
+    .type-tag {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 6px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      background: var(--bg-deep);
+      color: var(--text-secondary);
+      border: 1px solid var(--border);
+    }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* Bot Type Distribution */
+    .type-distribution {
+      background: var(--bg-card);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      border: 1px solid var(--border);
+    }
+    .type-row {
+      display: grid;
+      grid-template-columns: 140px 1fr 60px;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .type-row:last-child { border-bottom: none; }
+    .type-label {
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+    .type-track {
+      height: 28px;
+      background: var(--bg-deep);
+      border-radius: var(--radius-sm);
+      overflow: hidden;
+      position: relative;
+    }
+    .type-fill {
+      height: 100%;
+      border-radius: var(--radius-sm);
+      background: linear-gradient(90deg, var(--accent-dark), var(--accent));
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      padding-right: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--text-primary);
+      min-width: 36px;
+      transition: width 1s ease-out;
+    }
+    .type-pct {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      text-align: right;
+    }
+
+    /* Recommendations */
+    .rec-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .rec-list li {
+      display: flex;
+      gap: 14px;
+      padding: 18px 20px;
+      border-radius: var(--radius-sm);
+      border-left: 3px solid;
+      background: var(--bg-card);
+    }
+    .rec-list li.rec-high { border-left-color: var(--danger); }
+    .rec-list li.rec-medium { border-left-color: var(--warning); }
+    .rec-list li.rec-low { border-left-color: var(--success); }
+    .rec-icon { font-size: 1.25rem; flex-shrink: 0; margin-top: 2px; }
+    .rec-list li > div { font-size: 0.9rem; color: var(--text-secondary); }
+    .rec-list li > div strong { color: var(--text-primary); font-weight: 600; }
+
+    /* Footer */
+    .footer {
+      padding: 40px 0;
+      text-align: center;
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border);
+    }
+    .footer-brand {
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: -0.01em;
+      margin-bottom: 8px;
+    }
+    .footer-meta {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .footer-valid {
+      display: inline-block;
+      margin-top: 12px;
+      padding: 6px 16px;
+      border-radius: 100px;
+      font-size: 0.75rem;
+      color: var(--success);
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.2);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header-grid { grid-template-columns: 1fr; }
+      .header-score { width: 100%; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .threat-bars-wrap { flex-direction: column; }
+      .header h1 { font-size: 1.6rem; }
+      .cat-grid { grid-template-columns: repeat(2, 1fr); }
+      .type-row { grid-template-columns: 100px 1fr 50px; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Header -->
+<header class="header">
+  <div class="container header-grid">
+    <div>
+      <div class="header-badge"><span class="dot"></span> Vigilante Bot Report</div>
+      <h1>Follower Analysis Report</h1>
+      <div class="target">@${report.customer}</div>
+      <div class="date">Generated on ${generatedAt} &middot; Report ID: ${report.scan_id}</div>
+    </div>
+    <div class="header-score">
+      <div class="score-label">Bot Rate</div>
+      <div class="score-value ${botRate > 30 ? "danger" : botRate > 15 ? "warning" : "success"}">${botRate.toFixed(1)}%</div>
+      <div class="score-desc">$${botRate > 30 ? "Critical Risk" : botRate > 15 ? "Moderate Risk" : "Low Risk"}</div>
+    </div>
+  </div>
+</header>
+
+<!-- Stats Overview -->
+<section class="section">
+  <div class="container">
+    <div class="section-title">
+      <span class="icon">\u{1F4CA}</span>
+      Scan Overview
+    </div>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Total Scanned</div>
+        <div class="stat-value mono accent">${s.total_scanned.toLocaleString()}</div>
+        <div class="stat-bar"><div class="stat-bar-fill" style="width:100%"></div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Bot Rate</div>
+        <div class="stat-value mono danger">${s.fake_pct.toFixed(1)}%</div>
+        <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.min(100, s.fake_pct)}%; background:var(--danger)"></div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Inactive %</div>
+        <div class="stat-value mono warning">${s.inactive_pct.toFixed(1)}%</div>
+        <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.min(100, s.inactive_pct)}%; background:var(--warning)"></div></div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Active %</div>
+        <div class="stat-value mono success">${s.active_pct.toFixed(1)}%</div>
+        <div class="stat-bar"><div class="stat-bar-fill" style="width:${Math.min(100, s.active_pct)}%; background:var(--success)"></div></div>
+      </div>
+    </div>
+
+    <div class="cat-grid" style="margin-top:16px;">
+      <div class="cat-card danger">
+        <div class="cat-count mono">${s.fake_count.toLocaleString()}</div>
+        <div class="cat-label">Fake Accounts</div>
+        <div class="cat-pct">${s.fake_pct.toFixed(1)}%</div>
+      </div>
+      <div class="cat-card warning">
+        <div class="cat-count mono">${s.inactive_count.toLocaleString()}</div>
+        <div class="cat-label">Inactive Humans</div>
+        <div class="cat-pct">${s.inactive_pct.toFixed(1)}%</div>
+      </div>
+      <div class="cat-card success">
+        <div class="cat-count mono">${s.active_count.toLocaleString()}</div>
+        <div class="cat-label">Active Humans</div>
+        <div class="cat-pct">${s.active_pct.toFixed(1)}%</div>
+      </div>
+      <div class="cat-card accent">
+        <div class="cat-count mono">${s.total_reach.toLocaleString()}</div>
+        <div class="cat-label">Total Bot Reach</div>
+        <div class="cat-pct">followers</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Threat Level Distribution -->
+<section class="section">
+  <div class="container">
+    <div class="section-title">
+      <span class="icon">\u{1F525}</span>
+      Threat Level Distribution
+    </div>
+    <div class="threat-bars-wrap">
+      <div class="threat-bar-card">
+        <div class="threat-bar-track">
+          <div class="threat-bar-fill high" style="height:${highH}%"><span class="threat-bar-count">${s.threat_levels.high}</span></div>
+        </div>
+        <div class="threat-bar-label">High Threat</div>
+      </div>
+      <div class="threat-bar-card">
+        <div class="threat-bar-track">
+          <div class="threat-bar-fill medium" style="height:${medH}%"><span class="threat-bar-count">${s.threat_levels.medium}</span></div>
+        </div>
+        <div class="threat-bar-label">Medium Threat</div>
+      </div>
+      <div class="threat-bar-card">
+        <div class="threat-bar-track">
+          <div class="threat-bar-fill low" style="height:${lowH}%"><span class="threat-bar-count">${s.threat_levels.low}</span></div>
+        </div>
+        <div class="threat-bar-label">Low Threat</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Top 20 Threats -->
+<section class="section">
+  <div class="container">
+    <div class="section-title">
+      <span class="icon">\u{1F3AF}</span>
+      Top 20 Threat Bots
+    </div>
+    <div class="table-wrap">
+      <table class="threats-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Username</th>
+            <th>Bot Score</th>
+            <th>Type</th>
+            <th>Followers</th>
+            <th>Following</th>
+          </tr>
+        </thead>
+        <tbody>
+${threatRows}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Bot Type Distribution -->
+<section class="section">
+  <div class="container">
+    <div class="section-title">
+      <span class="icon">\u{1F916}</span>
+      Bot Type Distribution
+    </div>
+    <div class="type-distribution">
+${typeBars}
+    </div>
+  </div>
+</section>
+
+<!-- Recommendations -->
+<section class="section">
+  <div class="container">
+    <div class="section-title">
+      <span class="icon">\u{1F4A1}</span>
+      Recommendations
+    </div>
+    <ul class="rec-list">
+${recs}
+    </ul>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer class="footer">
+  <div class="container">
+    <div class="footer-brand">Vigilante Bot Detector</div>
+    <div class="footer-meta">
+      Engine v${report.metadata.version} &middot; ${report.metadata.fields_extracted} fields extracted &middot; Scan duration: ${s.scan_duration}s &middot; ${s.scan_speed}
+    </div>
+    <div class="footer-valid">Categories sum: ${s.percentage_sum.toFixed(1)}% \u2713</div>
+  </div>
+</footer>
+
+</body>
+</html>`;
+}
+__name(generateHTMLReport, "generateHTMLReport");
+function generateJSONReport(report) {
+  return JSON.stringify(report, null, 2);
+}
+__name(generateJSONReport, "generateJSONReport");
+async function generateZipBundle(jsonReport, htmlReport, topThreats) {
+  const zip = new ZipBuilder();
+  zip.addFile("follower_analysis.json", jsonReport);
+  zip.addFile("bot_summary.html", htmlReport);
+  for (let i = 0; i < Math.min(20, topThreats.length); i++) {
+    const bot = topThreats[i];
+    const username = String(bot.username ?? "unknown");
+    zip.addFile(
+      `evidence/${String(i + 1).padStart(2, "0")}_${username}.json`,
+      JSON.stringify(bot, null, 2)
+    );
+  }
+  return zip.build();
+}
+__name(generateZipBundle, "generateZipBundle");
+function assembleReportData(req) {
+  const { scan_id, customer, scan_data, accounts, inactive_list } = req;
+  const allAccounts = [];
+  const botList = [];
+  for (const account of accounts) {
+    const acc = { ...account };
+    allAccounts.push(acc);
+    if (acc.is_bot === true) {
+      botList.push(acc);
+    }
+  }
+  allAccounts.sort(
+    (a, b) => Number(b.bot_score ?? b.score ?? 0) - Number(a.bot_score ?? a.score ?? 0)
+  );
+  botList.sort(
+    (a, b) => Number(b.bot_score ?? b.score ?? 0) - Number(a.bot_score ?? a.score ?? 0)
+  );
+  const totalBots = botList.length;
+  const highThreat = botList.filter(
+    (b) => Number(b.bot_score ?? 0) >= 7
+  ).length;
+  const mediumThreat = botList.filter(
+    (b) => {
+      const s = Number(b.bot_score ?? 0);
+      return s >= 4 && s < 7;
+    }
+  ).length;
+  const lowThreat = botList.filter(
+    (b) => Number(b.bot_score ?? 0) < 4
+  ).length;
+  const totalReach = botList.reduce(
+    (sum, b) => sum + Number(b.followers_count ?? 0),
+    0
+  );
+  const totalScanned = scan_data.followers_scanned ?? 0;
+  const fakeCount = scan_data.fake_count ?? totalBots;
+  const inactiveCount = scan_data.inactive_count ?? 0;
+  const activeCount = scan_data.active_count ?? 0;
+  const fakePct = scan_data.fake_pct ?? scan_data.bot_rate ?? 0;
+  const inactivePct = scan_data.inactive_pct ?? scan_data.inactive_rate ?? 0;
+  const activePct = scan_data.active_pct ?? 100 - fakePct - inactivePct;
+  const botTypes = {};
+  for (const bot of botList) {
+    const botType = String(bot.bot_type ?? "UNKNOWN");
+    botTypes[botType] = (botTypes[botType] ?? 0) + 1;
+  }
+  return {
+    scan_id,
+    customer,
+    generated_at: (/* @__PURE__ */ new Date()).toISOString(),
+    scan_details: scan_data,
+    summary: {
+      total_scanned: totalScanned,
+      total_bots: totalBots,
+      total_reach: totalReach,
+      categories: {
+        fake: {
+          count: fakeCount,
+          percentage: fakePct,
+          description: "Bot accounts"
+        },
+        inactive: {
+          count: inactiveCount,
+          percentage: inactivePct,
+          description: "Inactive human accounts"
+        },
+        active: {
+          count: activeCount,
+          percentage: activePct,
+          description: "Active human accounts"
+        }
+      },
+      threat_levels: {
+        high: highThreat,
+        medium: mediumThreat,
+        low: lowThreat
+      },
+      scan_duration: scan_data.duration_seconds ?? 0,
+      scan_speed: scan_data.performance ?? "N/A",
+      bot_rate: scan_data.bot_rate ?? 0,
+      fake_count: fakeCount,
+      inactive_count: inactiveCount,
+      active_count: activeCount,
+      fake_pct: fakePct,
+      inactive_pct: inactivePct,
+      active_pct: activePct,
+      percentage_sum: Math.round(fakePct + inactivePct + activePct)
+    },
+    bot_types: botTypes,
+    top_threats: botList.slice(0, 20),
+    all_bots: botList,
+    all_accounts: allAccounts,
+    inactive_users: inactive_list ?? [],
+    metadata: {
+      version: "5.0",
+      detection_threshold: 5,
+      inactive_threshold: 3.5,
+      engine: "Vigilante Bot Hunter",
+      fields_extracted: 24,
+      field_list: [
+        "username",
+        "user_id",
+        "display_name",
+        "bio",
+        "location",
+        "url",
+        "profile_banner_url",
+        "followers_count",
+        "following_count",
+        "tweet_count",
+        "favourites_count",
+        "media_count",
+        "listed_count",
+        "statuses_count",
+        "verified",
+        "blue_verified",
+        "is_blue_verified",
+        "has_nft_avatar",
+        "default_profile_image",
+        "default_profile",
+        "created_at",
+        "public_metrics",
+        "rest_id",
+        "friends_count"
+      ]
+    }
+  };
+}
+__name(assembleReportData, "assembleReportData");
+async function uploadToR2(bucket, key, data, contentType) {
+  const body = typeof data === "string" ? new TextEncoder().encode(data) : data;
+  await bucket.put(key, body, {
+    httpMetadata: { contentType },
+    customMetadata: { generatedAt: (/* @__PURE__ */ new Date()).toISOString() }
+  });
+}
+__name(uploadToR2, "uploadToR2");
+async function handleGenerate(request, env) {
+  const endpoint = "POST /generate";
+  try {
+    const body = await request.json();
+    if (!body.scan_id || !body.customer || !body.scan_data || !body.accounts) {
+      return new Response(
+        JSON.stringify({
+          error: "Missing required fields: scan_id, customer, scan_data, accounts"
+        }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const reportData = assembleReportData(body);
+    const htmlReport = generateHTMLReport(reportData);
+    const jsonReport = generateJSONReport(reportData);
+    const zipData = await generateZipBundle(
+      jsonReport,
+      htmlReport,
+      reportData.top_threats
+    );
+    const basePath = `reports/vigilante/${body.scan_id}`;
+    const htmlKey = `${basePath}/bot_summary.html`;
+    const jsonKey = `${basePath}/follower_analysis.json`;
+    const zipKey = `${basePath}/evidence_bundle.zip`;
+    await Promise.all([
+      uploadToR2(env.REPORTS_BUCKET, htmlKey, htmlReport, "text/html; charset=utf-8"),
+      uploadToR2(env.REPORTS_BUCKET, jsonKey, jsonReport, "application/json"),
+      uploadToR2(env.REPORTS_BUCKET, zipKey, zipData, "application/zip")
+    ]);
+    try {
+      await env.AURIS_LOGS.prepare(
+        `INSERT OR REPLACE INTO vigilante_reports
+           (scan_id, customer, generated_at, html_key, json_key, zip_key, bot_rate, total_bots, total_scanned)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        body.scan_id,
+        body.customer,
+        reportData.generated_at,
+        htmlKey,
+        jsonKey,
+        zipKey,
+        reportData.summary.bot_rate,
+        reportData.summary.total_bots,
+        reportData.summary.total_scanned
+      ).run();
+    } catch (dbErr) {
+      console.warn("[WARN] D1 index insert failed:", dbErr);
+    }
+    const r2PublicBase = "https://pub-8ec45a97ee4d4abc835a47a5eb62486f.r2.dev";
+    return new Response(
+      JSON.stringify({
+        scan_id: body.scan_id,
+        html_url: `${r2PublicBase}/${htmlKey}`,
+        json_url: `${r2PublicBase}/${jsonKey}`,
+        zip_url: `${r2PublicBase}/${zipKey}`,
+        generated_at: reportData.generated_at,
+        summary: {
+          total_scanned: reportData.summary.total_scanned,
+          total_bots: reportData.summary.total_bots,
+          bot_rate: reportData.summary.bot_rate
+        }
+      }),
+      {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      }
+    );
+  } catch (err) {
+    await logError(env.AURIS_LOGS, "vigilante-report", endpoint, err, {
+      scan_id: (await request.json().catch(() => ({ scan_id: "unknown" })))?.scan_id
+    });
+    throw err;
+  }
+}
+__name(handleGenerate, "handleGenerate");
+async function handleServeReport(request, env, scanId) {
+  const endpoint = "GET /report/:scan_id";
+  try {
+    const accept = request.headers.get("Accept") ?? "";
+    const wantJson = accept.includes("application/json") && !accept.includes("text/html");
+    const basePath = `reports/vigilante/${scanId}`;
+    const key = wantJson ? `${basePath}/follower_analysis.json` : `${basePath}/bot_summary.html`;
+    const fallbackKey = wantJson ? `${basePath}/bot_summary.html` : `${basePath}/follower_analysis.json`;
+    let object = await env.REPORTS_BUCKET.get(key);
+    if (!object) {
+      object = await env.REPORTS_BUCKET.get(fallbackKey);
+    }
+    if (!object) {
+      return new Response(
+        JSON.stringify({ error: "Report not found", scan_id: scanId }),
+        { status: 404, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const contentType = object.httpMetadata?.contentType ?? (wantJson ? "application/json" : "text/html; charset=utf-8");
+    return new Response(object.body, {
+      status: 200,
+      headers: {
+        "Content-Type": contentType,
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=3600"
+      }
+    });
+  } catch (err) {
+    await logError(env.AURIS_LOGS, "vigilante-report", endpoint, err, {
+      scan_id: scanId
+    });
+    throw err;
+  }
+}
+__name(handleServeReport, "handleServeReport");
+async function handleHealth() {
+  return new Response(
+    JSON.stringify({
+      status: "ok",
+      service: "vigilante-report",
+      version: "5.0",
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    }),
+    {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*"
+      }
+    }
+  );
+}
+__name(handleHealth, "handleHealth");
+function getScanIdFromPath(pathname) {
+  const m = pathname.match(/^\/report\/(.+)$/);
+  return m ? m[1] : null;
+}
+__name(getScanIdFromPath, "getScanIdFromPath");
+var index_default = {
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }
+      });
+    }
+    try {
+      if (pathname === "/generate" && request.method === "POST") {
+        return await handleGenerate(request, env);
+      }
+      if (pathname === "/health" && request.method === "GET") {
+        return await handleHealth();
+      }
+      const scanId = getScanIdFromPath(pathname);
+      if (scanId && request.method === "GET") {
+        return await handleServeReport(request, env, scanId);
+      }
+      return new Response(JSON.stringify({ error: "Not found" }), {
+        status: 404,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
+        }
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[WORKER ERROR]", pathname, message);
+      return new Response(
+        JSON.stringify({
+          error: "Internal Server Error",
+          message
+        }),
+        {
+          status: 500,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*"
+          }
+        }
+      );
+    }
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--b812b9480568c225303e9b716d41b41e2611faac443b7fedb53d85fd4880--

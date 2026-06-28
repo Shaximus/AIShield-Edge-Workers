@@ -1,0 +1,142 @@
+--c44325ec6c07315e86c17e7e252130895b27a0ffd87e349638c7e2189639
+Content-Disposition: form-data; name="twitter-post.js"
+
+// output/twitter-post.js
+var twitter_post_default = {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    };
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
+    if (url.pathname === "/status" && request.method === "GET") {
+      try {
+        const resp = await fetch("https://api.twitter.com/2/usage/tweets", {
+          headers: { "Authorization": `Bearer ${env.TWITTER_BEARER_TOKEN}` }
+        });
+        const data = await resp.json();
+        return new Response(JSON.stringify(data), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+    if (url.pathname === "/tweet" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const tweetText = body.text;
+        if (!tweetText || tweetText.length > 280) {
+          return new Response(JSON.stringify({
+            error: "Tweet text required, max 280 chars",
+            length: tweetText?.length
+          }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const resp = await fetch("https://api.twitter.com/2/tweets", {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ text: tweetText })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          return new Response(JSON.stringify({
+            error: "Twitter API error",
+            status: resp.status,
+            details: data
+          }), {
+            status: resp.status,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({
+          success: true,
+          tweet_id: data.data?.id,
+          text: data.data?.text
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+    if (url.pathname === "/thread" && request.method === "POST") {
+      try {
+        const body = await request.json();
+        const tweets = body.tweets;
+        if (!tweets || !Array.isArray(tweets) || tweets.length === 0) {
+          return new Response(JSON.stringify({ error: "Array of tweet texts required" }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" }
+          });
+        }
+        const results = [];
+        let lastTweetId = null;
+        for (const tweetText of tweets) {
+          const tweetBody = { text: tweetText };
+          if (lastTweetId) {
+            tweetBody.reply = { in_reply_to_tweet_id: lastTweetId };
+          }
+          const resp = await fetch("https://api.twitter.com/2/tweets", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${env.TWITTER_BEARER_TOKEN}`,
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify(tweetBody)
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            results.push({ error: data, status: resp.status });
+            break;
+          }
+          lastTweetId = data.data?.id;
+          results.push({
+            success: true,
+            tweet_id: data.data?.id,
+            text: data.data?.text
+          });
+        }
+        return new Response(JSON.stringify({
+          posted: results.length,
+          tweets: results
+        }), {
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ error: e.message }), {
+          status: 500,
+          headers: { ...corsHeaders, "Content-Type": "application/json" }
+        });
+      }
+    }
+    return new Response(JSON.stringify({
+      endpoints: [
+        "GET /status \u2014 Check API quota",
+        'POST /tweet \u2014 Post single tweet (body: {text: "..."})',
+        'POST /thread \u2014 Post thread (body: {tweets: ["...", "..."]})'
+      ]
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+  }
+};
+export {
+  twitter_post_default as default
+};
+//# sourceMappingURL=twitter-post.js.map
+
+--c44325ec6c07315e86c17e7e252130895b27a0ffd87e349638c7e2189639--

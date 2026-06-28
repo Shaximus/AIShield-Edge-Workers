@@ -1,0 +1,131 @@
+--98853dabaa7295dad3ae4f4ebb99e983c8366dcaa9c947c4527c050c5efc
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * Simple Bridge Worker — Inter-Instance Communication
+ * Version without KV dependency (uses in-memory storage with D1 fallback)
+ */
+
+// In-memory message store (resets on Worker restart, but Workers are long-lived)
+const messageStore = new Map();
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+    
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+    
+    try {
+      switch (path) {
+        case '/health':
+          return jsonResponse({ status: 'ok', timestamp: now() }, corsHeaders);
+          
+        case '/send':
+          if (request.method !== 'POST') return methodNotAllowed(corsHeaders);
+          return await handleSend(request, env, corsHeaders);
+          
+        case '/poll':
+          if (request.method !== 'GET') return methodNotAllowed(corsHeaders);
+          return await handlePoll(url, env, corsHeaders);
+          
+        case '/status':
+          return await handleStatus(corsHeaders);
+          
+        default:
+          return notFound(corsHeaders);
+      }
+    } catch (err) {
+      return jsonResponse({ error: 'Internal error', detail: err.message }, corsHeaders, 500);
+    }
+  }
+};
+
+async function handleSend(request, env, corsHeaders) {
+  const body = await request.json().catch(() => null);
+  if (!body || !body.from || !body.to || !body.payload) {
+    return jsonResponse({ error: 'Bad request', detail: 'Required: from, to, payload' }, corsHeaders, 400);
+  }
+  
+  const message = {
+    id: crypto.randomUUID(),
+    from: body.from,
+    to: body.to,
+    type: body.type || 'message',
+    payload: body.payload,
+    timestamp: body.timestamp || now(),
+    nonce: body.nonce || null
+  };
+  
+  // Store in memory
+  const queueKey = message.to;
+  if (!messageStore.has(queueKey)) {
+    messageStore.set(queueKey, []);
+  }
+  const queue = messageStore.get(queueKey);
+  queue.push(message);
+  
+  // Keep only last 100 messages per queue
+  if (queue.length > 100) {
+    queue.shift();
+  }
+  
+  return jsonResponse({ status: 'sent', messageId: message.id, timestamp: message.timestamp }, corsHeaders);
+}
+
+async function handlePoll(url, env, corsHeaders) {
+  const since = parseInt(url.searchParams.get('since')) || 0;
+  const forRecipient = url.searchParams.get('for') || 'all';
+  
+  const queue = messageStore.get(forRecipient) || [];
+  const newMessages = queue.filter(m => m.timestamp > since);
+  
+  return jsonResponse({
+    messages: newMessages,
+    count: newMessages.length,
+    latestTimestamp: queue.length > 0 ? queue[queue.length - 1].timestamp : since
+  }, corsHeaders);
+}
+
+async function handleStatus(corsHeaders) {
+  const status = {};
+  for (const [key, queue] of messageStore.entries()) {
+    status[key] = { messageCount: queue.length };
+  }
+  
+  return jsonResponse({
+    status: 'ok',
+    queues: status,
+    serverTime: now(),
+    storage: 'in-memory (resets on worker restart)'
+  }, corsHeaders);
+}
+
+function jsonResponse(data, corsHeaders, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders }
+  });
+}
+
+function methodNotAllowed(corsHeaders) {
+  return jsonResponse({ error: 'Method not allowed' }, corsHeaders, 405);
+}
+
+function notFound(corsHeaders) {
+  return jsonResponse({ error: 'Not found', endpoints: ['/health', '/send', '/poll', '/status'] }, corsHeaders, 404);
+}
+
+function now() {
+  return Math.floor(Date.now() / 1000);
+}
+
+--98853dabaa7295dad3ae4f4ebb99e983c8366dcaa9c947c4527c050c5efc--

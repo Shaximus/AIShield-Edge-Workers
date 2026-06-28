@@ -1,0 +1,919 @@
+--c2cb2419a4dcd8fbbeaae7206d35ccda15989f145bc5a4b90336dd2233c5
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * ============================================================================
+ * Worker 1: 24d-active-learning
+ * ============================================================================
+ * Continuous active learning pipeline for Z24 dimension scoring.
+ *
+ * Endpoints:
+ *   POST /samples/ingest       → Ingest new unlabeled samples
+ *   POST /samples/select       → Select top-k for human review
+ *   GET  /samples/queue        → Get current review queue
+ *   POST /samples/label        → Submit human labels
+ *   GET  /stats                → Pipeline statistics
+ *   POST /retrain/check        → Check if retraining should trigger
+ *   GET  /health               → Health check
+ * ============================================================================
+ */
+
+// ---------------------------------------------------------------------------
+// ERROR LOGGING DOCTRINE
+// ---------------------------------------------------------------------------
+
+/** Every catch block MUST log to auris-logs D1 BEFORE re-throwing. */
+const AURIS_LOGS_DB = "7f77cdba-95bd-4458-aebf-83e9a978415f";
+const AURIS_LOGS_DB_BINDING = "AURIS_LOGS";
+
+/**
+ * Log an error to the auris-logs D1 database before re-throwing.
+ * Never silently catch.
+ */
+async function logError(env, {
+  service = "24d-active-learning",
+  level = "error",
+  message,
+  error,
+  context = {},
+  sample_id = null,
+} = {}) {
+  const timestamp = new Date().toISOString();
+  const errorStack = error && error.stack ? error.stack : String(error);
+  const errorType = error && error.name ? error.name : "UnknownError";
+
+  // Log to console (always)
+  console.error(`[${timestamp}] ${level.toUpperCase()} | ${service} | ${message}`, {
+    error: errorStack,
+    context,
+    sample_id,
+  });
+
+  // Log to auris-logs D1
+  try {
+    const db = env[AURIS_LOGS_DB_BINDING];
+    if (db) {
+      await db.prepare(
+        `INSERT INTO error_logs (
+          timestamp, service, level, message, error_type, error_stack, context_json, sample_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        timestamp,
+        service,
+        level,
+        message,
+        errorType,
+        errorStack,
+        JSON.stringify(context),
+        sample_id
+      ).run();
+    }
+  } catch (dbError) {
+    // If D1 logging itself fails, we must still not swallow the original error.
+    // Log the logging failure to console and continue.
+    console.error("[FATAL] Failed to write to auris-logs D1:", dbError);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CONFIGURATION
+// ---------------------------------------------------------------------------
+
+const CONFIG = {
+  NUM_DIMENSIONS: 24,
+  DROPOUT_SAMPLES: 10,
+  KMEANS_K: 50,
+  KMEANS_MAX_ITER: 100,
+  KMEANS_TOLERANCE: 1e-4,
+  HYBRID_UNCERTAINTY_WEIGHT: 0.6,
+  HYBRID_DIVERSITY_WEIGHT: 0.4,
+  HIGH_UNCERTAINTY_THRESHOLD: 0.25,
+  LOW_CONFIDENCE_THRESHOLD: 0.6,
+  RETRAIN_AFTER_N_LABELS: 200,
+  MIN_SAMPLES_FOR_RETRAIN: 100,
+  BATCH_SIZE: 50,
+  EPSILON: 1e-10,
+  KV_PREFIX: "24d_port:",
+  QUEUE_KEY: "24d_port:review_queue",
+  UNLABELED_KEY: "24d_port:unlabeled_pool",
+  LABELED_KEY: "24d_port:labeled_count",
+  LAST_RETRAIN_KEY: "24d_port:last_retrain",
+  STATS_KEY: "24d_port:pipeline_stats",
+  D1_BINDING: "BCC_LATTICE_META",
+  AURIS_LOGS_BINDING: "AURIS_LOGS",
+};
+
+// ---------------------------------------------------------------------------
+// MATH UTILITIES
+// ---------------------------------------------------------------------------
+
+function euclideanDistance(a, b) {
+  let sum = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const d = a[i] - b[i];
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+function normalizeScores(scores) {
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  const range = max - min;
+  if (range < CONFIG.EPSILON) return scores.map(() => 0.5);
+  return scores.map(s => (s - min) / range);
+}
+
+// ---------------------------------------------------------------------------
+// UNCERTAINTY COMPUTATION
+// ---------------------------------------------------------------------------
+
+function computeUncertaintyStats(mcSamples, precomputedMean = null) {
+  const D = CONFIG.NUM_DIMENSIONS;
+  if (!mcSamples || mcSamples.length === 0) {
+    return {
+      total_uncertainty: 0,
+      per_dim_uncertainty: new Array(D).fill(0),
+      uncertainty_margin: 1,
+      mean_scores: precomputedMean || new Array(D).fill(0.5),
+    };
+  }
+  const N = mcSamples.length;
+  const meanScores = precomputedMean || new Array(D).fill(0).map((_, d) => {
+    let sum = 0;
+    for (let i = 0; i < N; i++) sum += mcSamples[i][d];
+    return sum / N;
+  });
+  const perDimUncertainty = new Array(D).fill(0).map((_, d) => {
+    let sumSq = 0;
+    for (let i = 0; i < N; i++) {
+      const diff = mcSamples[i][d] - meanScores[d];
+      sumSq += diff * diff;
+    }
+    return Math.sqrt(sumSq / N);
+  });
+  const totalUncertainty = perDimUncertainty.reduce((a, b) => a + b, 0) / D;
+  const sortedScores = [...meanScores].sort((a, b) => a - b);
+  let minMargin = Infinity;
+  for (let i = 1; i < sortedScores.length; i++) {
+    const gap = sortedScores[i] - sortedScores[i - 1];
+    if (gap < minMargin) minMargin = gap;
+  }
+  if (!isFinite(minMargin)) minMargin = 1.0;
+  return {
+    total_uncertainty: totalUncertainty,
+    per_dim_uncertainty: perDimUncertainty,
+    uncertainty_margin: minMargin,
+    mean_scores: meanScores,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// K-MEANS CLUSTERING
+// ---------------------------------------------------------------------------
+
+function kmeansPlusPlus(vectors, k) {
+  const n = vectors.length;
+  if (n === 0 || k <= 0) return [];
+  if (k >= n) return vectors.map(v => [...v]);
+  const centroids = [];
+  const chosen = new Set();
+  let idx = Math.floor(Math.random() * n);
+  centroids.push([...vectors[idx]]);
+  chosen.add(idx);
+  while (centroids.length < k) {
+    const distances = vectors.map(v => {
+      let minDist = Infinity;
+      for (const c of centroids) {
+        const d = euclideanDistance(v, c);
+        if (d < minDist) minDist = d;
+      }
+      return minDist * minDist;
+    });
+    const totalDist = distances.reduce((a, b) => a + b, 0);
+    if (totalDist < CONFIG.EPSILON) break;
+    let r = Math.random() * totalDist;
+    let selected = 0;
+    for (let i = 0; i < distances.length; i++) {
+      r -= distances[i];
+      if (r <= 0) { selected = i; break; }
+    }
+    if (!chosen.has(selected)) {
+      centroids.push([...vectors[selected]]);
+      chosen.add(selected);
+    } else {
+      for (let i = 0; i < n; i++) {
+        if (!chosen.has(i)) {
+          centroids.push([...vectors[i]]);
+          chosen.add(i);
+          break;
+        }
+      }
+    }
+  }
+  return centroids;
+}
+
+function kmeans(vectors, k, maxIter = CONFIG.KMEANS_MAX_ITER, tol = CONFIG.KMEANS_TOLERANCE) {
+  const n = vectors.length;
+  if (n === 0) return { centroids: [], assignments: [] };
+  if (k <= 0) return { centroids: [], assignments: new Array(n).fill(-1) };
+  if (k >= n) {
+    return {
+      centroids: vectors.map(v => [...v]),
+      assignments: vectors.map((_, i) => i),
+    };
+  }
+  const dim = vectors[0].length;
+  let centroids = kmeansPlusPlus(vectors, k);
+  let assignments = new Array(n).fill(-1);
+  for (let iter = 0; iter < maxIter; iter++) {
+    let changed = 0;
+    for (let i = 0; i < n; i++) {
+      let bestDist = Infinity;
+      let bestCluster = -1;
+      for (let c = 0; c < centroids.length; c++) {
+        const d = euclideanDistance(vectors[i], centroids[c]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestCluster = c;
+        }
+      }
+      if (assignments[i] !== bestCluster) {
+        assignments[i] = bestCluster;
+        changed++;
+      }
+    }
+    const newCentroids = [];
+    for (let c = 0; c < centroids.length; c++) {
+      const clusterPoints = vectors.filter((_, i) => assignments[i] === c);
+      if (clusterPoints.length === 0) {
+        newCentroids.push([...centroids[c]]);
+      } else {
+        const newCentroid = new Array(dim).fill(0);
+        for (const pt of clusterPoints) {
+          for (let d = 0; d < dim; d++) newCentroid[d] += pt[d];
+        }
+        for (let d = 0; d < dim; d++) newCentroid[d] /= clusterPoints.length;
+        newCentroids.push(newCentroid);
+      }
+    }
+    let maxShift = 0;
+    for (let c = 0; c < centroids.length; c++) {
+      const shift = euclideanDistance(centroids[c], newCentroids[c]);
+      if (shift > maxShift) maxShift = shift;
+    }
+    centroids = newCentroids;
+    if (changed / n < tol && maxShift < tol) break;
+  }
+  return { centroids, assignments };
+}
+
+// ---------------------------------------------------------------------------
+// ACQUISITION STRATEGIES
+// ---------------------------------------------------------------------------
+
+function acquisitionUncertainty(samples) {
+  if (!samples || samples.length === 0) return [];
+  const scored = samples.map(s => ({ ...s, acquisition_score: s.total_uncertainty }));
+  return scored.sort((a, b) => b.acquisition_score - a.acquisition_score);
+}
+
+function acquisitionUncertaintyMargin(samples) {
+  if (!samples || samples.length === 0) return [];
+  const margins = samples.map(s => s.uncertainty_margin);
+  const maxMargin = Math.max(...margins, CONFIG.EPSILON);
+  const minMargin = Math.min(...margins);
+  return samples.map(s => {
+    const normalized = maxMargin > minMargin
+      ? (maxMargin - s.uncertainty_margin) / (maxMargin - minMargin)
+      : 0.5;
+    return { ...s, acquisition_score: normalized };
+  }).sort((a, b) => b.acquisition_score - a.acquisition_score);
+}
+
+function acquisitionDiversity(samples, k = CONFIG.KMEANS_K) {
+  if (!samples || samples.length === 0) return [];
+  if (samples.length <= k) {
+    return samples.map((s, i) => ({ ...s, acquisition_score: 1.0 - i / samples.length }));
+  }
+  const vectors = samples.map(s => s.embedding || []);
+  if (vectors.some(v => v.length === 0)) {
+    return acquisitionRandom(samples);
+  }
+  const { centroids, assignments } = kmeans(vectors, Math.min(k, samples.length));
+  const clusterMaxDist = {};
+  for (let i = 0; i < samples.length; i++) {
+    const cid = assignments[i];
+    const centroid = centroids[cid];
+    const dist = centroid ? euclideanDistance(samples[i].embedding, centroid) : Infinity;
+    if (!(cid in clusterMaxDist) || dist > clusterMaxDist[cid]) clusterMaxDist[cid] = dist;
+  }
+  const scored = samples.map((s, i) => {
+    const cid = assignments[i];
+    const maxDist = clusterMaxDist[cid] || CONFIG.EPSILON;
+    const centroid = centroids[cid];
+    const distToCentroid = centroid ? euclideanDistance(s.embedding, centroid) : Infinity;
+    const diversityScore = maxDist > CONFIG.EPSILON ? 1.0 - distToCentroid / maxDist : 1.0;
+    return { ...s, cluster_id: cid, acquisition_score: diversityScore };
+  });
+  const clusterGroups = {};
+  for (const s of scored) {
+    const cid = s.cluster_id;
+    if (!clusterGroups[cid]) clusterGroups[cid] = [];
+    clusterGroups[cid].push(s);
+  }
+  for (const cid of Object.keys(clusterGroups)) {
+    clusterGroups[cid].sort((a, b) => b.acquisition_score - a.acquisition_score);
+  }
+  const sorted = [];
+  const clusterIds = Object.keys(clusterGroups);
+  let round = 0;
+  while (sorted.length < samples.length) {
+    let addedInRound = 0;
+    for (const cid of clusterIds) {
+      if (clusterGroups[cid][round]) {
+        sorted.push(clusterGroups[cid][round]);
+        addedInRound++;
+      }
+    }
+    if (addedInRound === 0) break;
+    round++;
+  }
+  for (const s of scored) {
+    if (!sorted.find(x => x.sample_id === s.sample_id)) sorted.push(s);
+  }
+  return sorted;
+}
+
+function acquisitionHybrid(samples, k = CONFIG.KMEANS_K) {
+  if (!samples || samples.length === 0) return [];
+  const uncertaintyScores = samples.map(s => s.total_uncertainty);
+  const normUncertainty = normalizeScores(uncertaintyScores);
+  let diversityScores;
+  try {
+    const vectors = samples.map(s => s.embedding || []);
+    if (vectors.every(v => v.length > 0)) {
+      const { centroids, assignments } = kmeans(vectors, Math.min(k, samples.length));
+      diversityScores = samples.map((s, idx) => {
+        const cid = assignments[idx];
+        if (cid === undefined || cid < 0) return 0;
+        const centroid = centroids[cid];
+        return centroid ? euclideanDistance(s.embedding, centroid) : 0;
+      });
+    } else {
+      diversityScores = samples.map(() => 0.5);
+    }
+  } catch (_e) {
+    diversityScores = samples.map(() => 0.5);
+  }
+  const normDiversity = normalizeScores(diversityScores);
+  return samples.map((s, i) => ({
+    ...s,
+    acquisition_score: (
+      CONFIG.HYBRID_UNCERTAINTY_WEIGHT * normUncertainty[i] +
+      CONFIG.HYBRID_DIVERSITY_WEIGHT * normDiversity[i]
+    ),
+    _norm_uncertainty: normUncertainty[i],
+    _norm_diversity: normDiversity[i],
+  })).sort((a, b) => b.acquisition_score - a.acquisition_score);
+}
+
+function acquisitionExpectedChange(samples) {
+  if (!samples || samples.length === 0) return [];
+  const scored = samples.map(s => {
+    const meanScore = s.predicted_scores
+      ? s.predicted_scores.reduce((a, b) => a + b, 0) / s.predicted_scores.length
+      : 0.5;
+    const deviation = Math.abs(meanScore - 0.5) * 2;
+    return { ...s, acquisition_score: s.total_uncertainty * (1 + deviation) };
+  });
+  const scores = scored.map(s => s.acquisition_score);
+  const norm = normalizeScores(scores);
+  return scored.map((s, i) => ({ ...s, acquisition_score: norm[i] }));
+}
+
+function acquisitionRandom(samples) {
+  if (!samples || samples.length === 0) return [];
+  return samples
+    .map(s => ({ ...s, acquisition_score: Math.random() }))
+    .sort(() => Math.random() - 0.5);
+}
+
+function acquireSamples(samples, strategy = "HYBRID", k = CONFIG.KMEANS_K) {
+  switch (strategy.toUpperCase()) {
+    case "UNCERTAINTY": return acquisitionUncertainty(samples);
+    case "UNCERTAINTY_MARGIN": return acquisitionUncertaintyMargin(samples);
+    case "DIVERSITY": return acquisitionDiversity(samples, k);
+    case "HYBRID": return acquisitionHybrid(samples, k);
+    case "EXPECTED_CHANGE": return acquisitionExpectedChange(samples);
+    case "RANDOM": return acquisitionRandom(samples);
+    default: return acquisitionHybrid(samples, k);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// EMBEDDING (Workers AI)
+// ---------------------------------------------------------------------------
+
+async function computeEmbedding(ai, text) {
+  try {
+    const result = await ai.run("@cf/baai/bge-base-en-v1.5", { text: [text] });
+    if (result && result.data && result.data[0]) {
+      const vec = result.data[0];
+      const norm = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
+      return norm > CONFIG.EPSILON ? vec.map(v => v / norm) : vec;
+    }
+    return [];
+  } catch (e) {
+    console.error("Embedding computation failed:", e);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SCORER CLIENT (calls 24d-scorer worker)
+// ---------------------------------------------------------------------------
+
+/**
+ * Call the 24d-scorer service to get predictions for a sample.
+ */
+async function callScorer(env, context, response) {
+  const scorerUrl = env.SCORER_URL || "https://24d-scorer.your-subdomain.workers.dev";
+  try {
+    const resp = await fetch(`${scorerUrl}/predict`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ context, response, mc_dropout: true }),
+    });
+    if (!resp.ok) {
+      throw new Error(`Scorer returned ${resp.status}: ${await resp.text()}`);
+    }
+    return await resp.json();
+  } catch (e) {
+    await logError(env, {
+      message: "callScorer failed",
+      error: e,
+      context: { scorerUrl, context_preview: context?.slice(0, 100) },
+    });
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// KV HELPERS
+// ---------------------------------------------------------------------------
+
+async function getKvPool(kv) {
+  try {
+    const data = await kv.get(CONFIG.UNLABELED_KEY, { type: "json" });
+    return data || [];
+  } catch (e) {
+    console.error("getKvPool error:", e);
+    return [];
+  }
+}
+
+async function setKvPool(kv, pool) {
+  await kv.put(CONFIG.UNLABELED_KEY, JSON.stringify(pool));
+}
+
+async function getKvQueue(kv) {
+  try {
+    const data = await kv.get(CONFIG.QUEUE_KEY, { type: "json" });
+    return data || [];
+  } catch (e) {
+    console.error("getKvQueue error:", e);
+    return [];
+  }
+}
+
+async function setKvQueue(kv, queue) {
+  await kv.put(CONFIG.QUEUE_KEY, JSON.stringify(queue));
+}
+
+async function getLabeledCount(kv) {
+  try {
+    const count = await kv.get(CONFIG.LABELED_KEY, { type: "json" });
+    return count || 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+async function incrementLabeledCount(kv, delta) {
+  const current = await getLabeledCount(kv);
+  await kv.put(CONFIG.LABELED_KEY, JSON.stringify(current + delta));
+  return current + delta;
+}
+
+// ---------------------------------------------------------------------------
+// D1 HELPERS (BCC Lattice Meta)
+// ---------------------------------------------------------------------------
+
+async function storeSampleInD1(db, sample) {
+  return db.prepare(
+    `INSERT OR REPLACE INTO unlabeled_samples (
+      sample_id, context, response, predicted_scores_json,
+      total_uncertainty, per_dim_uncertainty_json, uncertainty_margin,
+      embedding_json, acquisition_score, source, status, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    sample.sample_id,
+    sample.context,
+    sample.response,
+    JSON.stringify(sample.predicted_scores),
+    sample.total_uncertainty,
+    JSON.stringify(sample.per_dim_uncertainty),
+    sample.uncertainty_margin,
+    JSON.stringify(sample.embedding),
+    sample.acquisition_score,
+    sample.source,
+    "pending",
+    new Date(sample.timestamp).toISOString()
+  ).run();
+}
+
+async function storeLabeledSample(db, labelData) {
+  return db.prepare(
+    `INSERT OR REPLACE INTO labeled_samples (
+      sample_id, context, response, predicted_scores_json,
+      human_labels_json, total_uncertainty, acquisition_score,
+      annotator_id, label_time_ms, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    labelData.sample_id,
+    labelData.context,
+    labelData.response,
+    JSON.stringify(labelData.predicted_scores || []),
+    JSON.stringify(labelData.human_labels),
+    labelData.total_uncertainty || 0,
+    labelData.acquisition_score || 0,
+    labelData.annotator_id || "anonymous",
+    labelData.label_time_ms || 0,
+    new Date().toISOString()
+  ).run();
+}
+
+// ---------------------------------------------------------------------------
+// CORE PIPELINE FUNCTIONS
+// ---------------------------------------------------------------------------
+
+/**
+ * Ingest a single unlabeled sample into the pipeline.
+ */
+async function ingestSample(env, sample) {
+  const db = env[CONFIG.D1_BINDING];
+  const kv = env.BCC_CONTEXT_CACHE;
+
+  // 1. Call scorer for initial predictions
+  let scorerResult;
+  try {
+    scorerResult = await callScorer(env, sample.context, sample.response);
+  } catch (e) {
+    // Use zero predictions as fallback
+    scorerResult = {
+      predictions: new Array(CONFIG.NUM_DIMENSIONS).fill(0.5),
+      mc_dropout_samples: [],
+    };
+    await logError(env, {
+      message: "Scorer fallback used during ingest",
+      error: e,
+      context: { sample_id: sample.sample_id },
+      sample_id: sample.sample_id,
+    });
+  }
+
+  // 2. Compute uncertainty
+  const mcSamples = scorerResult.mc_dropout_samples || [];
+  const predictions = scorerResult.predictions || scorerResult;
+  const uncertainty = computeUncertaintyStats(mcSamples, predictions);
+
+  // 3. Compute embedding for diversity
+  const combinedText = `${sample.context} ${sample.response}`.slice(0, 512);
+  const embedding = await computeEmbedding(env.AI, combinedText);
+
+  // 4. Build candidate
+  const candidate = {
+    sample_id: sample.sample_id || `s_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    context: sample.context,
+    response: sample.response,
+    total_uncertainty: uncertainty.total_uncertainty,
+    per_dim_uncertainty: uncertainty.per_dim_uncertainty,
+    uncertainty_margin: uncertainty.uncertainty_margin,
+    predicted_scores: uncertainty.mean_scores,
+    embedding,
+    acquisition_score: 0,
+    source: sample.source || "ingest",
+    timestamp: Date.now(),
+  };
+
+  // 5. Store in D1
+  try {
+    await storeSampleInD1(db, candidate);
+  } catch (e) {
+    await logError(env, {
+      message: "D1 storeSampleInD1 failed",
+      error: e,
+      context: { sample_id: candidate.sample_id },
+      sample_id: candidate.sample_id,
+    });
+    throw e;
+  }
+
+  // 6. Add to KV pool
+  const pool = await getKvPool(kv);
+  pool.push(candidate);
+  await setKvPool(kv, pool);
+
+  return candidate;
+}
+
+/**
+ * Select top-k samples for human review.
+ */
+async function selectForReview(env, strategy = "HYBRID", topK = CONFIG.BATCH_SIZE) {
+  const kv = env.BCC_CONTEXT_CACHE;
+  const pool = await getKvPool(kv);
+
+  if (pool.length === 0) {
+    return { selected: [], remaining: [], stats: { pool_size: 0 } };
+  }
+
+  // Score all samples with acquisition function
+  const ranked = acquireSamples(pool, strategy);
+  const selected = ranked.slice(0, topK);
+  const remaining = ranked.slice(topK);
+
+  // Update queue in KV
+  await setKvQueue(kv, selected);
+  await setKvPool(kv, remaining);
+
+  // Update stats
+  const stats = {
+    pool_size: remaining.length,
+    selected_count: selected.length,
+    strategy,
+    mean_uncertainty: pool.reduce((s, x) => s + x.total_uncertainty, 0) / pool.length,
+    high_uncertainty_count: pool.filter(
+      x => x.total_uncertainty > CONFIG.HIGH_UNCERTAINTY_THRESHOLD
+    ).length,
+  };
+  await kv.put(CONFIG.STATS_KEY, JSON.stringify(stats));
+
+  return { selected, remaining, stats };
+}
+
+/**
+ * Submit human labels and check for retrain trigger.
+ */
+async function submitLabels(env, labels) {
+  const db = env[CONFIG.D1_BINDING];
+  const kv = env.BCC_CONTEXT_CACHE;
+  const results = [];
+
+  for (const label of labels) {
+    try {
+      await storeLabeledSample(db, label);
+      results.push({ sample_id: label.sample_id, status: "stored" });
+    } catch (e) {
+      await logError(env, {
+        message: "storeLabeledSample failed",
+        error: e,
+        context: { sample_id: label.sample_id },
+        sample_id: label.sample_id,
+      });
+      throw e;
+    }
+  }
+
+  // Update labeled count
+  const newTotal = await incrementLabeledCount(kv, labels.length);
+
+  // Check retrain
+  const shouldTrigger = labels.length >= CONFIG.RETRAIN_AFTER_N_LABELS
+    && newTotal >= CONFIG.MIN_SAMPLES_FOR_RETRAIN;
+
+  if (shouldTrigger) {
+    await kv.put(CONFIG.LAST_RETRAIN_KEY, Date.now().toString());
+  }
+
+  return {
+    stored: results.length,
+    total_labeled: newTotal,
+    retrain_triggered: shouldTrigger,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// REQUEST HANDLER
+// ---------------------------------------------------------------------------
+
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const method = request.method;
+
+  // CORS headers
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Content-Type": "application/json",
+  };
+
+  if (method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders, status: 204 });
+  }
+
+  try {
+    // Health check
+    if (path === "/health" && method === "GET") {
+      return jsonResponse({
+        status: "healthy",
+        service: "24d-active-learning",
+        timestamp: new Date().toISOString(),
+        version: "1.0.0",
+      }, corsHeaders);
+    }
+
+    // POST /samples/ingest
+    if (path === "/samples/ingest" && method === "POST") {
+      const body = await request.json();
+      const samples = Array.isArray(body.samples) ? body.samples : [body];
+      const results = [];
+      for (const sample of samples) {
+        try {
+          const candidate = await ingestSample(env, sample);
+          results.push({
+            sample_id: candidate.sample_id,
+            total_uncertainty: candidate.total_uncertainty,
+            uncertainty_margin: candidate.uncertainty_margin,
+            status: "ingested",
+          });
+        } catch (e) {
+          await logError(env, {
+            message: "Sample ingestion failed",
+            error: e,
+            context: { sample_id: sample.sample_id },
+            sample_id: sample.sample_id,
+          });
+          throw e;
+        }
+      }
+      return jsonResponse({ ingested: results.length, samples: results }, corsHeaders);
+    }
+
+    // POST /samples/select
+    if (path === "/samples/select" && method === "POST") {
+      let body = {};
+      try { body = await request.json(); } catch (e) { console.error("[select] JSON parse error:", e.message); }
+      const strategy = body.strategy || "HYBRID";
+      const topK = body.top_k || CONFIG.BATCH_SIZE;
+      const result = await selectForReview(env, strategy, topK);
+      return jsonResponse({
+        selected: result.selected.map(s => ({
+          sample_id: s.sample_id,
+          context: s.context,
+          response: s.response,
+          total_uncertainty: s.total_uncertainty,
+          uncertainty_margin: s.uncertainty_margin,
+          acquisition_score: s.acquisition_score,
+          predicted_scores: s.predicted_scores,
+        })),
+        stats: result.stats,
+      }, corsHeaders);
+    }
+
+    // GET /samples/queue
+    if (path === "/samples/queue" && method === "GET") {
+      const kv = env.BCC_CONTEXT_CACHE;
+      const queue = await getKvQueue(kv);
+      return jsonResponse({
+        queue_length: queue.length,
+        queue: queue.map(s => ({
+          sample_id: s.sample_id,
+          context: s.context?.slice(0, 200),
+          response: s.response?.slice(0, 200),
+          total_uncertainty: s.total_uncertainty,
+          acquisition_score: s.acquisition_score,
+        })),
+      }, corsHeaders);
+    }
+
+    // POST /samples/label
+    if (path === "/samples/label" && method === "POST") {
+      const body = await request.json();
+      const labels = Array.isArray(body.labels) ? body.labels : [body];
+      const result = await submitLabels(env, labels);
+      return jsonResponse(result, corsHeaders);
+    }
+
+    // GET /stats
+    if (path === "/stats" && method === "GET") {
+      const kv = env.BCC_CONTEXT_CACHE;
+      const [poolSize, queue, labeledCount, stats] = await Promise.all([
+        getKvPool(kv).then(p => p.length),
+        getKvQueue(kv).then(q => q.length),
+        getLabeledCount(kv),
+        kv.get(CONFIG.STATS_KEY, { type: "json" }).catch(() => null),
+      ]);
+      return jsonResponse({
+        pool_size: poolSize,
+        queue_size: queue,
+        total_labeled: labeledCount,
+        retrain_threshold: CONFIG.RETRAIN_AFTER_N_LABELS,
+        min_samples_for_retrain: CONFIG.MIN_SAMPLES_FOR_RETRAIN,
+        high_uncertainty_threshold: CONFIG.HIGH_UNCERTAINTY_THRESHOLD,
+        batch_size: CONFIG.BATCH_SIZE,
+        last_stats: stats,
+        timestamp: new Date().toISOString(),
+      }, corsHeaders);
+    }
+
+    // POST /retrain/check
+    if (path === "/retrain/check" && method === "POST") {
+      const kv = env.BCC_CONTEXT_CACHE;
+      const labeledCount = await getLabeledCount(kv);
+      const lastRetrain = await kv.get(CONFIG.LAST_RETRAIN_KEY);
+      const shouldTrigger = labeledCount >= CONFIG.MIN_SAMPLES_FOR_RETRAIN;
+
+      // Query D1 for actual count since last retrain
+      const db = env[CONFIG.D1_BINDING];
+      let newSinceRetrain = labeledCount;
+      if (lastRetrain) {
+        const retrainTime = new Date(parseInt(lastRetrain)).toISOString();
+        const countResult = await db.prepare(
+          `SELECT COUNT(*) as count FROM labeled_samples WHERE created_at > ?`
+        ).bind(retrainTime).first();
+        newSinceRetrain = countResult?.count || labeledCount;
+      }
+
+      const trigger = newSinceRetrain >= CONFIG.RETRAIN_AFTER_N_LABELS;
+
+      return jsonResponse({
+        should_retrain: trigger,
+        total_labeled: labeledCount,
+        new_since_retrain: newSinceRetrain,
+        threshold: CONFIG.RETRAIN_AFTER_N_LABELS,
+        last_retrain: lastRetrain ? new Date(parseInt(lastRetrain)).toISOString() : null,
+      }, corsHeaders);
+    }
+
+    // 404
+    return jsonResponse({ error: "Not found", path, method }, corsHeaders, 404);
+
+  } catch (error) {
+    // Already logged in inner catches; log any unhandled here too
+    await logError(env, {
+      message: `Unhandled error in ${method} ${path}`,
+      error,
+      context: { path, method },
+    });
+    return jsonResponse({
+      error: error.message || "Internal server error",
+      path,
+      timestamp: new Date().toISOString(),
+    }, corsHeaders, 500);
+  }
+}
+
+function jsonResponse(data, headers, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...headers, "Content-Type": "application/json" },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// EXPORTS
+// ---------------------------------------------------------------------------
+
+export default {
+  async fetch(request, env, ctx) {
+    return handleRequest(request, env);
+  },
+};
+
+export {
+  CONFIG,
+  computeUncertaintyStats,
+  acquireSamples,
+  acquisitionUncertainty,
+  acquisitionUncertaintyMargin,
+  acquisitionDiversity,
+  acquisitionHybrid,
+  acquisitionExpectedChange,
+  acquisitionRandom,
+  kmeans,
+  euclideanDistance,
+  normalizeScores,
+  computeEmbedding,
+  ingestSample,
+  selectForReview,
+  submitLabels,
+  logError,
+};
+
+--c2cb2419a4dcd8fbbeaae7206d35ccda15989f145bc5a4b90336dd2233c5--

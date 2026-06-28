@@ -1,0 +1,196 @@
+--b72e96e23e99762e47008c7b112c61a43a3b1ac8e312396287bc61e8305a
+Content-Disposition: form-data; name="index.js"
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Relay-Key',
+      'Content-Type': 'application/json'
+    };
+
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: cors });
+    }
+
+    // Health check — no auth needed
+    if (url.pathname === '/health') {
+      return new Response(JSON.stringify({ status: 'ok', service: 'reflexion-relay', timestamp: Date.now() }), { headers: cors });
+    }
+
+    // Public read endpoints — no auth needed (R2 is public anyway)
+    if (url.pathname === '/inbox' && request.method === 'GET') {
+      const agent = url.searchParams.get('agent');
+      if (!agent) return new Response(JSON.stringify({ error: 'missing agent param' }), { status: 400, headers: cors });
+      const obj = await env.R2_BUCKET.get(`relay/inbox/${agent}.json`);
+      if (!obj) return new Response(JSON.stringify([]), { headers: cors });
+      return new Response(await obj.text(), { headers: cors });
+    }
+
+    if (url.pathname === '/outbox' && request.method === 'GET') {
+      const agent = url.searchParams.get('agent');
+      if (!agent) return new Response(JSON.stringify({ error: 'missing agent param' }), { status: 400, headers: cors });
+      const obj = await env.R2_BUCKET.get(`relay/outbox/${agent}.json`);
+      if (!obj) return new Response(JSON.stringify([]), { headers: cors });
+      return new Response(await obj.text(), { headers: cors });
+    }
+
+    if (url.pathname === '/heartbeats' && request.method === 'GET') {
+      const obj = await env.R2_BUCKET.get('relay/heartbeats.json');
+      if (!obj) return new Response(JSON.stringify({}), { headers: cors });
+      return new Response(await obj.text(), { headers: cors });
+    }
+
+    // Auth required for write endpoints
+    const relayKey = request.headers.get('X-Relay-Key') || url.searchParams.get('key');
+    if (relayKey !== env.RELAY_KEY) {
+      return new Response(JSON.stringify({ error: 'unauthorized' }), { status: 401, headers: cors });
+    }
+
+    switch (url.pathname) {
+
+      // Send a message TO an agent (write to their inbox)
+      case '/send': {
+        if (request.method !== 'POST') return new Response('POST only', { status: 405, headers: cors });
+        const body = await request.json();
+        const { to, from, type, data } = body;
+        if (!to || !from) return new Response(JSON.stringify({ error: 'missing to/from' }), { status: 400, headers: cors });
+
+        const inboxKey = `relay/inbox/${to}.json`;
+        const existing = await env.R2_BUCKET.get(inboxKey);
+        let inbox = [];
+        if (existing) {
+          try { inbox = JSON.parse(await existing.text()); } catch (e) { inbox = []; }
+        }
+
+        const msg = {
+          id: crypto.randomUUID(),
+          from, to,
+          type: type || 'message',
+          data,
+          timestamp: Date.now(),
+          read: false
+        };
+
+        inbox.push(msg);
+        if (inbox.length > 100) inbox = inbox.slice(-100);
+
+        await env.R2_BUCKET.put(inboxKey, JSON.stringify(inbox, null, 2), {
+          httpMetadata: { contentType: 'application/json' }
+        });
+
+        // Also mirror to D1 event_queue for BCC integration
+        try {
+          await env.BCC_META.prepare(
+            'INSERT INTO event_queue (event_type, payload, created_at, processed) VALUES (?, ?, ?, 0)'
+          ).bind(`relay:${from}:${to}`, JSON.stringify(msg), String(Date.now())).run();
+        } catch (e) { /* D1 failure shouldn't block relay */ }
+
+        return new Response(JSON.stringify({ ok: true, message_id: msg.id, inbox_size: inbox.length }), { headers: cors });
+      }
+
+      // Extension posts a message scraped FROM an agent's chat output
+      case '/receive': {
+        if (request.method !== 'POST') return new Response('POST only', { status: 405, headers: cors });
+        const body = await request.json();
+        const { from, to, type, data, context } = body;
+
+        const outboxKey = `relay/outbox/${from}.json`;
+        const existing = await env.R2_BUCKET.get(outboxKey);
+        let outbox = [];
+        if (existing) {
+          try { outbox = JSON.parse(await existing.text()); } catch (e) { outbox = []; }
+        }
+
+        const msg = {
+          id: crypto.randomUUID(),
+          from,
+          to: to || 'broadcast',
+          type: type || 'response',
+          data,
+          context: context || null,
+          timestamp: Date.now()
+        };
+
+        outbox.push(msg);
+        if (outbox.length > 100) outbox = outbox.slice(-100);
+
+        await env.R2_BUCKET.put(outboxKey, JSON.stringify(outbox, null, 2), {
+          httpMetadata: { contentType: 'application/json' }
+        });
+
+        // Auto-route: if message is tagged for a specific agent, copy to their inbox
+        if (to && to !== 'broadcast') {
+          const targetInboxKey = `relay/inbox/${to}.json`;
+          const targetExisting = await env.R2_BUCKET.get(targetInboxKey);
+          let targetInbox = [];
+          if (targetExisting) {
+            try { targetInbox = JSON.parse(await targetExisting.text()); } catch (e) { targetInbox = []; }
+          }
+          targetInbox.push(msg);
+          if (targetInbox.length > 100) targetInbox = targetInbox.slice(-100);
+          await env.R2_BUCKET.put(targetInboxKey, JSON.stringify(targetInbox, null, 2), {
+            httpMetadata: { contentType: 'application/json' }
+          });
+        }
+
+        // Mirror to D1
+        try {
+          await env.BCC_META.prepare(
+            'INSERT INTO event_queue (event_type, payload, created_at, processed) VALUES (?, ?, ?, 0)'
+          ).bind(`relay:${from}:${to || 'broadcast'}`, JSON.stringify(msg), String(Date.now())).run();
+        } catch (e) { /* D1 failure non-critical */ }
+
+        return new Response(JSON.stringify({ ok: true, message_id: msg.id, routed_to: to || 'outbox only' }), { headers: cors });
+      }
+
+      // Heartbeat
+      case '/heartbeat': {
+        if (request.method !== 'POST') return new Response('POST only', { status: 405, headers: cors });
+        const body = await request.json();
+
+        const hbKey = 'relay/heartbeats.json';
+        const existing = await env.R2_BUCKET.get(hbKey);
+        let heartbeats = {};
+        if (existing) {
+          try { heartbeats = JSON.parse(await existing.text()); } catch (e) { heartbeats = {}; }
+        }
+
+        heartbeats[body.agent] = {
+          status: body.status || 'online',
+          timestamp: Date.now(),
+          capabilities: body.capabilities || []
+        };
+
+        await env.R2_BUCKET.put(hbKey, JSON.stringify(heartbeats, null, 2), {
+          httpMetadata: { contentType: 'application/json' }
+        });
+
+        return new Response(JSON.stringify({ ok: true }), { headers: cors });
+      }
+
+      // Clear an inbox (after reading)
+      case '/clear': {
+        const agent = url.searchParams.get('agent');
+        const box = url.searchParams.get('box') || 'inbox';
+        if (!agent) return new Response(JSON.stringify({ error: 'missing agent' }), { status: 400, headers: cors });
+
+        await env.R2_BUCKET.put(`relay/${box}/${agent}.json`, JSON.stringify([]), {
+          httpMetadata: { contentType: 'application/json' }
+        });
+
+        return new Response(JSON.stringify({ ok: true, cleared: `${box}/${agent}` }), { headers: cors });
+      }
+
+      default:
+        return new Response(JSON.stringify({
+          error: 'not found',
+          endpoints: ['/health', '/inbox?agent=X', '/outbox?agent=X', '/send', '/receive', '/heartbeat', '/clear?agent=X&box=inbox']
+        }), { status: 404, headers: cors });
+    }
+  }
+};
+
+--b72e96e23e99762e47008c7b112c61a43a3b1ac8e312396287bc61e8305a--

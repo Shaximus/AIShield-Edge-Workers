@@ -1,0 +1,292 @@
+--c49a4b2ba3b0cc90c05a906de61870c6f3ee7b790c38fe8e9547c0166d53
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.js
+var BLOCKED_PATHS = [
+  "recordCodeAssistMetrics",
+  "WriteLog",
+  "logging",
+  "telemetry",
+  "/log",
+  "clientanalytics",
+  "jserror"
+];
+var BLOCKED_DOMAINS = ["play.googleapis.com", "firebaselogging-pa.googleapis.com"];
+var API_PATH_PATTERNS = ["generateContent", "streamGenerateContent", "streamGenerate", "generate"];
+var RATE_LIMIT_KEYS = ["ratelimit", "retry", "overage"];
+function nowIso() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+__name(nowIso, "nowIso");
+function normalizeModel(modelStr) {
+  if (!modelStr) return null;
+  let normalized = modelStr.replace(/-\d{8}$/, "");
+  normalized = normalized.replace(/^models\//, "");
+  return normalized.toLowerCase();
+}
+__name(normalizeModel, "normalizeModel");
+function extractModelFromPath(path) {
+  const match = path.match(/models\/([^:/]+)/);
+  return match ? match[1] : null;
+}
+__name(extractModelFromPath, "extractModelFromPath");
+function isApiCall(path) {
+  return API_PATH_PATTERNS.some((p) => path.includes(p));
+}
+__name(isApiCall, "isApiCall");
+function isBlockedDomain(host) {
+  for (const domain of BLOCKED_DOMAINS) {
+    if (host.includes(domain)) {
+      return { blocked: true, reason: `matched domain: ${domain}` };
+    }
+  }
+  return { blocked: false };
+}
+__name(isBlockedDomain, "isBlockedDomain");
+function isBlockedPath(path) {
+  for (const bp of BLOCKED_PATHS) {
+    if (path.includes(bp)) {
+      return { blocked: true, reason: `matched path: ${bp}` };
+    }
+  }
+  return { blocked: false };
+}
+__name(isBlockedPath, "isBlockedPath");
+function extractRateLimitHeaders(headers) {
+  const rl = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (RATE_LIMIT_KEYS.some((k) => lower.includes(k))) {
+      rl[key] = value;
+    }
+  }
+  return rl;
+}
+__name(extractRateLimitHeaders, "extractRateLimitHeaders");
+function detectModelSwap(requested, returned) {
+  const reqNorm = normalizeModel(requested);
+  const retNorm = normalizeModel(returned);
+  return {
+    swapped: reqNorm !== retNorm,
+    requestedNormalized: reqNorm,
+    returnedNormalized: retNorm,
+    requested,
+    returned
+  };
+}
+__name(detectModelSwap, "detectModelSwap");
+async function logToD1(db, module, severity, message, meta = {}) {
+  try {
+    await db.prepare("INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)").bind(module, severity, message, JSON.stringify(meta), Date.now()).run();
+  } catch {
+  }
+}
+__name(logToD1, "logToD1");
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Content-Type": "application/json"
+};
+var index_default = {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const method = request.method;
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    if (url.pathname === "/health" && method === "GET") {
+      return new Response(JSON.stringify({ status: "ok", platform: "gemini", timestamp: nowIso() }), {
+        status: 200,
+        headers: CORS_HEADERS
+      });
+    }
+    if (url.pathname === "/analyze" && method === "POST") {
+      try {
+        const payload = await request.json();
+        const headers = payload.headers || {};
+        const body = payload.body || {};
+        const platform = payload.platform || "gemini";
+        const path = payload.path || "";
+        const isStream = payload.is_stream || false;
+        const contentLength = payload.content_length || 0;
+        const urlModel = extractModelFromPath(path);
+        const bodyModel = body.model || null;
+        const requestedModel = payload.request_model || urlModel || bodyModel || "unknown";
+        const returnedModel = payload.response_model || "unknown";
+        const results = {
+          platform,
+          timestamp: nowIso(),
+          analysis: {},
+          findings: [],
+          blocked: false,
+          modelSwap: null,
+          rateLimitHeaders: null,
+          isApiCall: isApiCall(path),
+          isStream,
+          models: {
+            urlModel,
+            bodyModel,
+            requestedModel,
+            returnedModel
+          }
+        };
+        const host = headers.host || headers.Host || "";
+        const domainBlock = isBlockedDomain(host);
+        const pathBlock = isBlockedPath(path);
+        if (domainBlock.blocked) {
+          results.blocked = true;
+          results.findings.push({
+            type: "BLOCKED_DOMAIN",
+            severity: "HIGH",
+            details: domainBlock.reason,
+            host
+          });
+        }
+        if (pathBlock.blocked) {
+          results.blocked = true;
+          results.findings.push({
+            type: "BLOCKED_PATH",
+            severity: "HIGH",
+            details: pathBlock.reason,
+            path
+          });
+        }
+        if (isApiCall(path)) {
+          results.analysis.isInferenceCall = true;
+          results.findings.push({
+            type: "API_CALL",
+            severity: "INFO",
+            details: `Gemini API call: ${path}`,
+            urlModel,
+            bodyModel,
+            requestedModel
+          });
+          if (urlModel && bodyModel && normalizeModel(urlModel) !== normalizeModel(bodyModel)) {
+            results.findings.push({
+              type: "INTERNAL_MODEL_MISMATCH",
+              severity: "MEDIUM",
+              details: `URL model (${urlModel}) differs from body model (${bodyModel})`,
+              urlModel,
+              bodyModel
+            });
+          }
+          if (requestedModel !== "unknown" && returnedModel !== "unknown") {
+            const swapResult = detectModelSwap(requestedModel, returnedModel);
+            results.modelSwap = swapResult;
+            if (swapResult.swapped) {
+              results.findings.push({
+                type: "MODEL_SWAP",
+                severity: "CRITICAL",
+                details: `Requested ${swapResult.requested} but got ${swapResult.returned}`,
+                swapResult
+              });
+            }
+          }
+          const usageMetadata = body.usageMetadata;
+          if (usageMetadata) {
+            results.findings.push({
+              type: "USAGE_METADATA",
+              severity: "INFO",
+              details: "Usage metadata present in response",
+              usage: usageMetadata
+            });
+          }
+          const candidates = body.candidates;
+          if (candidates && candidates.length > 0) {
+            const candidateModel = candidates[0].modelVersion || candidates[0].model;
+            if (candidateModel) {
+              const swapResult = detectModelSwap(requestedModel, String(candidateModel));
+              if (swapResult.swapped) {
+                results.modelSwap = swapResult;
+                results.findings.push({
+                  type: "MODEL_SWAP_CANDIDATE",
+                  severity: "CRITICAL",
+                  details: `Candidate returned model ${candidateModel} differs from requested ${requestedModel}`,
+                  swapResult
+                });
+              }
+            }
+          }
+          if (isStream || path.includes("streamGenerateContent")) {
+            results.findings.push({
+              type: "STREAMING_RESPONSE",
+              severity: "INFO",
+              details: "Streaming response detected"
+            });
+            if (body.sse_chunks && Array.isArray(body.sse_chunks)) {
+              for (const chunk of body.sse_chunks) {
+                const chunkStr = typeof chunk === "string" ? chunk : JSON.stringify(chunk);
+                const modelMatch = chunkStr.match(/"modelVersion"\s*:\s*"([^"]+)"/);
+                const altModelMatch = chunkStr.match(/"model"\s*:\s*"([^"]+)"/);
+                const extractedModel = modelMatch ? modelMatch[1] : altModelMatch ? altModelMatch[1] : null;
+                if (extractedModel) {
+                  const swapResult = detectModelSwap(requestedModel, extractedModel);
+                  if (swapResult.swapped) {
+                    results.modelSwap = swapResult;
+                    results.findings.push({
+                      type: "MODEL_SWAP_SSE",
+                      severity: "CRITICAL",
+                      details: `SSE stream returned model ${extractedModel} differs from requested ${requestedModel}`,
+                      swapResult,
+                      chunk: chunkStr.slice(0, 500)
+                    });
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        }
+        const rlHeaders = extractRateLimitHeaders(headers);
+        results.rateLimitHeaders = rlHeaders;
+        if (Object.keys(rlHeaders).length > 0) {
+          results.findings.push({
+            type: "RATE_LIMIT",
+            severity: "INFO",
+            details: `Rate limit headers present: ${Object.keys(rlHeaders).join(", ")}`,
+            headers: rlHeaders
+          });
+        }
+        await logToD1(env.AURIS_LOGS, "gemini-analyze", results.findings.length > 0 ? "WARN" : "INFO", "Gemini analysis complete", {
+          platform,
+          requestedModel,
+          returnedModel,
+          findingsCount: results.findings.length,
+          blocked: results.blocked,
+          modelSwapped: results.modelSwap?.swapped || false,
+          rateLimitPresent: Object.keys(rlHeaders).length > 0,
+          isApiCall: isApiCall(path)
+        });
+        try {
+          const key = `network_av:gemini_analysis:${Date.now()}`;
+          await env.BCC_CACHE.put(key, JSON.stringify(results), { expirationTtl: 86400 });
+        } catch (e) {
+          await logToD1(env.AURIS_LOGS, "gemini-analyze", "ERROR", `KV store failed: ${e.message}`, {});
+        }
+        return new Response(JSON.stringify(results), { status: 200, headers: CORS_HEADERS });
+      } catch (e) {
+        await env.AURIS_LOGS.prepare(
+          "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+        ).bind("gemini-analyze", "ERROR", e.message, e.stack || "", Date.now()).run();
+        return new Response(
+          JSON.stringify({ error: "Analysis failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    return new Response(
+      JSON.stringify({ error: "Not found", path: url.pathname, valid: ["/analyze", "/health"] }),
+      { status: 404, headers: CORS_HEADERS }
+    );
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--c49a4b2ba3b0cc90c05a906de61870c6f3ee7b790c38fe8e9547c0166d53--

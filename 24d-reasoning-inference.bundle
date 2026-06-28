@@ -1,0 +1,607 @@
+--a6ec9ae3bf44c61fd373570cd2efc0a2c6acd684ffbbb3d9342850b3d5c2
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * 24d-reasoning-inference.worker.js
+ * 3-Pass Lattice Reasoning Inference Worker
+ * Deploy: wrangler deploy 24d-reasoning-inference.worker.js
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WORKERS_AI_ENDPOINT = 'https://claudes-telephone.kingsley-w-m-curtis.workers.dev/ai/chat';
+const MODEL_NAME = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+// Auris Logs D1 binding (error logging doctrine)
+const AURIS_LOGS_DB_ID = '7f77cdba-95bd-4458-aebf-83e9a978415f';
+
+// Lattice DB mappings
+const LATTICE_DB_MAP = {
+DB0: 'personal',   // user-specific data
+DB1: 'knowledge',  // wiki, docs, RAG corpus
+DB2: 'session',    // ephemeral conversation state
+};
+
+// Special tokens for parsing structured output
+const TOKENS = {
+THINK_START:    '<think>',
+THINK_END:      '</think>',
+TOOL_CALL_START:'<tool_call>',
+TOOL_CALL_END:  '</tool_call>',
+TOOL_RESULT_START:'<tool_result>',
+TOOL_RESULT_END:'</tool_result>',
+RESPONSE_START: '<response>',
+RESPONSE_END:   '</response>',
+STORE_START:    '<store>',
+STORE_END:      '</store>',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System Prompts
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LATTICE_SYSTEM_PROMPT_PASS1 = `You are the Reasoning Core of the 24D Framework. Your job is to analyze the user's request and decide:
+1. WHICH lattice database(s) to query (DB0=personal, DB1=knowledge, DB2=session)
+2. WHAT tool calls to make (READ, SEARCH, WRITE)
+3. HOW to structure the retrieval plan
+
+Respond using this EXACT format:
+<think>
+[Your step-by-step reasoning about what the user needs, which databases are relevant, and what tools to call]
+</think>
+<tool_call>
+{"tool": "SEARCH_DB1", "query": "...", "params": {}}
+{"tool": "READ_DB0", "key": "..."}
+</tool_call>
+
+Rules:
+- Always wrap reasoning in <think>...</think>
+- Always wrap tool calls in <tool_call>...</tool_call>
+- Use valid JSON, one per line
+- DB0 = personal data, DB1 = knowledge base, DB2 = session state
+- If no tools needed, emit empty <tool_call></tool_call>`;
+
+const LATTICE_SYSTEM_PROMPT_PASS2 = `You are the Reasoning Core of the 24D Framework — Response Generation.
+You have received retrieval results from the lattice databases. Generate a helpful, accurate response.
+
+Respond using this EXACT format:
+<think>
+[Your reasoning about how to synthesize the retrieved information]
+</think>
+<tool_result>
+[Summary of what was retrieved from each database]
+</tool_result>
+<response>
+[Your final response to the user]
+</response>
+
+Rules:
+- Always cite which database(s) provided the information
+- If retrieval was empty, say so honestly
+- Be concise but thorough`;
+
+const LATTICE_SYSTEM_PROMPT_PASS3 = `You are the Reasoning Core of the 24D Framework — Store Actions.
+Decide what (if anything) should be stored to the session or personal databases based on this interaction.
+
+Respond using this EXACT format:
+<think>
+[Your reasoning about what to store]
+</think>
+<store>
+{"action": "UPSERT", "db": "DB2", "key": "...", "value": "..."}
+{"action": "UPSERT", "db": "DB0", "key": "...", "value": "..."}
+</store>
+
+Rules:
+- Only store meaningful derived information
+- DB2 (session) for conversation context
+- DB0 (personal) for user preferences/facts
+- If nothing to store, emit empty <store></store>`;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility: Structured Output Parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+function extractTag(text, startTag, endTag) {
+const startIdx = text.indexOf(startTag);
+if (startIdx === -1) return null;
+const endIdx = text.indexOf(endTag, startIdx + startTag.length);
+if (endIdx === -1) return null;
+return text.slice(startIdx + startTag.length, endIdx).trim();
+}
+
+function parseToolCalls(toolCallBlock) {
+if (!toolCallBlock || toolCallBlock.trim().length === 0) return [];
+const lines = toolCallBlock.split('\\n').filter(l => l.trim());
+const tools = [];
+for (const line of lines) {
+  try {
+    const parsed = JSON.parse(line.trim());
+    tools.push(parsed);
+  } catch (e) {
+    // Skip malformed lines
+  }
+}
+return tools;
+}
+
+function parseStoreActions(storeBlock) {
+if (!storeBlock || storeBlock.trim().length === 0) return [];
+const lines = storeBlock.split('\\n').filter(l => l.trim());
+const actions = [];
+for (const line of lines) {
+  try {
+    const parsed = JSON.parse(line.trim());
+    actions.push(parsed);
+  } catch (e) {
+    // Skip malformed lines
+  }
+}
+return actions;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auris Logs: Error Logging (Reflexion Doctrine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function logError(env, source, error, context = {}) {
+try {
+  const db = env.AURIS_LOGS;
+  const stmt = db.prepare(`
+    INSERT INTO logs (timestamp, level, source, message, context, worker)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  `);
+  await stmt.bind(
+    new Date().toISOString(),
+    'ERROR',
+    source,
+    error.message || String(error),
+    JSON.stringify(context),
+    '24d-reasoning-inference'
+  ).run();
+} catch (logErr) {
+  // If logging itself fails, we have no choice but to console.error
+  console.error('[AURIS-LOG-FAILURE]', logErr);
+}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workers AI Chat Completion
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function workersAIChat(messages, max_tokens = 2048, temperature = 0.3) {
+const response = await fetch(WORKERS_AI_ENDPOINT, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+  },
+  body: JSON.stringify({
+    model: MODEL_NAME,
+    messages,
+    max_tokens,
+    temperature,
+  }),
+});
+
+if (!response.ok) {
+  const errText = await response.text();
+  throw new Error(`Workers AI HTTP \${response.status}: \${errText}`);
+}
+
+const data = await response.json();
+return data.choices?.[0]?.message?.content || data.response || '';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D1 Lattice Retrieval / Storage
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function latticeRetrieve(env, toolCalls) {
+const results = [];
+const db = env.BCC_LATTICE_META;
+
+for (const tool of toolCalls) {
+  const { tool: toolName, query, key, db: dbRef } = tool;
+  try {
+    let rows = [];
+    const dbLabel = LATTICE_DB_MAP[dbRef] || dbRef;
+
+    if (toolName === 'SEARCH_DB1' || toolName === 'SEARCH') {
+      // Semantic search against knowledge base
+      const stmt = db.prepare(`
+        SELECT id, content, source, score FROM knowledge_chunks
+        WHERE content LIKE ?1
+        ORDER BY score DESC LIMIT 5
+      `);
+      const { results: searchResults } = await stmt.bind(`%\${query}%`).all();
+      rows = searchResults || [];
+    } else if (toolName === 'READ_DB0' || toolName === 'READ') {
+      const stmt = db.prepare(`
+        SELECT key, value, updated_at FROM personal_data WHERE key = ?1
+      `);
+      const { results: readResults } = await stmt.bind(key).all();
+      rows = readResults || [];
+    } else if (toolName === 'READ_DB2') {
+      const stmt = db.prepare(`
+        SELECT key, value, updated_at FROM session_data WHERE key = ?1
+      `);
+      const { results: readResults } = await stmt.bind(key).all();
+      rows = readResults || [];
+    } else {
+      rows = [{ note: 'Unknown tool, no retrieval performed', tool: toolName }];
+    }
+
+    results.push({ tool: toolName, db: dbLabel, query: query || key, rows });
+  } catch (err) {
+    results.push({ tool: toolName, db: dbRef, error: err.message });
+  }
+}
+
+return results;
+}
+
+async function latticeStore(env, storeActions) {
+const results = [];
+const db = env.BCC_LATTICE_META;
+
+for (const action of storeActions) {
+  try {
+    const { action: op, db: dbRef, key, value } = action;
+    const dbLabel = LATTICE_DB_MAP[dbRef] || dbRef;
+
+    if (op === 'UPSERT' || op === 'WRITE') {
+      if (dbRef === 'DB0' || dbRef === 'personal') {
+        await db.prepare(`
+          INSERT INTO personal_data (key, value, updated_at)
+          VALUES (?1, ?2, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        `).bind(key, JSON.stringify(value)).run();
+      } else if (dbRef === 'DB2' || dbRef === 'session') {
+        await db.prepare(`
+          INSERT INTO session_data (key, value, updated_at)
+          VALUES (?1, ?2, datetime('now'))
+          ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        `).bind(key, JSON.stringify(value)).run();
+      }
+      results.push({ action: op, db: dbLabel, key, status: 'stored' });
+    } else if (op === 'DELETE') {
+      if (dbRef === 'DB0' || dbRef === 'personal') {
+        await db.prepare('DELETE FROM personal_data WHERE key = ?1').bind(key).run();
+      } else if (dbRef === 'DB2' || dbRef === 'session') {
+        await db.prepare('DELETE FROM session_data WHERE key = ?1').bind(key).run();
+      }
+      results.push({ action: op, db: dbLabel, key, status: 'deleted' });
+    }
+  } catch (err) {
+    results.push({ action: action.action, db: action.db, key: action.key, error: err.message });
+  }
+}
+
+return results;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KV Caching
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function getCachedResponse(env, cacheKey) {
+try {
+  const cached = await env.BCC_CONTEXT_CACHE.get(`24d_port:infer:\${cacheKey}`);
+  return cached ? JSON.parse(cached) : null;
+} catch (e) {
+  return null;
+}
+}
+
+async function setCachedResponse(env, cacheKey, value, ttlSeconds = 300) {
+try {
+  await env.BCC_CONTEXT_CACHE.put(
+    `24d_port:infer:\${cacheKey}`,
+    JSON.stringify(value),
+    { expirationTtl: ttlSeconds }
+  );
+} catch (e) {
+  // Cache write failure is non-critical
+}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Core 3-Pass Inference
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function runInference(userMessage, env, options = {}) {
+const { skipCache = false, temperature = 0.3 } = options;
+const cacheKey = await crypto.subtle.digest(
+  'SHA-256',
+  new TextEncoder().encode(userMessage)
+).then(buf => Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join(''));
+
+// Check cache
+if (!skipCache) {
+  const cached = await getCachedResponse(env, cacheKey);
+  if (cached) return { ...cached, cached: true };
+}
+
+let pass1Result, pass2Result, pass3Result;
+let traceLog = [];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASS 1: Routing + Tool Calls
+// ═══════════════════════════════════════════════════════════════════════════
+const messagesPass1 = [
+  { role: 'system', content: LATTICE_SYSTEM_PROMPT_PASS1 },
+  { role: 'user',   content: userMessage },
+];
+
+const rawPass1 = await workersAIChat(messagesPass1, 2048, temperature);
+const think1   = extractTag(rawPass1, TOKENS.THINK_START, TOKENS.THINK_END);
+const toolCalls = parseToolCalls(extractTag(rawPass1, TOKENS.TOOL_CALL_START, TOKENS.TOOL_CALL_END));
+
+pass1Result = {
+  pass: 1,
+  think: think1,
+  tool_calls: toolCalls,
+  raw: rawPass1,
+};
+traceLog.push(pass1Result);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASS 2: Retrieve + Respond
+// ═══════════════════════════════════════════════════════════════════════════
+const retrievalResults = await latticeRetrieve(env, toolCalls);
+
+const messagesPass2 = [
+  { role: 'system', content: LATTICE_SYSTEM_PROMPT_PASS2 },
+  { role: 'user',   content: userMessage },
+  { role: 'assistant', content: `<tool_result>\\n\${JSON.stringify(retrievalResults, null, 2)}\\n</tool_result>` },
+];
+
+const rawPass2 = await workersAIChat(messagesPass2, 2048, temperature);
+const think2   = extractTag(rawPass2, TOKENS.THINK_START, TOKENS.THINK_END);
+const response = extractTag(rawPass2, TOKENS.RESPONSE_START, TOKENS.RESPONSE_END);
+const toolResultSummary = extractTag(rawPass2, TOKENS.TOOL_RESULT_START, TOKENS.TOOL_RESULT_END);
+
+pass2Result = {
+  pass: 2,
+  think: think2,
+  retrieval_results: retrievalResults,
+  response: response || rawPass2,
+  tool_result_summary: toolResultSummary,
+  raw: rawPass2,
+};
+traceLog.push(pass2Result);
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PASS 3: Store Actions
+// ═══════════════════════════════════════════════════════════════════════════
+const storeContext = `User: \${userMessage}\\nResponse: \${response || ''}\\nRetrieval: \${JSON.stringify(retrievalResults)}`;
+const messagesPass3 = [
+  { role: 'system', content: LATTICE_SYSTEM_PROMPT_PASS3 },
+  { role: 'user',   content: storeContext },
+];
+
+const rawPass3 = await workersAIChat(messagesPass3, 1024, temperature);
+const think3   = extractTag(rawPass3, TOKENS.THINK_START, TOKENS.THINK_END);
+const storeActions = parseStoreActions(extractTag(rawPass3, TOKENS.STORE_START, TOKENS.STORE_END));
+
+// Execute store actions
+const storeResults = await latticeStore(env, storeActions);
+
+pass3Result = {
+  pass: 3,
+  think: think3,
+  store_actions: storeActions,
+  store_results: storeResults,
+  raw: rawPass3,
+};
+traceLog.push(pass3Result);
+
+// Assemble final result
+const finalResult = {
+  response:       response || rawPass2,
+  think_blocks:   [think1, think2, think3].filter(Boolean),
+  tool_calls:     toolCalls,
+  retrieval:      retrievalResults,
+  store_actions:  storeActions,
+  trace:          traceLog,
+  model:          MODEL_NAME,
+  cached:         false,
+};
+
+// Cache the result
+await setCachedResponse(env, cacheKey, finalResult);
+
+// Persist trace to D1 for training data collection
+try {
+  await persistTrace(env, userMessage, finalResult);
+} catch (persistErr) {
+  await logError(env, 'persistTrace', persistErr, { userMessage: userMessage.slice(0, 200) });
+}
+
+return finalResult;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trace Persistence (for training data)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function persistTrace(env, userMessage, result) {
+const db = env.BCC_LATTICE_META;
+const traceJson = JSON.stringify(result.trace);
+const responseText = result.response;
+
+await db.prepare(`
+  INSERT INTO reasoning_traces
+    (timestamp, user_message, response_text, think_blocks, tool_calls, retrieval_results, store_actions, full_trace, model, source)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+`).bind(
+  new Date().toISOString(),
+  userMessage,
+  responseText,
+  JSON.stringify(result.think_blocks),
+  JSON.stringify(result.tool_calls),
+  JSON.stringify(result.retrieval),
+  JSON.stringify(result.store_actions),
+  traceJson,
+  MODEL_NAME,
+  'inference_worker'
+).run();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Z24 Scorer Integration
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function z24ScoreRoute(env, userMessage, proposedToolCalls) {
+// Query the Z24 scorer via internal binding or fetch
+// The Z24 scorer evaluates routing quality and assigns a score 0-1
+try {
+  const scorerUrl = env.Z24_SCORER_URL || 'http://localhost:8787/score';
+  const response = await fetch(scorerUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message: userMessage,
+      tool_calls: proposedToolCalls,
+    }),
+  });
+
+  if (!response.ok) return { score: 0.5, confidence: 0 };
+  const data = await response.json();
+  return { score: data.score || 0.5, confidence: data.confidence || 0 };
+} catch (err) {
+  await logError(env, 'z24ScoreRoute', err, { userMessage: userMessage.slice(0, 200) });
+  return { score: 0.5, confidence: 0 };
+}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker Event Handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default {
+async fetch(request, env, ctx) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // CORS headers
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  try {
+    // ── Health Check ──────────────────────────────────────────────────
+    if (path === '/health' || path === '/') {
+      return new Response(JSON.stringify({
+        status: 'ok',
+        worker: '24d-reasoning-inference',
+        model: MODEL_NAME,
+        version: '1.0.0',
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ── Inference Endpoint ────────────────────────────────────────────
+    if (path === '/infer' && request.method === 'POST') {
+      const body = await request.json();
+      const { message, temperature, skip_cache } = body;
+
+      if (!message || typeof message !== 'string') {
+        return new Response(JSON.stringify({
+          error: 'Missing or invalid "message" field',
+        }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      const result = await runInference(message, env, {
+        temperature: temperature ?? 0.3,
+        skipCache:   skip_cache ?? false,
+      });
+
+      return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ── Streaming Inference ───────────────────────────────────────────
+    if (path === '/infer/stream' && request.method === 'POST') {
+      const body = await request.json();
+      const { message, temperature } = body;
+
+      const result = await runInference(message, env, { temperature: temperature ?? 0.3 });
+
+      const stream = new ReadableStream({
+        start(controller) {
+          const encoder = new TextEncoder();
+          // Send response chunk
+          controller.enqueue(encoder.encode(`data: \${JSON.stringify({ type: 'response', content: result.response })}\\n\\n`));
+          // Send think blocks
+          for (let i = 0; i < result.think_blocks.length; i++) {
+            controller.enqueue(encoder.encode(`data: \${JSON.stringify({ type: 'think', pass: i + 1, content: result.think_blocks[i] })}\\n\\n`));
+          }
+          // Send done
+          controller.enqueue(encoder.encode('data: [DONE]\\n\\n'));
+          controller.close();
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          ...corsHeaders,
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // ── Trace Query Endpoint ──────────────────────────────────────────
+    if (path === '/traces' && request.method === 'GET') {
+      const db = env.BCC_LATTICE_META;
+      const limit = parseInt(url.searchParams.get('limit') || '50');
+      const offset = parseInt(url.searchParams.get('offset') || '0');
+
+      const { results } = await db.prepare(`
+        SELECT id, timestamp, user_message, response_text, model, source
+        FROM reasoning_traces
+        ORDER BY timestamp DESC
+        LIMIT ?1 OFFSET ?2
+      `).bind(limit, offset).all();
+
+      return new Response(JSON.stringify({ traces: results || [] }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ── 404 ───────────────────────────────────────────────────────────
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+  } catch (err) {
+    // REFLEXION DOCTRINE: Log to auris-logs D1 BEFORE re-throwing
+    await logError(env, 'fetch_handler', err, { path, method: request.method });
+
+    return new Response(JSON.stringify({
+      error: err.message || 'Internal server error',
+      worker: '24d-reasoning-inference',
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+},
+};
+
+--a6ec9ae3bf44c61fd373570cd2efc0a2c6acd684ffbbb3d9342850b3d5c2--

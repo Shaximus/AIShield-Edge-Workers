@@ -1,0 +1,324 @@
+--b561768a21b24b6cba3d6aa441a5cfcdbc420d3d28445ff27cfbd1227ad2
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.js
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Content-Type": "application/json"
+};
+function nowIso() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+__name(nowIso, "nowIso");
+async function logToD1(db, module, severity, message, meta = {}) {
+  try {
+    await db.prepare("INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)").bind(module, severity, message, JSON.stringify(meta), Date.now()).run();
+  } catch {
+  }
+}
+__name(logToD1, "logToD1");
+async function countByModule(db, modulePrefix, opts = {}) {
+  let sql = "SELECT COUNT(*) as c FROM error_log WHERE module LIKE ?";
+  const params = [`${modulePrefix}%`];
+  if (opts.severity) {
+    sql += " AND severity = ?";
+    params.push(opts.severity);
+  }
+  if (opts.sinceMs) {
+    sql += " AND timestamp >= ?";
+    params.push(opts.sinceMs);
+  }
+  const result = await db.prepare(sql).bind(...params).first();
+  return result?.c || 0;
+}
+__name(countByModule, "countByModule");
+async function getRecentByModule(db, modulePrefix, opts = {}) {
+  let sql = "SELECT * FROM error_log WHERE module LIKE ?";
+  const params = [`${modulePrefix}%`];
+  if (opts.severity) {
+    sql += " AND severity = ?";
+    params.push(opts.severity);
+  }
+  if (opts.sinceMs) {
+    sql += " AND timestamp >= ?";
+    params.push(opts.sinceMs);
+  }
+  sql += " ORDER BY timestamp DESC";
+  if (opts.limit) {
+    sql += " LIMIT ?";
+    params.push(opts.limit);
+  }
+  const result = await db.prepare(sql).bind(...params).all();
+  return result.results || [];
+}
+__name(getRecentByModule, "getRecentByModule");
+async function getStatsAggregation(db, timeWindowMs) {
+  const sinceMs = timeWindowMs ? Date.now() - timeWindowMs : void 0;
+  const claudeTotal = await countByModule(db, "clade-", { sinceMs });
+  const geminiTotal = await countByModule(db, "gemini-", { sinceMs });
+  const kimiTotal = await countByModule(db, "kimi-", { sinceMs });
+  const claudeSwaps = await countByModule(db, "clade-", { severity: "WARN", sinceMs });
+  const geminiSwaps = await countByModule(db, "gemini-", { severity: "WARN", sinceMs });
+  const kimiSwaps = await countByModule(db, "kimi-", { severity: "WARN", sinceMs });
+  const claudeCritical = await countByModule(db, "clade-", { severity: "ERROR", sinceMs });
+  const geminiCritical = await countByModule(db, "gemini-", { severity: "ERROR", sinceMs });
+  const kimiCritical = await countByModule(db, "kimi-", { severity: "ERROR", sinceMs });
+  const totalErrors = await countByModule(db, "", { severity: "ERROR", sinceMs });
+  const totalWarnings = await countByModule(db, "", { severity: "WARN", sinceMs });
+  return {
+    since: sinceMs ? new Date(sinceMs).toISOString() : "all-time",
+    platforms: {
+      claude: {
+        total: claudeTotal,
+        swapsDetected: claudeSwaps,
+        critical: claudeCritical
+      },
+      gemini: {
+        total: geminiTotal,
+        swapsDetected: geminiSwaps,
+        critical: geminiCritical
+      },
+      kimi: {
+        total: kimiTotal,
+        swapsDetected: kimiSwaps,
+        critical: kimiCritical
+      }
+    },
+    totals: {
+      allAnalyses: claudeTotal + geminiTotal + kimiTotal,
+      allSwaps: claudeSwaps + geminiSwaps + kimiSwaps,
+      allCritical: claudeCritical + geminiCritical + kimiCritical,
+      allErrors: totalErrors,
+      allWarnings: totalWarnings
+    },
+    generatedAt: nowIso()
+  };
+}
+__name(getStatsAggregation, "getStatsAggregation");
+var index_default = {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const method = request.method;
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    if (url.pathname === "/health" && method === "GET") {
+      try {
+        const result = await env.AURIS_LOGS.prepare("SELECT COUNT(*) as c FROM error_log").first();
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            platform: "dashboard",
+            d1Connected: true,
+            totalRows: result?.c || 0,
+            timestamp: nowIso()
+          }),
+          { status: 200, headers: CORS_HEADERS }
+        );
+      } catch (e) {
+        await logToD1(env.AURIS_LOGS, "dashboard", "ERROR", `Health check D1 failure: ${e.message}`, {});
+        return new Response(
+          JSON.stringify({
+            status: "degraded",
+            platform: "dashboard",
+            d1Connected: false,
+            error: e.message,
+            timestamp: nowIso()
+          }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    if (url.pathname === "/stats" && method === "GET") {
+      try {
+        const hoursParam = url.searchParams.get("hours");
+        const timeWindowMs = hoursParam ? parseInt(hoursParam, 10) * 3600 * 1e3 : void 0;
+        const stats = await getStatsAggregation(env.AURIS_LOGS, timeWindowMs);
+        let kvAnalysisCount = 0;
+        try {
+          const keys = await env.BCC_CACHE.list({ prefix: "network_av:" });
+          kvAnalysisCount = keys.keys.length;
+        } catch (kvErr) {
+          await logToD1(env.AURIS_LOGS, "dashboard", "WARN", `KV list failed: ${kvErr.message}`, {});
+        }
+        stats.kvCacheSize = kvAnalysisCount;
+        await logToD1(env.AURIS_LOGS, "dashboard", "INFO", "Stats queried", {
+          timeWindow: hoursParam || "all",
+          kvCacheSize: kvAnalysisCount
+        });
+        return new Response(JSON.stringify(stats), { status: 200, headers: CORS_HEADERS });
+      } catch (e) {
+        await env.AURIS_LOGS.prepare(
+          "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+        ).bind("dashboard", "ERROR", e.message, e.stack || "", Date.now()).run();
+        return new Response(
+          JSON.stringify({ error: "Stats query failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    if (url.pathname === "/alerts" && method === "GET") {
+      try {
+        const limitParam = url.searchParams.get("limit") || "50";
+        const limit = Math.min(parseInt(limitParam, 10), 200);
+        const hoursParam = url.searchParams.get("hours");
+        const sinceMs = hoursParam ? Date.now() - parseInt(hoursParam, 10) * 3600 * 1e3 : void 0;
+        const severity = url.searchParams.get("severity") || void 0;
+        const alerts = [];
+        for (const prefix of ["clade-", "gemini-", "kimi-"]) {
+          const rows = await getRecentByModule(env.AURIS_LOGS, prefix, { severity, sinceMs, limit });
+          for (const row of rows) {
+            let meta = {};
+            try {
+              meta = JSON.parse(row.stack || "{}");
+            } catch {
+              meta = { raw: row.stack };
+            }
+            alerts.push({
+              id: row.id,
+              module: row.module,
+              severity: row.severity,
+              message: row.message,
+              timestamp: row.timestamp,
+              meta
+            });
+          }
+        }
+        alerts.sort((a, b) => b.timestamp - a.timestamp);
+        const limited = alerts.slice(0, limit);
+        await logToD1(env.AURIS_LOGS, "dashboard", "INFO", "Alerts queried", {
+          totalAlerts: alerts.length,
+          limit,
+          timeWindow: hoursParam || "all",
+          severity: severity || "all"
+        });
+        return new Response(
+          JSON.stringify({
+            total: alerts.length,
+            returned: limited.length,
+            alerts: limited,
+            generatedAt: nowIso()
+          }),
+          { status: 200, headers: CORS_HEADERS }
+        );
+      } catch (e) {
+        await env.AURIS_LOGS.prepare(
+          "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+        ).bind("dashboard", "ERROR", e.message, e.stack || "", Date.now()).run();
+        return new Response(
+          JSON.stringify({ error: "Alerts query failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    if (url.pathname === "/swaps" && method === "GET") {
+      try {
+        const limitParam = url.searchParams.get("limit") || "50";
+        const limit = Math.min(parseInt(limitParam, 10), 200);
+        const hoursParam = url.searchParams.get("hours");
+        const sinceMs = hoursParam ? Date.now() - parseInt(hoursParam, 10) * 3600 * 1e3 : void 0;
+        const platform = url.searchParams.get("platform");
+        const swaps = [];
+        const prefixes = platform ? [`${platform === "claude" ? "clade" : platform}-`] : ["clade-", "gemini-", "kimi-"];
+        for (const prefix of prefixes) {
+          const rows = await getRecentByModule(env.AURIS_LOGS, prefix, { severity: "WARN", sinceMs, limit: limit * 3 });
+          for (const row of rows) {
+            let meta = {};
+            try {
+              meta = JSON.parse(row.stack || "{}");
+            } catch {
+              meta = { raw: row.stack };
+            }
+            const message = row.message || "";
+            const hasSwapIndicators = message.includes("swapped") || message.includes("swap") || message.includes("downgrade") || meta.modelSwapped === true || meta.blocked === true;
+            if (hasSwapIndicators) {
+              swaps.push({
+                id: row.id,
+                platform: prefix.replace("-", ""),
+                module: row.module,
+                severity: row.severity,
+                message: row.message,
+                timestamp: row.timestamp,
+                meta
+              });
+            }
+          }
+        }
+        swaps.sort((a, b) => b.timestamp - a.timestamp);
+        const limited = swaps.slice(0, limit);
+        const summary = {};
+        for (const s of swaps) {
+          const p = s.platform || "unknown";
+          summary[p] = (summary[p] || 0) + 1;
+        }
+        await logToD1(env.AURIS_LOGS, "dashboard", "INFO", "Swaps queried", {
+          totalSwaps: swaps.length,
+          limit,
+          timeWindow: hoursParam || "all",
+          platform: platform || "all",
+          byPlatform: summary
+        });
+        return new Response(
+          JSON.stringify({
+            total: swaps.length,
+            returned: limited.length,
+            summary: {
+              byPlatform: summary
+            },
+            swaps: limited,
+            generatedAt: nowIso()
+          }),
+          { status: 200, headers: CORS_HEADERS }
+        );
+      } catch (e) {
+        await env.AURIS_LOGS.prepare(
+          "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+        ).bind("dashboard", "ERROR", e.message, e.stack || "", Date.now()).run();
+        return new Response(
+          JSON.stringify({ error: "Swaps query failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    if (url.pathname === "/kv-cache" && method === "GET") {
+      try {
+        const prefix = url.searchParams.get("prefix") || "network_av:";
+        const keys = await env.BCC_CACHE.list({ prefix });
+        return new Response(
+          JSON.stringify({
+            prefix,
+            count: keys.keys.length,
+            keys: keys.keys.map((k) => k.name),
+            generatedAt: nowIso()
+          }),
+          { status: 200, headers: CORS_HEADERS }
+        );
+      } catch (e) {
+        await logToD1(env.AURIS_LOGS, "dashboard", "ERROR", `KV cache list failed: ${e.message}`, {});
+        return new Response(
+          JSON.stringify({ error: "KV list failed", message: e.message }),
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+    return new Response(
+      JSON.stringify({
+        error: "Not found",
+        path: url.pathname,
+        valid: ["/stats", "/alerts", "/swaps", "/health", "/kv-cache"]
+      }),
+      { status: 404, headers: CORS_HEADERS }
+    );
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--b561768a21b24b6cba3d6aa441a5cfcdbc420d3d28445ff27cfbd1227ad2--

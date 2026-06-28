@@ -1,0 +1,635 @@
+--cfe2db7014feb431453a97ba394b51b0a76c59a2a239f2f904280446f73c
+Content-Disposition: form-data; name="build-orchestrator.js"
+
+/**
+ * build-orchestrator
+ * Validates Android projects before build. 20-check validation + auto-fix.
+ * Endpoints:
+ *   GET  /checklist         - Return validation checklist
+ *   POST /validate          - Accept project zip, run 20 validation checks
+ *   POST /fix               - Accept project zip, return fixed version
+ */
+
+// CORS headers
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+
+// Complete validation checklist (20 checks)
+const CHECKS = [
+  { id: "gradlew-exists", name: "gradlew exists and is real", category: "wrapper",
+    fixable: true, fixType: "generate" },
+  { id: "wrapper-jar", name: "gradle-wrapper.jar exists and non-empty", category: "wrapper",
+    fixable: false },
+  { id: "wrapper-props", name: "gradle-wrapper.properties exists", category: "wrapper",
+    fixable: true, fixType: "generate" },
+  { id: "settings-gradle", name: "settings.gradle exists", category: "build",
+    fixable: true, fixType: "generate" },
+  { id: "project-build-gradle", name: "build.gradle (project) exists", category: "build",
+    fixable: true, fixType: "generate" },
+  { id: "app-build-gradle", name: "app/build.gradle exists", category: "build",
+    fixable: true, fixType: "generate" },
+  { id: "manifest-exists", name: "AndroidManifest.xml exists", category: "manifest",
+    fixable: true, fixType: "generate" },
+  { id: "manifest-internet", name: "AndroidManifest.xml has INTERNET permission", category: "manifest",
+    fixable: true, fixType: "patch" },
+  { id: "manifest-net-state", name: "AndroidManifest.xml has ACCESS_NETWORK_STATE", category: "manifest",
+    fixable: true, fixType: "patch" },
+  { id: "mainactivity", name: "MainActivity.java exists", category: "source",
+    fixable: false },
+  { id: "shieldfragment", name: "ShieldFragment.java exists", category: "source",
+    fixable: false },
+  { id: "platformfragment", name: "PlatformFragment.java exists", category: "source",
+    fixable: false },
+  { id: "infrafragment", name: "InfraFragment.java exists", category: "source",
+    fixable: false },
+  { id: "guardfragment", name: "GuardFragment.java exists", category: "source",
+    fixable: false },
+  { id: "licensefragment", name: "LicenseKeyFragment.java exists", category: "source",
+    fixable: false },
+  { id: "adminfragment", name: "ControlPanelFragment.java exists", category: "source",
+    fixable: false },
+  { id: "apiclient", name: "ApiClient.java exists", category: "source",
+    fixable: false },
+  { id: "strings-xml", name: "res/values/strings.xml exists", category: "resources",
+    fixable: true, fixType: "generate" },
+  { id: "colors-xml", name: "res/values/colors.xml exists", category: "resources",
+    fixable: true, fixType: "generate" },
+  { id: "launcher-icons", name: "launcher icons are non-empty", category: "resources",
+    fixable: true, fixType: "generate" }
+];
+
+// File templates for auto-fix
+const FIX_TEMPLATES = {
+  "settings.gradle": `pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "ReflexionShield"
+include ':app'
+`,
+  "build.gradle": `buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.1.0'
+    }
+}
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+`,
+  "app/build.gradle": `plugins {
+    id 'com.android.application'
+}
+android {
+    namespace 'com.reflexion.shield'
+    compileSdk 34
+    defaultConfig {
+        applicationId "com.reflexion.shield"
+        minSdk 26
+        targetSdk 34
+        versionCode 300
+        versionName "3.0.0"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            debuggable true
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    lintOptions {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+}
+`,
+  "gradle/wrapper/gradle-wrapper.properties": `distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-8.0-bin.zip
+networkTimeout=10000
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+`,
+  "app/src/main/res/values/strings.xml": `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Reflexion Shield</string>
+    <string name="tab_shield">Shield</string>
+    <string name="tab_platform">Platform</string>
+    <string name="tab_infra">Infra</string>
+    <string name="tab_guard">Guard</string>
+    <string name="tab_settings">Settings</string>
+</resources>
+`,
+  "app/src/main/res/values/colors.xml": `<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg_dark">#020617</color>
+    <color name="card_dark">#0f172a</color>
+    <color name="accent_cyan">#06b6d4</color>
+    <color name="text_primary">#f8fafc</color>
+    <color name="text_secondary">#64748b</color>
+</resources>
+`,
+  "AndroidManifest.xml": `<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.reflexion.shield"
+    android:versionCode="300"
+    android:versionName="3.0.0">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <application
+        android:label="@string/app_name"
+        android:theme="@style/Theme.Reflexion"
+        android:allowBackup="false">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+`
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS });
+    }
+
+    try {
+      // --- GET /checklist ---
+      if ((path === "/build/checklist" || path === "/checklist") && request.method === "GET") {
+        return jsonResponse({
+          checklist: CHECKS,
+          summary: {
+            total: CHECKS.length,
+            fixable: CHECKS.filter(c => c.fixable).length,
+            notFixable: CHECKS.filter(c => !c.fixable).length
+          }
+        });
+      }
+
+      // --- POST /validate ---
+      if ((path === "/build/validate" || path === "/validate") && request.method === "POST") {
+        return await handleValidate(request);
+      }
+
+      // --- POST /fix ---
+      if ((path === "/build/fix" || path === "/fix") && request.method === "POST") {
+        return await handleFix(request);
+      }
+
+      // --- Default / health ---
+      if (path === "/" || path === "/build" || path === "/build/") {
+        return jsonResponse({
+          service: "build-orchestrator",
+          version: "3.0.0",
+          endpoints: [
+            { method: "GET", path: "/checklist", desc: "Validation checklist" },
+            { method: "POST", path: "/validate", desc: "Validate project zip (20 checks)" },
+            { method: "POST", path: "/fix", desc: "Auto-fix project zip" }
+          ]
+        });
+      }
+
+      return jsonResponse({ error: "Not found" }, 404);
+
+    } catch (e) {
+      return jsonResponse({ error: e.message, stack: e.stack }, 500);
+    }
+  }
+};
+
+// ──────────────── Handlers ────────────────
+
+async function handleValidate(request) {
+  const zipBytes = await extractZipBytes(request);
+  if (!zipBytes) {
+    return jsonResponse({ error: "Send multipart/form-data with 'file' field, or raw zip bytes" }, 400);
+  }
+
+  const zip = parseZip(zipBytes);
+  const results = [];
+  let passed = 0;
+
+  for (const check of CHECKS) {
+    const result = await runCheck(check, zip);
+    results.push(result);
+    if (result.status === "pass") passed++;
+  }
+
+  return jsonResponse({
+    valid: passed === CHECKS.length,
+    summary: { passed, failed: CHECKS.length - passed, total: CHECKS.length },
+    checks: results
+  });
+}
+
+async function handleFix(request) {
+  const zipBytes = await extractZipBytes(request);
+  if (!zipBytes) {
+    return jsonResponse({ error: "Send multipart/form-data with 'file' field, or raw zip bytes" }, 400);
+  }
+
+  const zip = parseZip(zipBytes);
+  const results = [];
+  const applied = [];
+  let passed = 0;
+
+  // First run checks
+  for (const check of CHECKS) {
+    const result = runCheck(check, zip);
+    results.push(result);
+    if (result.status === "pass") {
+      passed++;
+    } else if (check.fixable) {
+      applied.push(check.id);
+    }
+  }
+
+  // Build fixed zip
+  const fixedZip = await buildFixedZip(zip, results);
+
+  return new Response(fixedZip, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="reflexion-shield-fixed.zip"`,
+      ...CORS
+    }
+  });
+}
+
+// ──────────────── Validation Logic ────────────────
+
+async function runCheck(check, zip) {
+  try {
+    const testFn = CHECK_TESTS[check.id];
+    const ok = await testFn(zip);
+    return {
+      id: check.id,
+      check: check.name,
+      status: ok ? "pass" : "fail",
+      category: check.category,
+      ...(ok ? {} : { fix: check.fixable ? getFixDescription(check.id) : "Manual fix required" })
+    };
+  } catch (e) {
+    return {
+      id: check.id,
+      check: check.name,
+      status: "fail",
+      error: e.message,
+      fix: check.fixable ? getFixDescription(check.id) : "Manual fix required"
+    };
+  }
+}
+
+const CHECK_TESTS = {
+  "gradlew-exists": (z) => z.has("gradlew") || z.has("ReflexionShield/gradlew"),
+  "wrapper-jar": (z) => {
+    const f = z.read("gradle/wrapper/gradle-wrapper.jar") || z.read("ReflexionShield/gradle/wrapper/gradle-wrapper.jar");
+    return f && f.length > 1000;
+  },
+  "wrapper-props": (z) => z.has("gradle/wrapper/gradle-wrapper.properties") || z.has("ReflexionShield/gradle/wrapper/gradle-wrapper.properties"),
+  "settings-gradle": (z) => z.has("settings.gradle") || z.has("ReflexionShield/settings.gradle"),
+  "project-build-gradle": (z) => z.has("build.gradle") || z.has("ReflexionShield/build.gradle"),
+  "app-build-gradle": (z) => z.has("app/build.gradle") || z.has("ReflexionShield/app/build.gradle"),
+  "manifest-exists": (z) => z.has("app/src/main/AndroidManifest.xml") || z.has("ReflexionShield/app/src/main/AndroidManifest.xml"),
+  "manifest-internet": async (z) => {
+    const c = await z.text("app/src/main/AndroidManifest.xml") || await z.text("ReflexionShield/app/src/main/AndroidManifest.xml") || "";
+    return c.includes('INTERNET');
+  },
+  "manifest-net-state": async (z) => {
+    const c = await z.text("app/src/main/AndroidManifest.xml") || await z.text("ReflexionShield/app/src/main/AndroidManifest.xml") || "";
+    return c.includes('ACCESS_NETWORK_STATE');
+  },
+  "mainactivity": (z) => z.has("app/src/main/java/com/reflexion/shield/MainActivity.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/MainActivity.java"),
+  "shieldfragment": (z) => z.has("app/src/main/java/com/reflexion/shield/ShieldFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/ShieldFragment.java"),
+  "platformfragment": (z) => z.has("app/src/main/java/com/reflexion/shield/PlatformFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/PlatformFragment.java"),
+  "infrafragment": (z) => z.has("app/src/main/java/com/reflexion/shield/InfraFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/InfraFragment.java"),
+  "guardfragment": (z) => z.has("app/src/main/java/com/reflexion/shield/GuardFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/GuardFragment.java"),
+  "licensefragment": (z) => z.has("app/src/main/java/com/reflexion/shield/LicenseKeyFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/LicenseKeyFragment.java"),
+  "adminfragment": (z) => z.has("app/src/main/java/com/reflexion/shield/ControlPanelFragment.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/ControlPanelFragment.java"),
+  "apiclient": (z) => z.has("app/src/main/java/com/reflexion/shield/ApiClient.java") || z.has("ReflexionShield/app/src/main/java/com/reflexion/shield/ApiClient.java"),
+  "strings-xml": (z) => z.has("app/src/main/res/values/strings.xml") || z.has("ReflexionShield/app/src/main/res/values/strings.xml"),
+  "colors-xml": (z) => z.has("app/src/main/res/values/colors.xml") || z.has("ReflexionShield/app/src/main/res/values/colors.xml"),
+  "launcher-icons": (z) => {
+    const f = z.read("app/src/main/res/mipmap-hdpi/ic_launcher.png") || z.read("ReflexionShield/app/src/main/res/mipmap-hdpi/ic_launcher.png");
+    return f && f.length > 10;
+  }
+};
+
+function getFixDescription(id) {
+  const fixes = {
+    "gradlew-exists": "Generate gradlew wrapper script",
+    "wrapper-props": "Create gradle-wrapper.properties",
+    "settings-gradle": "Create settings.gradle",
+    "project-build-gradle": "Create project build.gradle",
+    "app-build-gradle": "Create app/build.gradle",
+    "manifest-exists": "Generate AndroidManifest.xml",
+    "manifest-internet": "Add INTERNET permission",
+    "manifest-net-state": "Add ACCESS_NETWORK_STATE permission",
+    "strings-xml": "Create strings.xml",
+    "colors-xml": "Create colors.xml",
+    "launcher-icons": "Generate placeholder icons"
+  };
+  return fixes[id] || "Manual fix required";
+}
+
+// ──────────────── ZIP Helpers ────────────────
+
+async function extractZipBytes(request) {
+  const ct = request.headers.get("content-type") || "";
+  if (ct.includes("multipart/form-data")) {
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!file) return null;
+    return new Uint8Array(await file.arrayBuffer());
+  }
+  if (ct.includes("application/octet-stream") || ct.includes("application/zip")) {
+    return new Uint8Array(await request.arrayBuffer());
+  }
+  return null;
+}
+
+function parseZip(bytes) {
+  const files = new Map();
+  const decoder = new TextDecoder();
+
+  for (let i = 0; i < bytes.length - 4; i++) {
+    if (bytes[i] === 0x50 && bytes[i + 1] === 0x4B && bytes[i + 2] === 0x03 && bytes[i + 3] === 0x04) {
+      try {
+        const fnLen = bytes[i + 26] | (bytes[i + 27] << 8);
+        const efLen = bytes[i + 28] | (bytes[i + 29] << 8);
+        const compSize = (bytes[i + 18] | (bytes[i + 19] << 8) | (bytes[i + 20] << 16) | (bytes[i + 21] << 24)) >>> 0;
+        const compMethod = bytes[i + 8] | (bytes[i + 9] << 8);
+        const fnStart = i + 30;
+        const fnEnd = fnStart + fnLen;
+        const dataStart = fnEnd + efLen;
+        if (fnEnd > bytes.length || dataStart + compSize > bytes.length) continue;
+        const filename = decoder.decode(bytes.subarray(fnStart, fnEnd));
+        const data = bytes.subarray(dataStart, dataStart + compSize);
+        files.set(filename, { data, compMethod, compSize });
+      } catch (e) {}
+    }
+  }
+
+  return {
+    has: (name) => {
+      for (const key of files.keys()) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) return true;
+      }
+      return false;
+    },
+    read: (name) => {
+      for (const [key, val] of files) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) {
+          return val.data;
+        }
+      }
+      return null;
+    },
+    text: async (name) => {
+      for (const [key, val] of files) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) {
+          if (val.compMethod === 8) {
+            return decoder.decode(await inflateAsync(val.data));
+          }
+          return decoder.decode(val.data);
+        }
+      }
+      return null;
+    },
+    files: () => Array.from(files.keys()),
+    _raw: files
+  };
+}
+
+async function inflateAsync(data) {
+  const ds = new DecompressionStream("deflate-raw");
+  const w = ds.writable.getWriter();
+  w.write(data);
+  w.close();
+  const chunks = [];
+  const reader = ds.readable.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const total = chunks.reduce((a, c) => a + c.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
+  return result;
+}
+
+// ──────────────── Auto-Fix: Build Fixed ZIP ────────────────
+
+async function buildFixedZip(zip, results) {
+  // For the /fix endpoint, we return a zip with all fixable files added.
+  // Since JSZIP isn't available in Workers, we return a metadata response
+  // telling the client what fixes to apply. Actually, let's use a pure-JS
+  // approach to create a valid zip.
+
+  // Build a minimal valid ZIP from the original + fixes
+  const fixed = new FixedZipBuilder();
+
+  // Copy existing files
+  for (const [name, val] of zip._raw) {
+    fixed.addFile(name, val.data, false);
+  }
+
+  // Add missing fixable files
+  for (const check of results) {
+    if (check.status === "fail") {
+      const template = FIX_TEMPLATES[check.id === "gradlew-exists" ? null :
+        check.id === "wrapper-props" ? "gradle/wrapper/gradle-wrapper.properties" :
+        check.id === "settings-gradle" ? "settings.gradle" :
+        check.id === "project-build-gradle" ? "build.gradle" :
+        check.id === "app-build-gradle" ? "app/build.gradle" :
+        check.id === "manifest-exists" ? "AndroidManifest.xml" :
+        check.id === "strings-xml" ? "app/src/main/res/values/strings.xml" :
+        check.id === "colors-xml" ? "app/src/main/res/values/colors.xml" : null];
+
+      if (template) {
+        const encoder = new TextEncoder();
+        const path = check.id === "manifest-exists" ? "app/src/main/AndroidManifest.xml" :
+          check.id === "strings-xml" ? "app/src/main/res/values/strings.xml" :
+          check.id === "colors-xml" ? "app/src/main/res/values/colors.xml" : null;
+        if (path) {
+          fixed.addFile(path, encoder.encode(template), false);
+        }
+      }
+    }
+  }
+
+  // Always add AndroidManifest if missing (with both permissions)
+  if (!zip.has("app/src/main/AndroidManifest.xml")) {
+    const encoder = new TextEncoder();
+    fixed.addFile("app/src/main/AndroidManifest.xml", encoder.encode(FIX_TEMPLATES["AndroidManifest.xml"]), false);
+  }
+
+  return fixed.finish();
+}
+
+// ──────────────── Minimal In-Memory Zip Builder ────────────────
+
+class FixedZipBuilder {
+  constructor() {
+    this.files = new Map();
+  }
+
+  addFile(name, data, compress) {
+    this.files.set(name, { data, compress });
+  }
+
+  finish() {
+    const encoder = new TextEncoder();
+    const parts = [];
+    let offset = 0;
+    const cdEntries = [];
+
+    for (const [name, { data, compress }] of this.files) {
+      const nameBytes = encoder.encode(name);
+      const compressed = data; // stored (no compression for simplicity)
+      const size = compressed.length;
+      const crc = crc32(compressed);
+
+      // Local file header
+      const lfh = new Uint8Array(30 + nameBytes.length);
+      const v = new DataView(lfh.buffer);
+      v.setUint32(0, 0x04034B50, true); // sig
+      v.setUint16(4, 20, true); // version
+      v.setUint16(6, 0, true); // flags
+      v.setUint16(8, 0, true); // store
+      v.setUint16(10, 0, true); // time
+      v.setUint16(12, 0, true); // date
+      v.setUint32(14, crc, true);
+      v.setUint32(18, size, true); // comp size
+      v.setUint32(22, size, true); // uncomp size
+      v.setUint16(26, nameBytes.length, true);
+      v.setUint16(28, 0, true); // extra len
+      lfh.set(nameBytes, 30);
+      parts.push(lfh);
+      parts.push(compressed);
+
+      // CD entry
+      const cd = new Uint8Array(46 + nameBytes.length);
+      const cdv = new DataView(cd.buffer);
+      cdv.setUint32(0, 0x02014B50, true); // CD sig
+      cdv.setUint16(4, 20, true); // version made by
+      cdv.setUint16(6, 20, true); // version needed
+      cdv.setUint16(8, 0, true); // flags
+      cdv.setUint16(10, 0, true); // method
+      cdv.setUint16(12, 0, true); // time
+      cdv.setUint16(14, 0, true); // date
+      cdv.setUint32(16, crc, true);
+      cdv.setUint32(20, size, true);
+      cdv.setUint32(24, size, true);
+      cdv.setUint16(28, nameBytes.length, true);
+      cdv.setUint16(30, 0, true); // extra
+      cdv.setUint16(32, 0, true); // comment
+      cdv.setUint16(34, 0, true); // disk
+      cdv.setUint16(36, 0, true); // int attrs
+      cdv.setUint32(38, 0, true); // ext attrs
+      cdv.setUint32(42, offset, true); // local header offset
+      cd.set(nameBytes, 46);
+      cdEntries.push(cd);
+
+      offset += lfh.length + size;
+    }
+
+    // Concatenate
+    const totalSize = parts.reduce((a, p) => a + p.length, 0) +
+      cdEntries.reduce((a, c) => a + c.length, 0) + 22;
+    const result = new Uint8Array(totalSize);
+    let pos = 0;
+    for (const p of parts) {
+      result.set(p, pos);
+      pos += p.length;
+    }
+    const cdStart = pos;
+    for (const c of cdEntries) {
+      result.set(c, pos);
+      pos += c.length;
+    }
+
+    // EOCD
+    const eocd = new DataView(result.buffer, pos, 22);
+    eocd.setUint32(0, 0x06054B50, true);
+    eocd.setUint16(4, 0, true); // disk
+    eocd.setUint16(6, 0, true); // disk with CD
+    eocd.setUint16(8, this.files.size, true); // CD entries on disk
+    eocd.setUint16(10, this.files.size, true); // total CD entries
+    eocd.setUint32(12, cdEntries.reduce((a, c) => a + c.length, 0), true); // CD size
+    eocd.setUint32(16, cdStart, true); // CD offset
+    eocd.setUint16(20, 0, true); // comment len
+
+    return result;
+  }
+}
+
+// Simple CRC32 implementation
+function crc32(data) {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c;
+  }
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < data.length; i++) {
+    crc = table[(crc ^ data[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// ──────────────── Response Helpers ────────────────
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json", ...CORS }
+  });
+}
+
+--cfe2db7014feb431453a97ba394b51b0a76c59a2a239f2f904280446f73c--

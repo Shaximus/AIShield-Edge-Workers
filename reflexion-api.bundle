@@ -1,0 +1,80 @@
+--987667c2bfa2a1aeec162d8e26d8203e4f17c50727dbdec727b4728bd13c
+Content-Disposition: form-data; name="index.js"
+
+export default {
+  async fetch(request, env, executionCtx) {
+    debugLog('worker', 'fetch', 'DEBUG', 'ENTER', { url: request.url, method: request.method });
+    const url = new URL(request.url);
+    const sessionId = `sess_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
+    
+    // CORS
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { status: 204, headers: corsHeaders(request) });
+    }
+    
+    // Health check
+    if (url.pathname === '/health') {
+      return new Response(JSON.stringify({ status: 'ok', version: '2026-05-07', timestamp: Date.now() }), {
+        status: 200, headers: { 'Content-Type': 'application/json', ...corsHeaders(request) }
+      });
+    }
+    
+    // GraphQL endpoint
+    if (url.pathname === '/graphql' && request.method === 'POST') {
+      try {
+        const ct = request.headers.get('Content-Type') || '';
+        if (!ct.includes('application/json')) {
+          return new Response(JSON.stringify({ errors: [{ message: 'Content-Type must be application/json' }] }), {
+            status: 415, headers: { ...corsHeaders(request), 'Content-Type': 'application/json' }
+          });
+        }
+        
+        // Rate limiting
+        const clientId = request.headers.get('X-Client-ID') || 'anonymous';
+        const rl = await checkRateLimit(env, clientId, 'graphql', 60);
+        if (!rl.allowed) {
+          return new Response(JSON.stringify({ errors: [{ message: 'Rate limit exceeded' }] }), {
+            status: 429, headers: { ...corsHeaders(request), 'Content-Type': 'application/json' }
+          });
+        }
+        
+        // Parse body
+        let body;
+        try { body = await request.json(); }
+        catch (e) { return new Response(JSON.stringify({ errors: [{ message: 'Invalid JSON' }] }), { status: 400, headers: { ...corsHeaders(request), 'Content-Type': 'application/json' } }); }
+        
+        // Auth
+        let auth = null;
+        const authHeader = request.headers.get('Authorization') || '';
+        if (authHeader.startsWith('Bearer ')) {
+          try { auth = await verifyJWT(authHeader.slice(7), env.JWT_SIGNING_KEY); }
+          catch (e) { debugLog('handler', 'fetch', 'WARNING', 'JWT invalid', { error: e.message }); }
+        }
+        
+        const context = { env, auth, sessionId, sourceIp: request.headers.get('CF-Connecting-IP') || 'unknown' };
+        
+        // Handle batch queries
+        let result;
+        if (Array.isArray(body)) {
+          result = await Promise.all(body.map(q => executeQuery(q.query, q.variables, context).catch(e => ({ errors: [{ message: e.message }] }))));
+        } else {
+          result = await executeQuery(body.query, body.variables, context);
+        }
+        
+        return new Response(JSON.stringify(result), {
+          status: 200, headers: { ...corsHeaders(request), 'Content-Type': 'application/json', 'X-RateLimit-Remaining': String(rl.remaining) }
+        });
+      } catch (e) {
+        await logError(env, 'handler', 'graphql', e, 'ERROR', {}, sessionId);
+        return new Response(JSON.stringify({ errors: [{ message: e.message, extensions: { code: e.message?.split(':')[0] || 'INTERNAL_ERROR' } }] }), {
+          status: 500, headers: { ...corsHeaders(request), 'Content-Type': 'application/json' }
+        });
+      }
+    }
+    
+    return new Response(JSON.stringify({ error: 'Not found', path: url.pathname }), {
+      status: 404, headers: { 'Content-Type': 'application/json', ...corsHeaders(request) }
+    });
+  }
+};
+--987667c2bfa2a1aeec162d8e26d8203e4f17c50727dbdec727b4728bd13c--

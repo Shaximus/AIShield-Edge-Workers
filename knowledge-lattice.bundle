@@ -1,0 +1,1269 @@
+--39f1ea557cebcc7ce02fcfd1688e5e19b20344facb2d2a993e6922ac6546
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * index.js — Main dispatch worker for the Knowledge Lattice
+ *
+ * Endpoint: POST /query
+ * Pipeline:
+ *   1. Validate input
+ *   2. Rate limit per user (60 req/min)
+ *   3. Embed query via Workers AI
+ *   4. Vector search (dense) via Vectorize
+ *   5. Shard dispatch (sparse) via D1
+ *   6. Agent swarm dispatch (100 parallel agents)
+ *   7. Collect all results
+ *   8. Re-rank with precision threshold (0.90)
+ *   9. Return ranked results with metrics
+ *
+ * Debug logging at every stage.
+ * NEVER suppress errors.
+ * ALWAYS use Promise.allSettled where partial tolerance is needed.
+ */
+
+
+// ────────────────────────────────────────────────
+// Constants
+// ────────────────────────────────────────────────
+const MAX_QUERY_LENGTH = 1000;
+const RATE_LIMIT_PER_MINUTE = 60;
+const PRECISION_THRESHOLD = 0.90;
+const GLOBAL_TIMEOUT_MS = 5000;
+const SHARD_TIMEOUT_MS = 2000;
+
+// ────────────────────────────────────────────────
+// Rate limiting (simple in-memory per-user bucket)
+// In production, use KV or Durable Objects for cross-instance consistency.
+// ────────────────────────────────────────────────
+const rateLimitBuckets = new Map(); // userId -> { count, resetAt }
+
+function checkRateLimit(userId) {
+  const now = Date.now();
+  const windowMs = 60_000; // 1 minute
+
+  if (!rateLimitBuckets.has(userId)) {
+    rateLimitBuckets.set(userId, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - 1 };
+  }
+
+  const bucket = rateLimitBuckets.get(userId);
+
+  if (now > bucket.resetAt) {
+    bucket.count = 1;
+    bucket.resetAt = now + windowMs;
+    return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - 1 };
+  }
+
+  if (bucket.count >= RATE_LIMIT_PER_MINUTE) {
+    return { allowed: false, remaining: 0, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+  }
+
+  bucket.count += 1;
+  return { allowed: true, remaining: RATE_LIMIT_PER_MINUTE - bucket.count };
+}
+
+// ────────────────────────────────────────────────
+// Input validation
+// ────────────────────────────────────────────────
+function validateBody(body) {
+  const errors = [];
+
+  if (!body || typeof body !== 'object') {
+    errors.push('Request body must be a JSON object');
+    return { valid: false, errors };
+  }
+
+  const { query, userId, shardIds, topK } = body;
+
+  if (typeof query !== 'string' || query.trim().length === 0) {
+    errors.push('Field "query" is required and must be a non-empty string');
+  } else if (query.length > MAX_QUERY_LENGTH) {
+    errors.push(`Field "query" exceeds max length of ${MAX_QUERY_LENGTH} characters`);
+  }
+
+  if (typeof userId !== 'string' || userId.trim().length === 0) {
+    errors.push('Field "userId" is required and must be a non-empty string');
+  }
+
+  if (shardIds !== undefined) {
+    if (!Array.isArray(shardIds)) {
+      errors.push('Field "shardIds" must be an array of integers 1–16');
+    } else {
+      for (const id of shardIds) {
+        if (!Number.isInteger(id) || id < 1 || id > 16) {
+          errors.push(`Invalid shardId: ${id} (must be integer 1–16)`);
+          break;
+        }
+      }
+    }
+  }
+
+  if (topK !== undefined) {
+    if (!Number.isInteger(topK) || topK < 1 || topK > 100) {
+      errors.push('Field "topK" must be an integer between 1 and 100');
+    }
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// ────────────────────────────────────────────────
+// Response helpers
+// ────────────────────────────────────────────────
+function jsonResponse(data, status = 200, extraHeaders = {}) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...extraHeaders },
+  });
+}
+
+// ────────────────────────────────────────────────
+// Main request handler
+// ────────────────────────────────────────────────
+async function handleQuery(request, env) {
+  const t0 = Date.now();
+  console.log(`[lattice] ENTER method=${request.method} url=${request.url}`);
+
+  try {
+    // ── Parse body ──
+    let body;
+    try {
+      body = await request.json();
+    } catch (parseErr) {
+      console.error(`[lattice] EXIT (400) invalid_json`);
+      return jsonResponse({ error: 'Invalid JSON body' }, 400);
+    }
+
+    // ── Validate ──
+    const validation = validateBody(body);
+    if (!validation.valid) {
+      console.error(`[lattice] EXIT (400) validation_errors=${JSON.stringify(validation.errors)}`);
+      return jsonResponse({ error: 'Validation failed', details: validation.errors }, 400);
+    }
+
+    const { query, userId, shardIds, topK } = body;
+    const k = topK ?? 20;
+    const targetShards = shardIds ?? Array.from({ length: 16 }, (_, i) => i + 1);
+
+    console.log(`[lattice] ENTER query="${query.slice(0, 60)}..." userId=${userId} shards=[${targetShards.join(',')}] topK=${k}`);
+
+    // ── Rate limit ──
+    const rl = checkRateLimit(userId);
+    if (!rl.allowed) {
+      console.warn(`[lattice] EXIT (429) rate_limited userId=${userId}`);
+      return jsonResponse(
+        { error: 'Rate limit exceeded', retryAfter: rl.retryAfter },
+        429,
+        { 'Retry-After': String(rl.retryAfter) }
+      );
+    }
+
+    // ── Step 1: Embed ──
+    console.log(`[lattice] EMBED query="${query.slice(0, 60)}..."`);
+    let embedding;
+    try {
+      embedding = await createEmbedding(env, query);
+    } catch (embedErr) {
+      console.error(`[lattice] EMBED FAILED: ${embedErr.name}: ${embedErr.message}`);
+      return jsonResponse({ error: 'Embedding failed', detail: embedErr.message }, 502);
+    }
+
+    // ── Step 2: Vector search ──
+    console.log(`[lattice] SEARCH vector topK=${k}`);
+    let vectorResults;
+    try {
+      vectorResults = await vectorSearch(env, embedding, k);
+    } catch (vecErr) {
+      console.error(`[lattice] SEARCH FAILED: ${vecErr.name}: ${vecErr.message}`);
+      // Fall through to D1-only — vectorResults stays undefined, handled below
+      vectorResults = [];
+    }
+
+    // ── Step 3 & 5: Parallel shard dispatch + agent swarm ──
+    console.log(`[lattice] DISPATCH shards=${targetShards.length}`);
+
+    const shardPromise = dispatchToShards(env, query, targetShards, embedding);
+    const swarmPromise = dispatchSwarm(env, query, embedding, targetShards);
+
+    // Race both against a global timeout; use allSettled internally
+    const parallelResults = await Promise.allSettled([
+      shardPromise,
+      swarmPromise,
+    ]);
+
+    const shardOutcome = parallelResults[0];
+    const swarmOutcome = parallelResults[1];
+
+    let shardResults = [];
+    if (shardOutcome.status === 'fulfilled') {
+      shardResults = shardOutcome.value;
+    } else {
+      console.error(`[lattice] SHARD_DISPATCH FAILED: ${shardOutcome.reason?.message || String(shardOutcome.reason)}`);
+      // Partial tolerance: continue with empty shard results
+    }
+
+    let swarmResults = [];
+    let swarmMeta = { agentsSucceeded: 0, agentsFailed: 0, totalRaw: 0 };
+    if (swarmOutcome.status === 'fulfilled') {
+      swarmResults = swarmOutcome.value.results;
+      swarmMeta = {
+        agentsSucceeded: swarmOutcome.value.agentsSucceeded,
+        agentsFailed: swarmOutcome.value.agentsFailed,
+        totalRaw: swarmOutcome.value.totalRaw,
+      };
+    } else {
+      console.error(`[lattice] SWARM FAILED: ${swarmOutcome.reason?.message || String(swarmOutcome.reason)}`);
+    }
+
+    // ── Step 6: Collect ──
+    console.log(`[lattice] COLLECT vector=${vectorResults.length} shards=${shardResults.length} swarm=${swarmResults.length}`);
+
+    // Merge shard + swarm results (both are D1-derived, may overlap)
+    const mergedShardResults = [...shardResults, ...swarmResults];
+
+    // ── Step 7: Re-rank ──
+    console.log(`[lattice] RERANK candidates=${mergedShardResults.length} threshold=${PRECISION_THRESHOLD}`);
+    let ranked;
+    try {
+      ranked = await reRankResults(vectorResults, mergedShardResults, query, PRECISION_THRESHOLD);
+    } catch (rankErr) {
+      console.error(`[lattice] RERANK FAILED: ${rankErr.name}: ${rankErr.message}`);
+      return jsonResponse({ error: 'Re-ranking failed', detail: rankErr.message }, 502);
+    }
+
+    // ── Step 8: Assemble response ──
+    const latencyMs = Date.now() - t0;
+    const response = {
+      results: ranked.results.map(r => ({
+        id: r.id,
+        score: Number(r.score.toFixed(4)),
+        vectorScore: Number(r.vectorScore.toFixed(4)),
+        keywordScore: Number(r.keywordScore.toFixed(4)),
+        recencyScore: Number(r.recencyScore.toFixed(4)),
+        metadata: r.metadata,
+        shards: r.shards,
+        snippet: r.snippet,
+        updatedAt: r.updatedAt,
+      })),
+      precision: Number(ranked.precision.toFixed(4)),
+      coverage: Number(ranked.coverage.toFixed(4)),
+      dropped: ranked.dropped,
+      latencyMs,
+      _meta: {
+        vectorResultsIn: vectorResults.length,
+        shardResultsIn: shardResults.length,
+        swarmResultsIn: swarmResults.length,
+        swarmAgentsSucceeded: swarmMeta.agentsSucceeded,
+        swarmAgentsFailed: swarmMeta.agentsFailed,
+        rateLimitRemaining: rl.remaining,
+      },
+    };
+
+    console.log(`[lattice] RERANK precision=${response.precision} coverage=${response.coverage} dropped=${response.dropped}`);
+    console.log(`[lattice] EXIT latency=${latencyMs}ms results=${response.results.length}`);
+
+    return jsonResponse(response, 200, {
+      'X-Lattice-Latency-Ms': String(latencyMs),
+      'X-Lattice-Precision': String(response.precision),
+      'X-RateLimit-Remaining': String(rl.remaining),
+    });
+
+  } catch (unexpected) {
+    const latencyMs = Date.now() - t0;
+    console.error(`[lattice] EXIT (500) UNEXPECTED: ${unexpected?.name || 'Error'}: ${unexpected?.message || String(unexpected)}`);
+    return jsonResponse({
+      error: 'Internal dispatch error',
+      detail: unexpected?.message || String(unexpected),
+      latencyMs,
+    }, 500);
+  }
+}
+
+// ────────────────────────────────────────────────
+// Worker entrypoint
+// ────────────────────────────────────────────────
+export default {
+  async fetch(request, env, executionCtx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // Health check
+    if (path === '/health' || path === '/healthz') {
+      return jsonResponse({ status: 'ok', service: 'knowledge-lattice-dispatch' });
+    }
+
+    // Main query endpoint
+    if (path === '/query' && request.method === 'POST') {
+      return handleQuery(request, env);
+    }
+
+    // 404 for everything else
+    return jsonResponse({ error: 'Not found', path }, 404);
+  },
+};
+
+
+// === embedding.js ===
+/**
+ * embedding.js — Embedding utilities for the Knowledge Lattice Dispatch Worker
+ *
+ * Creates 768-dimensional embeddings via Workers AI @cf/baai/bge-base-en-v1.5.
+ * Normalizes to unit length. Caches in KV for 1 hour (key: emb:<hash>).
+ * NEVER suppresses errors. Always logs entry/exit and key decisions.
+ */
+
+/**
+ * Compute a fast, stable hash of a text string (FNV-1a 32-bit variant).
+ * Used to generate the KV cache key prefix.
+ * @param {string} text
+ * @returns {string} Hex-encoded 32-bit hash
+ */
+function hashText(text) {
+  let hash = 0x811c9dc5; // FNV offset basis (32-bit variant)
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+    hash |= 0; // Force 32-bit unsigned
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Normalize a dense embedding vector to unit L2 length.
+ * @param {number[]} vector
+ * @returns {number[]}
+ */
+function normalizeVector(vector) {
+  const sq = vector.reduce((sum, v) => sum + v * v, 0);
+  const len = Math.sqrt(sq) || 1e-8; // Guard against zero-length
+  return vector.map(v => v / len);
+}
+
+/**
+ * Create or retrieve a cached 768-dimensional embedding for the given text.
+ *
+ * Pipeline:
+ * 1. Check KV cache (key: emb:<hash>)
+ * 2. If miss → call Workers AI @cf/baai/bge-base-en-v1.5
+ * 3. Normalize to unit length
+ * 4. Store in KV with 1-hour TTL
+ * 5. Return vector
+ *
+ * @param {Object} env      Cloudflare Worker env with AI + KV_EMBEDDINGS bindings
+ * @param {string} text       Raw query text (trimmed, max 1000 chars enforced upstream)
+ * @returns {Promise<number[]>}  Normalized 768-d embedding
+ * @throws {EmbeddingError}  On AI failure, KV failure, or unexpected response shape
+ */
+async function createEmbedding(env, text) {
+  const trimmed = (text || '').trim();
+  console.log(`[lattice] EMBED ENTER text_len=${trimmed.length}`);
+
+  if (!env.AI) {
+    const err = new EmbeddingError('Workers AI binding (env.AI) is not available');
+    console.error(`[lattice] EMBED ERROR: ${err.message}`);
+    throw err;
+  }
+
+  if (!env.KV_EMBEDDINGS) {
+    console.warn('[lattice] EMBED WARN: KV_EMBEDDINGS binding missing — proceeding without cache');
+  }
+
+  const cacheKey = `emb:${hashText(trimmed)}`;
+  console.log(`[lattice] EMBED cache_key=${cacheKey}`);
+
+  // ── 1. KV cache probe ──
+  if (env.KV_EMBEDDINGS) {
+    try {
+      const cached = await env.KV_EMBEDDINGS.get(cacheKey, { type: 'json' });
+      if (cached && Array.isArray(cached.vector) && cached.vector.length === 768) {
+        console.log(`[lattice] EMBED CACHE_HIT key=${cacheKey}`);
+        console.log(`[lattice] EMBED EXIT (cached) vector_len=${cached.vector.length}`);
+        return cached.vector;
+      }
+    } catch (cacheErr) {
+      console.error(`[lattice] EMBED CACHE_ERR: ${cacheErr.message}`);
+      // Continue to AI — cache failure is NOT fatal
+    }
+  }
+
+  // ── 2. Workers AI call ──
+  let rawVector;
+  try {
+    console.log(`[lattice] EMBED AI_RUN model=@cf/baai/bge-base-en-v1.5 text_len=${trimmed.length}`);
+    const aiResponse = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: trimmed });
+
+    // Defensive extraction: Workers AI can return { data: number[] } or number[] directly
+    if (Array.isArray(aiResponse)) {
+      rawVector = aiResponse;
+    } else if (aiResponse && Array.isArray(aiResponse.data)) {
+      rawVector = aiResponse.data;
+    } else {
+      throw new EmbeddingError(
+        `Unexpected AI response shape: ${JSON.stringify(aiResponse).slice(0, 200)}`
+      );
+    }
+  } catch (aiErr) {
+    console.error(`[lattice] EMBED AI_ERR: ${aiErr.message}`);
+    throw new EmbeddingError(`AI embedding failed: ${aiErr.message}`);
+  }
+
+  if (rawVector.length !== 768) {
+    const err = new EmbeddingError(`Expected 768-dim embedding, got ${rawVector.length}`);
+    console.error(`[lattice] EMBED DIM_ERR: ${err.message}`);
+    throw err;
+  }
+
+  // ── 3. Normalize ──
+  const normalized = normalizeVector(rawVector);
+  console.log(`[lattice] EMBED normalized len=${normalized.length} unit_check=${Math.sqrt(normalized.reduce((s, v) => s + v * v, 0)).toFixed(6)}`);
+
+  // ── 4. Cache in KV (1 hour = 3600 seconds) ──
+  if (env.KV_EMBEDDINGS) {
+    try {
+      await env.KV_EMBEDDINGS.put(cacheKey, JSON.stringify({ vector: normalized, createdAt: Date.now() }), {
+        expirationTtl: 3600,
+      });
+      console.log(`[lattice] EMBED CACHE_STORE key=${cacheKey} ttl=3600s`);
+    } catch (kvErr) {
+      console.error(`[lattice] EMBED CACHE_STORE_ERR: ${kvErr.message}`);
+      // Non-fatal: we still have the embedding to return
+    }
+  }
+
+  console.log(`[lattice] EMBED EXIT vector_len=${normalized.length}`);
+  return normalized;
+}
+
+/**
+ * Specific exception type for embedding-layer failures.
+ * Enables upstream callers to distinguish embedding errors from shard/vector errors.
+ */
+class EmbeddingError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'EmbeddingError';
+    // Maintain prototype chain for instanceof checks inside Workers
+    Object.setPrototypeOf(this, EmbeddingError.prototype);
+  }
+}
+
+
+// === vector-search.js ===
+/**
+ * vector-search.js — Vectorize integration for the Knowledge Lattice Dispatch Worker
+ *
+ * Queries Cloudflare Vectorize for top-K similar vectors.
+ * Graceful fallback to empty results when Vectorize is unavailable.
+ * NEVER suppresses errors. Always logs entry/exit and key decisions.
+ */
+
+/**
+ * Specific exception type for Vectorize-layer failures.
+ */
+class VectorizeError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'VectorizeError';
+    Object.setPrototypeOf(this, VectorizeError.prototype);
+  }
+}
+
+/**
+ * Query the Vectorize index for the top-K vectors most similar to the provided embedding.
+ *
+ * Pipeline:
+ * 1. Validate env.VECTOR_INDEX binding
+ * 2. Call Vectorize query() with the normalized vector
+ * 3. Map results to a stable shape: [{ id, score, metadata }]
+ * 4. If Vectorize is unavailable → return empty array (graceful degradation)
+ *
+ * @param {Object} env       Cloudflare Worker env with VECTOR_INDEX binding
+ * @param {number[]} vector  Normalized 768-d embedding vector
+ * @param {number} topK      Number of nearest neighbors to retrieve (default 20)
+ * @returns {Promise<Array<{id: string, score: number, metadata: object}>>}
+ * @throws {VectorizeError}  On unexpected Vectorize failure (after unavailability check)
+ */
+async function vectorSearch(env, vector, topK = 20) {
+  console.log(`[lattice] SEARCH ENTER topK=${topK} vector_len=${vector.length}`);
+
+  // ── 0. Guard: Vectorize binding check ──
+  if (!env.VECTOR_INDEX) {
+    console.warn('[lattice] SEARCH WARN: VECTOR_INDEX binding missing — returning empty results for D1-only fallback');
+    console.log('[lattice] SEARCH EXIT (fallback) results=0');
+    return [];
+  }
+
+  if (!Array.isArray(vector) || vector.length !== 768) {
+    const err = new VectorizeError(`Invalid input vector: expected 768-dim number[], got ${typeof vector} length=${vector?.length}`);
+    console.error(`[lattice] SEARCH VALIDATION_ERR: ${err.message}`);
+    throw err;
+  }
+
+  const k = Math.max(1, Math.min(topK, 100)); // Clamp to safe range
+
+  // ── 1. Vectorize query ──
+  let rawMatches = [];
+  try {
+    console.log(`[lattice] SEARCH VECTORIZE_QUERY k=${k}`);
+    const queryResult = await env.VECTOR_INDEX.query(vector, { topK: k });
+
+    // Defensive extraction: Vectorize returns { matches: [{ id, score, values?, metadata? }] }
+    if (queryResult && Array.isArray(queryResult.matches)) {
+      rawMatches = queryResult.matches;
+    } else if (Array.isArray(queryResult)) {
+      rawMatches = queryResult;
+    } else {
+      console.warn(`[lattice] SEARCH WARN: unexpected Vectorize response shape — treating as no matches`);
+    }
+  } catch (err) {
+    // Distinguish "Vectorize is down/unavailable" from "query malformed"
+    const msg = err?.message || String(err);
+    const isUnavailable =
+      msg.includes('unavailable') ||
+      msg.includes('Service Unavailable') ||
+      msg.includes('502') ||
+      msg.includes('503') ||
+      msg.includes('ECONNREFUSED') ||
+      msg.includes('network') ||
+      msg.includes('timeout') ||
+      msg.includes('not found') ||
+      msg.includes('does not exist');
+
+    if (isUnavailable) {
+      console.warn(`[lattice] SEARCH VECTORIZE_UNAVAILABLE: ${msg} — falling back to D1-only search`);
+      console.log('[lattice] SEARCH EXIT (fallback) results=0');
+      return [];
+    }
+
+    console.error(`[lattice] SEARCH VECTORIZE_ERR: ${msg}`);
+    throw new VectorizeError(`Vectorize query failed: ${msg}`);
+  }
+
+  // ── 2. Normalize result shape ──
+  const results = rawMatches.map((m, idx) => {
+    const id = String(m.id ?? m.vectorId ?? `unknown_${idx}`);
+    const score = typeof m.score === 'number' ? m.score : (typeof m.similarity === 'number' ? m.similarity : 0);
+    const metadata = (m.metadata && typeof m.metadata === 'object') ? m.metadata : {};
+    return { id, score, metadata };
+  });
+
+  console.log(`[lattice] SEARCH VECTORIZE_OK results=${results.length}`);
+  console.log(`[lattice] SEARCH EXIT results=${results.length}`);
+  return results;
+}
+
+
+// === shard-dispatch.js ===
+/**
+ * shard-dispatch.js — Parallel shard querying for the Knowledge Lattice Dispatch Worker
+ *
+ * Fans out parameterized D1 queries across 16 BCC lattice shards.
+ * Uses Promise.allSettled for partial failure tolerance.
+ * NEVER suppresses errors. Always logs per-shard outcomes and aggregates.
+ */
+
+/**
+ * Specific exception type for shard-layer failures.
+ */
+class ShardDispatchError extends Error {
+  constructor(message, shardId) {
+    super(message);
+    this.name = 'ShardDispatchError';
+    this.shardId = shardId;
+    Object.setPrototypeOf(this, ShardDispatchError.prototype);
+  }
+}
+
+/**
+ * Build a parameterized LIKE pattern for a single keyword.
+ * @param {string} keyword
+ * @returns {string}
+ */
+function makeLikePattern(keyword) {
+  // Simple sanitization: strip leading/trailing % to prevent wildcard abuse,
+  // then wrap with % for substring search.
+  const cleaned = String(keyword).replace(/^%+|%+$/g, '');
+  return `%${cleaned}%`;
+}
+
+/**
+ * Extract up to N keywords from a query string for sparse LIKE matching.
+ * @param {string} query
+ * @param {number} maxKeywords
+ * @returns {string[]}
+ */
+function extractKeywords(query, maxKeywords = 6) {
+  const stopwords = new Set([
+    'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+    'of', 'with', 'by', 'from', 'is', 'are', 'was', 'were', 'be', 'been',
+    'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+    'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those',
+    'i', 'you', 'he', 'she', 'it', 'we', 'they', 'what', 'which', 'who',
+    'when', 'where', 'why', 'how', 'all', 'any', 'both', 'each', 'few',
+    'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
+    'own', 'same', 'so', 'than', 'too', 'very', 'just', 'about', 'up',
+    'out', 'if', 'into', 'then', 'also', 'get', 'use', 'make', 'like',
+    'know', 'take', 'come', 'give', 'look', 'turn', 'put', 'mean', 'let',
+    'set', 'say', 'seem', 'ask', 'try', 'way', 'new', 'old', 'first',
+    'last', 'long', 'great', 'little', 'own', 'good', 'right', 'big',
+    'high', 'different', 'small', 'large', 'next', 'early', 'young',
+    'important', 'few', 'public', 'bad', 'same', 'able',
+  ]);
+
+  const words = String(query)
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ') // Strip punctuation
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !stopwords.has(w))
+    .slice(0, maxKeywords);
+
+  // Deduplicate while preserving order
+  const seen = new Set();
+  return words.filter(w => { const ok = !seen.has(w); seen.add(w); return ok; });
+}
+
+/**
+ * Query a single D1 shard with a parameterized search.
+ *
+ * @param {Object} env           Cloudflare Worker env
+ * @param {number} shardId       1–16 shard number
+ * @param {string} likePattern   SQL LIKE pattern for tags/compressed_data
+ * @param {string[]} keywords    Keywords for scoring
+ * @param {number} timeoutMs     Per-shard timeout
+ * @returns {Promise<Array<{id, shardId, tags, compressed_data, created_at, updated_at, vector_id, score}>>}
+ */
+async function querySingleShard(env, shardId, likePattern, keywords, timeoutMs = 2000) {
+  const bindingName = `SHARD_${String(shardId).padStart(2, '0')}`;
+  const db = env[bindingName];
+
+  if (!db) {
+    throw new ShardDispatchError(`D1 binding ${bindingName} not found`, shardId);
+  }
+
+  // Parameterized query — NEVER interpolate user input
+  const stmt = db.prepare(
+    `SELECT
+       id,
+       tags,
+       compressed_data,
+       created_at,
+       updated_at,
+       vector_id
+     FROM context_chunks
+     WHERE tags LIKE ?1
+        OR compressed_data LIKE ?1
+     ORDER BY updated_at DESC
+     LIMIT 50`
+  ).bind(likePattern);
+
+  // Race against timeout
+  const result = await Promise.race([
+    stmt.all(),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new ShardDispatchError(`Shard ${shardId} query timed out after ${timeoutMs}ms`, shardId)), timeoutMs)
+    ),
+  ]);
+
+  // Defensive: D1 .all() returns { results: [...], success: true, meta: {...} }
+  const rows = (result && Array.isArray(result.results)) ? result.results : [];
+
+  // Attach shard provenance and a preliminary keyword-match score for downstream use
+  return rows.map(row => ({
+    id: row.id,
+    shardId,
+    tags: row.tags ?? '',
+    compressedData: row.compressed_data ?? '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    vectorId: row.vector_id ?? null,
+    // Preliminary score: fraction of keywords present in tags+data
+    _prelimKeywordScore: computeKeywordOverlap(row.tags + ' ' + row.compressed_data, keywords),
+  }));
+}
+
+/**
+ * Compute fraction of query keywords found in a document text.
+ * @param {string} docText
+ * @param {string[]} keywords
+ * @returns {number} 0.0–1.0
+ */
+function computeKeywordOverlap(docText, keywords) {
+  if (!keywords.length) return 0;
+  const text = String(docText).toLowerCase();
+  const hits = keywords.filter(kw => text.includes(kw)).length;
+  return hits / keywords.length;
+}
+
+/**
+ * Dispatch sparse keyword search in parallel across the requested D1 shards.
+ *
+ * Pipeline:
+ * 1. Extract keywords from the user query
+ * 2. Build a parameterized LIKE pattern from the first keyword
+ * 3. Fire parallel D1 queries via Promise.allSettled
+ * 4. Collect successful results; log every failure with shard ID
+ * 5. Return flat array of shard rows with provenance metadata
+ *
+ * @param {Object} env          Cloudflare Worker env with SHARD_01…SHARD_16 bindings
+ * @param {string} query        Raw user query string
+ * @param {number[]} shardIds   Array of shard IDs (1–16) to query
+ * @param {number[]} embedding  Ignored here (reserved for future shard-routing heuristics)
+ * @returns {Promise<Array<Object>>}  Flat array of rows from all successful shards
+ */
+async function dispatchToShards(env, query, shardIds, embedding) {
+  const n = Array.isArray(shardIds) ? shardIds.length : 0;
+  console.log(`[lattice] SHARD_DISPATCH ENTER shards_requested=${n}`);
+
+  if (!n) {
+    console.warn('[lattice] SHARD_DISPATCH WARN: no shardIds provided — returning empty');
+    console.log('[lattice] SHARD_DISPATCH EXIT results=0');
+    return [];
+  }
+
+  const keywords = extractKeywords(query);
+  console.log(`[lattice] SHARD_DISPATCH keywords=${keywords.length} [${keywords.join(', ')}]`);
+
+  const primaryKeyword = keywords[0] || query.slice(0, 30);
+  const likePattern = makeLikePattern(primaryKeyword);
+  console.log(`[lattice] SHARD_DISPATCH like_pattern="${likePattern}"`);
+
+  // ── 3. Fire parallel shard queries ──
+  const promises = shardIds.map(shardId =>
+    querySingleShard(env, shardId, likePattern, keywords, 2000)
+      .then(rows => ({ status: 'fulfilled', shardId, rows }))
+      .catch(err => ({ status: 'rejected', shardId, reason: err }))
+  );
+
+  const settled = await Promise.allSettled(promises);
+
+  // ── 4. Collect & aggregate ──
+  let totalRows = 0;
+  const failures = [];
+  const allRows = [];
+
+  for (const outcome of settled) {
+    if (outcome.status === 'fulfilled') {
+      const { shardId, rows } = outcome.value;
+      totalRows += rows.length;
+      console.log(`[lattice] SHARD_DISPATCH shard=${shardId} rows=${rows.length} status=ok`);
+      allRows.push(...rows);
+    } else {
+      const err = outcome.reason || new Error('unknown shard failure');
+      const shardId = err.shardId ?? 'unknown';
+      failures.push({ shardId, error: err.message });
+      console.error(`[lattice] SHARD_DISPATCH shard=${shardId} status=fail error="${err.message}"`);
+    }
+  }
+
+  // ── 5. Summary logging ──
+  console.log(`[lattice] SHARD_DISPATCH collected=${totalRows} failures=${failures.length}/${shardIds.length}`);
+  if (failures.length) {
+    console.error(`[lattice] SHARD_DISPATCH FAILURE_DETAILS: ${JSON.stringify(failures)}`);
+  }
+
+  console.log(`[lattice] SHARD_DISPATCH EXIT results=${allRows.length}`);
+  return allRows;
+}
+
+/**
+ * Convenience: dispatch to ALL 16 shards.
+ * @param {Object} env
+ * @param {string} query
+ * @param {number[]} embedding
+ * @returns {Promise<Array<Object>>}
+ */
+function dispatchToAllShards(env, query, embedding) {
+  return dispatchToShards(env, query, Array.from({ length: 16 }, (_, i) => i + 1), embedding);
+}
+
+
+// === re-ranker.js ===
+/**
+ * re-ranker.js — Result scoring, re-ranking, and precision filtering
+ *
+ * Combines vector (dense) and shard (sparse) results into a unified ranked list.
+ * Scoring formula:
+ *   score = (0.5 * vector_similarity) + (0.3 * keyword_match_score) + (0.2 * recency_bonus)
+ *
+ * Filters by precision threshold (default 0.90).
+ * NEVER suppresses errors. Always logs entry/exit and key metrics.
+ */
+
+/**
+ * Specific exception type for re-ranking failures.
+ */
+class ReRankerError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'ReRankerError';
+    Object.setPrototypeOf(this, ReRankerError.prototype);
+  }
+}
+
+/**
+ * Compute a recency bonus using exponential decay.
+ * Half-life = 1 week (604,800,000 ms).
+ *
+ * @param {string|number|null} dateValue  created_at or updated_at
+ * @returns {number} 0.0–1.0
+ */
+function recencyBonus(dateValue) {
+  if (!dateValue) return 0.5; // Neutral for undated items
+
+  const ts = typeof dateValue === 'number' ? dateValue : Date.parse(dateValue);
+  if (!ts || Number.isNaN(ts)) return 0.5;
+
+  const now = Date.now();
+  const ageMs = now - ts;
+  if (ageMs < 0) return 1.0; // Future-dated = max bonus
+
+  const HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
+  const bonus = Math.exp(-ageMs / HALF_LIFE_MS);
+  return Math.max(0, Math.min(1, bonus));
+}
+
+/**
+ * Compute a TF-IDF–style keyword match score between a query and document text.
+ *
+ * We use a simplified overlap metric:
+ *   keyword_match_score = (exact matches) / max(query_terms, doc_unique_terms)
+ * with a small boost for term frequency within the document.
+ *
+ * @param {string} query
+ * @param {string} docText
+ * @returns {number} 0.0–1.0
+ */
+function keywordMatchScore(query, docText) {
+  const normalize = (s) => String(s).toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(w => w.length >= 2);
+
+  const qTerms = normalize(query);
+  const dTerms = normalize(docText);
+
+  if (!qTerms.length || !dTerms.length) return 0;
+
+  const docFreq = new Map();
+  for (const t of dTerms) {
+    docFreq.set(t, (docFreq.get(t) || 0) + 1);
+  }
+
+  let exactHits = 0;
+  let tfBoost = 0;
+
+  for (const term of qTerms) {
+    if (docFreq.has(term)) {
+      exactHits += 1;
+      // Log-scaled TF boost (diminishing returns for repeated terms)
+      tfBoost += Math.log1p(docFreq.get(term));
+    }
+  }
+
+  const denominator = Math.max(qTerms.length, docFreq.size, 1);
+  const baseScore = exactHits / denominator;
+  const tfComponent = Math.min(1, tfBoost / (qTerms.length * 2));
+
+  // Blend exact overlap with TF signal
+  const score = 0.7 * baseScore + 0.3 * tfComponent;
+  return Math.max(0, Math.min(1, score));
+}
+
+/**
+ * Merge vector and shard results into a single deduplicated map keyed by document ID.
+ *
+ * @param {Array<{id, score, metadata}>} vectorResults
+ * @param {Array<{id, shardId, tags, compressedData, createdAt, updatedAt, vectorId, _prelimKeywordScore}>} shardResults
+ * @returns {Map<string, Object>}  Unified result map
+ */
+function buildUnifiedMap(vectorResults, shardResults) {
+  const map = new Map();
+
+  // Seed from vector results
+  for (const vr of vectorResults) {
+    const key = String(vr.id);
+    map.set(key, {
+      id: key,
+      vectorScore: vr.score,
+      metadata: vr.metadata || {},
+      shards: new Set(),
+      tags: '',
+      compressedData: '',
+      createdAt: null,
+      updatedAt: null,
+      _prelimKeywordScore: 0,
+    });
+  }
+
+  // Merge shard results
+  for (const sr of shardResults) {
+    const key = String(sr.id);
+    if (map.has(key)) {
+      const existing = map.get(key);
+      existing.shards.add(sr.shardId);
+      existing.tags = sr.tags || existing.tags;
+      existing.compressedData = sr.compressedData || existing.compressedData;
+      existing.createdAt = sr.createdAt || existing.createdAt;
+      existing.updatedAt = sr.updatedAt || existing.updatedAt;
+      existing._prelimKeywordScore = Math.max(existing._prelimKeywordScore, sr._prelimKeywordScore || 0);
+    } else {
+      map.set(key, {
+        id: key,
+        vectorScore: 0, // Not found in vector index
+        metadata: {},
+        shards: new Set([sr.shardId]),
+        tags: sr.tags || '',
+        compressedData: sr.compressedData || '',
+        createdAt: sr.createdAt,
+        updatedAt: sr.updatedAt,
+        _prelimKeywordScore: sr._prelimKeywordScore || 0,
+      });
+    }
+  }
+
+  return map;
+}
+
+/**
+ * Re-rank combined vector + shard results.
+ *
+ * Pipeline:
+ * 1. Merge and deduplicate
+ * 2. Score each result: 0.5*vector + 0.3*keyword + 0.2*recency
+ * 3. Sort descending by composite score
+ * 4. Filter by precision threshold (default 0.90)
+ * 5. Return ranked list + precision + coverage metrics
+ *
+ * @param {Array<{id, score, metadata}>} vectorResults     Dense vector matches
+ * @param {Array<Object>}                shardResults      Sparse shard matches
+ * @param {string}                       query             Original user query
+ * @param {number}                       precisionThreshold Minimum composite score (default 0.90)
+ * @returns {Promise<{results: Array<Object>, precision: number, coverage: number, dropped: number}>}
+ */
+async function reRankResults(vectorResults, shardResults, query, precisionThreshold = 0.90) {
+  const vin = Array.isArray(vectorResults) ? vectorResults.length : 0;
+  const sin = Array.isArray(shardResults) ? shardResults.length : 0;
+  console.log(`[lattice] RERANK_ENTER vector_in=${vin} shard_in=${sin} threshold=${precisionThreshold}`);
+
+  // ── 1. Build unified map ──
+  const unified = buildUnifiedMap(vectorResults, shardResults);
+  console.log(`[lattice] RERANK unified_candidates=${unified.size}`);
+
+  // ── 2. Score each candidate ──
+  const scored = [];
+  for (const [id, cand] of unified) {
+    const vectorSim = Math.max(0, Math.min(1, cand.vectorScore));
+
+    // Keyword score: combine prelim with full TF-IDF on merged text
+    const fullText = `${cand.tags} ${cand.compressedData}`;
+    const kwScore = Math.max(
+      cand._prelimKeywordScore,
+      keywordMatchScore(query, fullText)
+    );
+
+    // Recency bonus based on updated_at (or created_at as fallback)
+    const recency = recencyBonus(cand.updatedAt || cand.createdAt);
+
+    const composite = (0.5 * vectorSim) + (0.3 * kwScore) + (0.2 * recency);
+
+    scored.push({
+      id: cand.id,
+      score: composite,
+      vectorScore: vectorSim,
+      keywordScore: kwScore,
+      recencyScore: recency,
+      metadata: cand.metadata,
+      shards: Array.from(cand.shards),
+      tags: cand.tags,
+      snippet: cand.compressedData.slice(0, 280), // Preview
+      updatedAt: cand.updatedAt,
+    });
+  }
+
+  // ── 3. Sort descending ──
+  scored.sort((a, b) => b.score - a.score);
+
+  // ── 4. Filter by precision threshold ──
+  const filtered = scored.filter(r => r.score >= precisionThreshold);
+  const dropped = scored.length - filtered.length;
+
+  // ── 5. Compute precision and coverage ──
+  // Precision: mean score of retained results (or 0 if none)
+  const precision = filtered.length
+    ? filtered.reduce((s, r) => s + r.score, 0) / filtered.length
+    : 0;
+
+  // Coverage: fraction of input results that made it past the threshold
+  const coverage = scored.length ? filtered.length / scored.length : 0;
+
+  console.log(`[lattice] RERANK scored=${scored.length} retained=${filtered.length} dropped=${dropped}`);
+  console.log(`[lattice] RERANK precision=${precision.toFixed(4)} coverage=${coverage.toFixed(4)}`);
+  if (filtered.length > 0) {
+    console.log(`[lattice] RERANK top_score=${filtered[0].score.toFixed(4)} id=${filtered[0].id}`);
+  }
+  console.log(`[lattice] RERANK_EXIT`);
+
+  return {
+    results: filtered,
+    precision,
+    coverage,
+    dropped,
+  };
+}
+
+
+// === agent-swarm.js ===
+/**
+ * agent-swarm.js — 100-agent parallel retrieval dispatch
+ *
+ * Splits the retrieval workload across 100 parallel "agents" (Promise tasks).
+ * Each agent searches a deterministic slice of the lattice:
+ *   - Round-robin by shard ID modulo
+ *   - Time-window partitioning
+ *   - Tag category bucketing
+ *
+ * Uses Promise.allSettled for partial failure tolerance.
+ * NEVER suppresses errors. Always logs aggregate and per-agent outcomes.
+ */
+
+/**
+ * Specific exception type for swarm-layer failures.
+ */
+class SwarmError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SwarmError';
+    Object.setPrototypeOf(this, SwarmError.prototype);
+  }
+}
+
+/**
+ * Build a deterministic shard → agent mapping.
+ * 100 agents, 16 shards → each shard gets ~6 agents (some get 7).
+ *
+ * @returns {number[][]}  Array of 100 arrays, each containing shard IDs for that agent
+ */
+function buildAgentShardAssignments() {
+  const agents = Array.from({ length: 100 }, () => []);
+  for (let shard = 1; shard <= 16; shard++) {
+    // Distribute shard across agents round-robin
+    for (let a = 0; a < 100; a++) {
+      if ((a % 16) + 1 === shard || Math.floor(a / 16) === (shard - 1) % 7) {
+        agents[a].push(shard);
+      }
+    }
+  }
+  // Ensure every agent has at least one shard
+  for (let a = 0; a < 100; a++) {
+    if (agents[a].length === 0) {
+      agents[a].push((a % 16) + 1);
+    }
+  }
+  return agents;
+}
+
+/**
+ * Build a deterministic time-window assignment per agent.
+ * 100 buckets over roughly 5 years of history.
+ *
+ * @param {number} agentIdx
+ * @returns {{startMs: number, endMs: number}}
+ */
+function buildAgentTimeWindow(agentIdx) {
+  const BUCKETS = 100;
+  const LOOKBACK_MS = 5 * 365 * 24 * 60 * 60 * 1000; // ~5 years
+  const now = Date.now();
+  const bucketSize = LOOKBACK_MS / BUCKETS;
+
+  const startMs = now - LOOKBACK_MS + agentIdx * bucketSize;
+  const endMs = startMs + bucketSize;
+
+  return { startMs, endMs };
+}
+
+/**
+ * Build a deterministic tag-category filter per agent.
+ *
+ * @param {number} agentIdx
+ * @returns {string|null}  SQL LIKE pattern for a tag category, or null for no filter
+ */
+function buildAgentTagFilter(agentIdx) {
+  const CATEGORIES = [
+    'knowledge', 'decision', 'observation', 'plan', 'reflection',
+    'hypothesis', 'evidence', 'action', 'goal', 'constraint',
+  ];
+  const cat = CATEGORIES[agentIdx % CATEGORIES.length];
+  return `%${cat}%`;
+}
+
+/**
+ * Execute a single agent's retrieval task.
+ *
+ * Each agent queries its assigned shard(s) with a parameterized D1 statement
+ * that also applies the agent's time window and optional tag filter.
+ *
+ * @param {Object} env         Cloudflare Worker env
+ * @param {number} agentIdx    0–99 agent index
+ * @param {string} query       User query string
+ * @param {string} likePattern SQL LIKE pattern for sparse matching
+ * @returns {Promise<Array<Object>>}  Rows found by this agent
+ */
+async function runAgent(env, agentIdx, query, likePattern) {
+  const shards = buildAgentShardAssignments()[agentIdx];
+  const timeWindow = buildAgentTimeWindow(agentIdx);
+  const tagFilter = buildAgentTagFilter(agentIdx);
+
+  const results = [];
+
+  for (const shardId of shards) {
+    const bindingName = `SHARD_${String(shardId).padStart(2, '0')}`;
+    const db = env[bindingName];
+    if (!db) continue;
+
+    // Parameterized query with time window and tag filter
+    // We bind: ?1 = likePattern, ?2 = tagFilter, ?3 = startMs, ?4 = endMs
+    const stmt = db.prepare(
+      `SELECT
+         id,
+         tags,
+         compressed_data,
+         created_at,
+         updated_at,
+         vector_id
+       FROM context_chunks
+       WHERE (tags LIKE ?1 OR compressed_data LIKE ?1)
+         AND tags LIKE ?2
+         AND updated_at >= ?3
+         AND updated_at < ?4
+       ORDER BY updated_at DESC
+       LIMIT 20`
+    ).bind(likePattern, tagFilter, timeWindow.startMs, timeWindow.endMs);
+
+    try {
+      const res = await stmt.all();
+      const rows = (res && Array.isArray(res.results)) ? res.results : [];
+      for (const row of rows) {
+        results.push({
+          id: row.id,
+          shardId,
+          agentIdx,
+          tags: row.tags ?? '',
+          compressedData: row.compressed_data ?? '',
+          createdAt: row.created_at,
+          updatedAt: row.updated_at,
+          vectorId: row.vector_id ?? null,
+        });
+      }
+    } catch (err) {
+      // Log but don't suppress — this shard failure is recorded
+      console.error(`[lattice] AGENT agent=${agentIdx} shard=${shardId} ERR="${err.message}"`);
+      // Continue to next shard
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Deduplicate an array of results by ID, keeping the one with the most metadata.
+ *
+ * @param {Array<Object>} rows
+ * @returns {Array<Object>}
+ */
+function deduplicate(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const key = String(row.id);
+    if (!map.has(key)) {
+      map.set(key, row);
+    } else {
+      // Merge: keep richer record
+      const existing = map.get(key);
+      const richer =
+        (row.tags?.length || 0) + (row.compressedData?.length || 0) >
+        (existing.tags?.length || 0) + (existing.compressedData?.length || 0)
+          ? row
+          : existing;
+      map.set(key, richer);
+    }
+  }
+  return Array.from(map.values());
+}
+
+/**
+ * Dispatch 100 parallel retrieval agents.
+ *
+ * Pipeline:
+ * 1. Build a LIKE pattern from the query
+ * 2. Create 100 Promise tasks
+ * 3. Execute with Promise.allSettled (partial failures OK)
+ * 4. Aggregate and deduplicate all results
+ * 5. Return flat array with provenance
+ *
+ * @param {Object} env        Cloudflare Worker env
+ * @param {string} query      User query string
+ * @param {number[]} embedding Normalized embedding vector (reserved for routing heuristics)
+ * @param {number[]} shards   Shard IDs that will be targeted (influences agent assignment)
+ * @returns {Promise<{results: Array<Object>, agentsSucceeded: number, agentsFailed: number, totalRaw: number}>}
+ */
+async function dispatchSwarm(env, query, embedding, shards) {
+  console.log(`[lattice] SWARM_ENTER query_len=${query?.length ?? 0}`);
+
+  const likePattern = `%${(query || '').slice(0, 40).replace(/[^\w\s]/g, ' ').trim().split(/\s+/)[0] ?? ''}%`;
+
+  // ── 2. Create 100 agent promises ──
+  const agentPromises = Array.from({ length: 100 }, (_, agentIdx) =>
+    runAgent(env, agentIdx, query, likePattern)
+  );
+
+  // ── 3. Execute with allSettled and global timeout ──
+  const SWARM_TIMEOUT_MS = 5000;
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new SwarmError(`Swarm global timeout after ${SWARM_TIMEOUT_MS}ms`)), SWARM_TIMEOUT_MS)
+  );
+
+  let settled;
+  try {
+    settled = await Promise.race([
+      Promise.allSettled(agentPromises),
+      timeoutPromise,
+    ]);
+  } catch (timeoutErr) {
+    console.error(`[lattice] SWARM_TIMEOUT: ${timeoutErr.message}`);
+    // Even on timeout, try to collect whatever resolved
+    settled = await Promise.allSettled(agentPromises.map(p =>
+      Promise.race([
+        p,
+        new Promise(resolve => setTimeout(() => resolve([]), SWARM_TIMEOUT_MS)),
+      ])
+    ));
+  }
+
+  // ── 4. Aggregate ──
+  let allRows = [];
+  let succeeded = 0;
+  let failed = 0;
+
+  for (let i = 0; i < settled.length; i++) {
+    const outcome = settled[i];
+    if (outcome.status === 'fulfilled') {
+      const rows = outcome.value;
+      succeeded++;
+      allRows.push(...rows);
+    } else {
+      failed++;
+      console.error(`[lattice] SWARM agent=${i} FAILED: ${outcome.reason?.message || String(outcome.reason)}`);
+    }
+  }
+
+  const deduped = deduplicate(allRows);
+
+  console.log(`[lattice] SWARM aggregated_raw=${allRows.length} deduped=${deduped.length} agents_ok=${succeeded} agents_fail=${failed}`);
+  console.log(`[lattice] SWARM_EXIT`);
+
+  return {
+    results: deduped,
+    agentsSucceeded: succeeded,
+    agentsFailed: failed,
+    totalRaw: allRows.length,
+  };
+}
+
+--39f1ea557cebcc7ce02fcfd1688e5e19b20344facb2d2a993e6922ac6546--

@@ -1,0 +1,706 @@
+--adb03b2065b0fcab155f38abb746f8de42d6d7d1fe113abf9c13e2256d5a
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.ts
+var VERSION = "1.0.0";
+var DEFAULT_BOT_TYPE = "UNKNOWN";
+var CORS_ALLOWED_ORIGINS = ["*"];
+var CORS_ALLOWED_METHODS = "GET, POST, OPTIONS";
+var CORS_ALLOWED_HEADERS = "Content-Type, X-API-Key, Authorization";
+var CORS_MAX_AGE = "86400";
+function generateUUID() {
+  const hex = "0123456789abcdef";
+  const randomBytes = new Uint8Array(16);
+  crypto.getRandomValues(randomBytes);
+  randomBytes[6] = randomBytes[6] & 15 | 64;
+  randomBytes[8] = randomBytes[8] & 63 | 128;
+  let uuid = "";
+  for (let i = 0; i < 16; i++) {
+    if (i === 4 || i === 6 || i === 8 || i === 10) uuid += "-";
+    uuid += hex[randomBytes[i] >> 4] + hex[randomBytes[i] & 15];
+  }
+  return uuid;
+}
+__name(generateUUID, "generateUUID");
+function getCORSHeaders(request) {
+  const origin = request.headers.get("Origin") || "";
+  const allowOrigin = CORS_ALLOWED_ORIGINS.includes("*") ? origin || "*" : CORS_ALLOWED_ORIGINS.includes(origin) ? origin : CORS_ALLOWED_ORIGINS[0] || "";
+  return {
+    "Access-Control-Allow-Origin": allowOrigin,
+    "Access-Control-Allow-Methods": CORS_ALLOWED_METHODS,
+    "Access-Control-Allow-Headers": CORS_ALLOWED_HEADERS,
+    "Access-Control-Max-Age": CORS_MAX_AGE,
+    "Content-Type": "application/json"
+  };
+}
+__name(getCORSHeaders, "getCORSHeaders");
+function jsonResponse(data, status, corsHeaders) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+}
+__name(jsonResponse, "jsonResponse");
+function htmlResponse(body, status, corsHeaders) {
+  return new Response(body, {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "text/html; charset=utf-8" }
+  });
+}
+__name(htmlResponse, "htmlResponse");
+async function logError(env, module, severity, message, stack) {
+  try {
+    await env.AURIS_LOGS.prepare(
+      "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+    ).bind(module, severity, message, stack, Date.now()).run();
+  } catch (logErr) {
+    console.warn("[vigilante-api] Failed to log error to AURIS_LOGS:", logErr.message);
+  }
+}
+__name(logError, "logError");
+function extractFeatures(profile) {
+  const username = String(profile.username || profile.user_id || "unknown").replace(/^@/, "");
+  const followers = Number(profile.followers_count ?? 0);
+  const following = Number(profile.following_count ?? 0);
+  const tweets = Number(profile.tweet_count ?? profile.statuses_count ?? 0);
+  const listed = Number(profile.listed_count ?? 0);
+  const bioText = String(profile.bio ?? profile.description ?? "");
+  const bioLen = bioText.length;
+  const bioWords = bioText.trim().split(/\s+/).filter(Boolean).length;
+  const usernameDigits = (username.match(/\d/g) || []).length;
+  const usernameLen = username.length;
+  const ratio = followers > 0 ? Math.min(following / followers, 100) : following > 0 ? 100 : 0;
+  let ageDays = 365;
+  if (profile.created_at) {
+    try {
+      const createdMs = new Date(profile.created_at).getTime();
+      ageDays = Math.max(0, (Date.now() - createdMs) / (1e3 * 60 * 60 * 24));
+    } catch {
+      ageDays = 365;
+    }
+  }
+  return {
+    username,
+    user_id: profile.user_id ? String(profile.user_id) : null,
+    display_name: profile.display_name ? String(profile.display_name) : null,
+    followers_count: followers,
+    following_count: following,
+    tweet_count: tweets,
+    listed_count: listed,
+    following_to_followers_ratio: ratio,
+    username_digit_count: usernameDigits,
+    username_length: usernameLen,
+    bio_length: bioLen,
+    bio_word_count: bioWords,
+    verified: profile.verified === true || profile.verified === 1 ? 1 : 0,
+    has_description: bioLen > 0 ? 1 : 0,
+    has_url: profile.url && String(profile.url).length > 0 ? 1 : 0,
+    has_location: profile.location && String(profile.location).length > 0 ? 1 : 0,
+    account_age_days: ageDays,
+    bio: bioText
+  };
+}
+__name(extractFeatures, "extractFeatures");
+function runHeuristicDetection(profile, features, scanId = null) {
+  let botProbability = 0;
+  const evidence = [];
+  const decisionPath = [];
+  function addEvidence(rule, score, description) {
+    botProbability += score;
+    evidence.push({ rule, score, description });
+    decisionPath.push(`${rule}(+${score.toFixed(2)})`);
+  }
+  __name(addEvidence, "addEvidence");
+  if (features.following_to_followers_ratio > 20) {
+    addEvidence("EXTREME_FOLLOW_RATIO", 0.3, `Following/followers ratio ${features.following_to_followers_ratio.toFixed(1)}:1 exceeds 20:1`);
+  } else if (features.following_to_followers_ratio > 10) {
+    addEvidence("HIGH_FOLLOW_RATIO", 0.2, `Following/followers ratio ${features.following_to_followers_ratio.toFixed(1)}:1 exceeds 10:1`);
+  } else if (features.following_to_followers_ratio > 5) {
+    addEvidence("ELEVATED_FOLLOW_RATIO", 0.1, `Following/followers ratio ${features.following_to_followers_ratio.toFixed(1)}:1 exceeds 5:1`);
+  }
+  if (!features.has_description) {
+    addEvidence("NO_BIO", 0.15, "Profile has no bio / description");
+  }
+  if (!features.has_location) {
+    addEvidence("NO_LOCATION", 0.05, "Profile has no location set");
+  }
+  if (!features.has_url) {
+    addEvidence("NO_URL", 0.05, "Profile has no URL set");
+  }
+  const usernameLower = features.username.toLowerCase();
+  if (usernameLower.includes("bot") || usernameLower.includes("spam") || usernameLower.includes("fake")) {
+    addEvidence("SUSPICIOUS_USERNAME_KEYWORD", 0.3, `Username contains suspicious keyword: "${features.username}"`);
+  }
+  if (features.username_digit_count >= 8) {
+    addEvidence("DIGIT_HEAVY_USERNAME_8PLUS", 0.25, `Username has ${features.username_digit_count} digits (>=8)`);
+  } else if (features.username_digit_count >= 6) {
+    addEvidence("DIGIT_HEAVY_USERNAME_6PLUS", 0.15, `Username has ${features.username_digit_count} digits (>=6)`);
+  } else if (features.username_digit_count >= 4) {
+    addEvidence("DIGIT_HEAVY_USERNAME_4PLUS", 0.05, `Username has ${features.username_digit_count} digits (>=4)`);
+  }
+  if (features.tweet_count === 0) {
+    addEvidence("ZERO_TWEETS", 0.1, "Account has zero tweets");
+  } else if (features.tweet_count < 10 && features.followers_count < 10) {
+    addEvidence("VERY_LOW_ACTIVITY", 0.15, `<10 tweets AND <10 followers (tweets=${features.tweet_count}, followers=${features.followers_count})`);
+  }
+  if (features.account_age_days < 7) {
+    addEvidence("VERY_NEW_ACCOUNT", 0.2, `Account age ${features.account_age_days.toFixed(0)} days (<7 days)`);
+  } else if (features.account_age_days < 30) {
+    addEvidence("NEW_ACCOUNT", 0.1, `Account age ${features.account_age_days.toFixed(0)} days (<30 days)`);
+  }
+  botProbability = Math.min(1, botProbability);
+  const botScore = Math.round(botProbability * 10 * 100) / 100;
+  const isBot = botProbability >= 0.5;
+  let botType = DEFAULT_BOT_TYPE;
+  if (botProbability > 0.8) {
+    botType = "SPAM_BOT";
+  } else if (botProbability > 0.7 && features.tweet_count < 10) {
+    botType = "SPAM_BOT";
+  } else if (features.tweet_count > 1e4) {
+    botType = "AMPLIFIER";
+  } else if (features.following_count > 1e3 && features.followers_count < 100) {
+    botType = "FOLLOW_FARMER";
+  } else if (isBot) {
+    botType = "SUSPICIOUS";
+  }
+  let threatLevel = "MINIMAL";
+  if (botProbability >= 0.9) {
+    threatLevel = "CRITICAL";
+  } else if (botProbability >= 0.75) {
+    threatLevel = "HIGH";
+  } else if (botProbability >= 0.6) {
+    threatLevel = "MEDIUM";
+  } else if (botProbability >= 0.4) {
+    threatLevel = "LOW";
+  }
+  const confidence = Math.min(1, botProbability * (0.5 + evidence.length * 0.1));
+  return {
+    id: generateUUID(),
+    username: features.username,
+    user_id: features.user_id,
+    display_name: features.display_name,
+    is_bot: isBot,
+    bot_score: botScore,
+    bot_type: botType,
+    threat_level: threatLevel,
+    confidence: Math.round(confidence * 100) / 100,
+    ml_probability: botProbability,
+    decision_path: decisionPath.join(" \u2192 "),
+    evidence,
+    profile_data: JSON.stringify(features),
+    created_at: (/* @__PURE__ */ new Date()).toISOString(),
+    scan_id: scanId
+  };
+}
+__name(runHeuristicDetection, "runHeuristicDetection");
+async function validateLicense(env, apiKey) {
+  if (!apiKey || apiKey.trim().length === 0) {
+    throw new Error("Missing X-API-Key header");
+  }
+  const raw = await env.LICENSES.get(apiKey);
+  if (!raw) {
+    throw new Error(`Invalid API key: ${apiKey.substring(0, 8)}\u2026`);
+  }
+  let license;
+  try {
+    license = JSON.parse(raw);
+  } catch {
+    throw new Error("Corrupt license record in KV");
+  }
+  if (!license.active) {
+    throw new Error("License is deactivated");
+  }
+  const now = /* @__PURE__ */ new Date();
+  if (license.expires_at && new Date(license.expires_at) < now) {
+    throw new Error("License has expired");
+  }
+  if (license.used_today >= license.daily_quota) {
+    throw new Error(`Daily quota exceeded (${license.used_today}/${license.daily_quota})`);
+  }
+  return license;
+}
+__name(validateLicense, "validateLicense");
+async function incrementLicenseUsage(env, license) {
+  const updated = {
+    ...license,
+    used_today: license.used_today + 1
+  };
+  await env.LICENSES.put(license.key, JSON.stringify(updated));
+}
+__name(incrementLicenseUsage, "incrementLicenseUsage");
+async function persistDetection(env, d) {
+  await env.VIGILANTE_DB.prepare(
+    `INSERT INTO detections
+      (id, scan_id, username, user_id, display_name, is_bot, bot_score, bot_type,
+       threat_level, confidence, ml_probability, decision_path, evidence,
+       profile_data, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    d.id,
+    d.scan_id,
+    d.username,
+    d.user_id ?? null,
+    d.display_name ?? null,
+    d.is_bot ? 1 : 0,
+    d.bot_score,
+    d.bot_type,
+    d.threat_level,
+    d.confidence,
+    d.ml_probability,
+    d.decision_path,
+    JSON.stringify(d.evidence),
+    d.profile_data,
+    d.created_at
+  ).run();
+}
+__name(persistDetection, "persistDetection");
+async function createScanRecord(env, scan) {
+  await env.VIGILANTE_DB.prepare(
+    `INSERT INTO scans
+      (id, customer, status, total_accounts, bots_found, humans_found, bot_rate,
+       inactive_count, duration_seconds, report_html_path, report_json_path,
+       created_at, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    scan.id,
+    scan.customer,
+    scan.status,
+    scan.total_accounts,
+    scan.bots_found,
+    scan.humans_found,
+    scan.bot_rate,
+    scan.inactive_count,
+    scan.duration_seconds,
+    scan.report_html_path,
+    scan.report_json_path,
+    scan.created_at,
+    scan.completed_at
+  ).run();
+}
+__name(createScanRecord, "createScanRecord");
+async function getDetectionById(env, id) {
+  const row = await env.VIGILANTE_DB.prepare(
+    `SELECT * FROM detections WHERE id = ?`
+  ).bind(id).first();
+  if (!row) return null;
+  return rowToDetection(row);
+}
+__name(getDetectionById, "getDetectionById");
+async function getScanById(env, id) {
+  const row = await env.VIGILANTE_DB.prepare(
+    `SELECT * FROM scans WHERE id = ?`
+  ).bind(id).first();
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    customer: String(row.customer),
+    status: String(row.status),
+    total_accounts: Number(row.total_accounts),
+    bots_found: Number(row.bots_found),
+    humans_found: Number(row.humans_found),
+    bot_rate: Number(row.bot_rate),
+    inactive_count: Number(row.inactive_count),
+    duration_seconds: Number(row.duration_seconds),
+    report_html_path: row.report_html_path ? String(row.report_html_path) : null,
+    report_json_path: row.report_json_path ? String(row.report_json_path) : null,
+    created_at: String(row.created_at),
+    completed_at: row.completed_at ? String(row.completed_at) : null
+  };
+}
+__name(getScanById, "getScanById");
+function rowToDetection(row) {
+  const evidenceRaw = row.evidence ? String(row.evidence) : "[]";
+  let evidence = [];
+  try {
+    evidence = JSON.parse(evidenceRaw);
+  } catch {
+  }
+  return {
+    id: String(row.id),
+    username: String(row.username),
+    user_id: row.user_id ? String(row.user_id) : null,
+    display_name: row.display_name ? String(row.display_name) : null,
+    is_bot: Number(row.is_bot) === 1,
+    bot_score: Number(row.bot_score),
+    bot_type: String(row.bot_type ?? DEFAULT_BOT_TYPE),
+    threat_level: String(row.threat_level ?? "MINIMAL"),
+    confidence: Number(row.confidence ?? 0),
+    ml_probability: Number(row.ml_probability ?? 0),
+    decision_path: String(row.decision_path ?? ""),
+    evidence,
+    profile_data: String(row.profile_data ?? "{}"),
+    created_at: String(row.created_at),
+    scan_id: row.scan_id ? String(row.scan_id) : null
+  };
+}
+__name(rowToDetection, "rowToDetection");
+async function handleDetect(request, env, corsHeaders) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400, corsHeaders);
+  }
+  if (!body.profile || typeof body.profile !== "object") {
+    return jsonResponse({ error: 'Missing "profile" field in request body' }, 400, corsHeaders);
+  }
+  const apiKey = request.headers.get("X-API-Key");
+  let license;
+  try {
+    license = await validateLicense(env, apiKey);
+  } catch (e) {
+    const msg = e.message;
+    if (msg.includes("quota exceeded")) {
+      return jsonResponse({ error: msg, code: "QUOTA_EXCEEDED" }, 429, corsHeaders);
+    }
+    return jsonResponse({ error: msg, code: "UNAUTHORIZED" }, 401, corsHeaders);
+  }
+  const features = extractFeatures(body.profile);
+  const result = runHeuristicDetection(body.profile, features);
+  try {
+    await persistDetection(env, result);
+  } catch (e) {
+    await logError(env, "vigilante-api", "ERROR", `persistDetection: ${e.message}`, e.stack || "");
+    return jsonResponse({ error: "Failed to persist detection result" }, 500, corsHeaders);
+  }
+  try {
+    await incrementLicenseUsage(env, license);
+  } catch (e) {
+    await logError(env, "vigilante-api", "WARN", `incrementLicenseUsage: ${e.message}`, e.stack || "");
+  }
+  return jsonResponse(result, 200, corsHeaders);
+}
+__name(handleDetect, "handleDetect");
+async function handleDetectBatch(request, env, corsHeaders) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400, corsHeaders);
+  }
+  if (!Array.isArray(body.profiles) || body.profiles.length === 0) {
+    return jsonResponse({ error: 'Missing or empty "profiles" array' }, 400, corsHeaders);
+  }
+  const apiKey = request.headers.get("X-API-Key");
+  let license;
+  try {
+    license = await validateLicense(env, apiKey);
+  } catch (e) {
+    const msg = e.message;
+    if (msg.includes("quota exceeded")) {
+      return jsonResponse({ error: msg, code: "QUOTA_EXCEEDED" }, 429, corsHeaders);
+    }
+    return jsonResponse({ error: msg, code: "UNAUTHORIZED" }, 401, corsHeaders);
+  }
+  const remaining = license.daily_quota - license.used_today;
+  const toProcess = body.profiles.slice(0, remaining);
+  const rejected = body.profiles.length - toProcess.length;
+  const scanId = generateUUID();
+  const scan = {
+    id: scanId,
+    customer: license.customer || apiKey || "anonymous",
+    status: "running",
+    total_accounts: toProcess.length,
+    bots_found: 0,
+    humans_found: 0,
+    bot_rate: 0,
+    inactive_count: 0,
+    duration_seconds: 0,
+    report_html_path: null,
+    report_json_path: null,
+    created_at: (/* @__PURE__ */ new Date()).toISOString(),
+    completed_at: null
+  };
+  try {
+    await createScanRecord(env, scan);
+  } catch (e) {
+    await logError(env, "vigilante-api", "ERROR", `createScanRecord: ${e.message}`, e.stack || "");
+    return jsonResponse({ error: "Failed to create scan record" }, 500, corsHeaders);
+  }
+  let botsFound = 0;
+  let humansFound = 0;
+  const startTime = Date.now();
+  for (const profile of toProcess) {
+    try {
+      const features = extractFeatures(profile);
+      const result = runHeuristicDetection(profile, features, scanId);
+      try {
+        await persistDetection(env, result);
+      } catch (e) {
+        await logError(env, "vigilante-api", "ERROR", `batch persistDetection: ${e.message}`, e.stack || "");
+      }
+      if (result.is_bot) {
+        botsFound++;
+      } else {
+        humansFound++;
+      }
+      try {
+        await incrementLicenseUsage(env, license);
+      } catch {
+        break;
+      }
+      license.used_today += 1;
+    } catch (e) {
+      await logError(env, "vigilante-api", "ERROR", `batch profile processing: ${e.message}`, e.stack || "");
+    }
+  }
+  const durationSec = Math.round((Date.now() - startTime) / 1e3);
+  const botRate = toProcess.length > 0 ? botsFound / toProcess.length : 0;
+  try {
+    await env.VIGILANTE_DB.prepare(
+      `UPDATE scans SET status = ?, bots_found = ?, humans_found = ?,
+       bot_rate = ?, duration_seconds = ?, completed_at = ? WHERE id = ?`
+    ).bind("completed", botsFound, humansFound, botRate, durationSec, (/* @__PURE__ */ new Date()).toISOString(), scanId).run();
+  } catch (e) {
+    await logError(env, "vigilante-api", "ERROR", `updateScanRecord: ${e.message}`, e.stack || "");
+  }
+  return jsonResponse({
+    scan_id: scanId,
+    status: "completed",
+    total: body.profiles.length,
+    accepted: toProcess.length,
+    rejected,
+    bots_found: botsFound,
+    humans_found: humansFound,
+    bot_rate: Math.round(botRate * 1e3) / 1e3,
+    duration_seconds: durationSec
+  }, 202, corsHeaders);
+}
+__name(handleDetectBatch, "handleDetectBatch");
+async function handleGetDetection(_request, env, corsHeaders, id) {
+  const detection = await getDetectionById(env, id);
+  if (!detection) {
+    return jsonResponse({ error: "Detection not found", id }, 404, corsHeaders);
+  }
+  return jsonResponse(detection, 200, corsHeaders);
+}
+__name(handleGetDetection, "handleGetDetection");
+async function handleGetScan(_request, env, corsHeaders, id) {
+  const scan = await getScanById(env, id);
+  if (!scan) {
+    return jsonResponse({ error: "Scan not found", id }, 404, corsHeaders);
+  }
+  let detections = [];
+  try {
+    const { results } = await env.VIGILANTE_DB.prepare(
+      `SELECT * FROM detections WHERE scan_id = ? ORDER BY created_at DESC`
+    ).bind(id).all();
+    if (results) {
+      detections = results.map((row) => rowToDetection(row));
+    }
+  } catch (e) {
+    await logError(env, "vigilante-api", "ERROR", `fetchScanDetections: ${e.message}`, e.stack || "");
+  }
+  return jsonResponse({
+    scan,
+    detections,
+    summary: {
+      total: scan.total_accounts,
+      bots_found: scan.bots_found,
+      humans_found: scan.humans_found,
+      bot_rate: scan.bot_rate,
+      duration_seconds: scan.duration_seconds
+    }
+  }, 200, corsHeaders);
+}
+__name(handleGetScan, "handleGetScan");
+async function handleGetScanReport(request, env, corsHeaders, id) {
+  const scan = await getScanById(env, id);
+  if (!scan) {
+    return jsonResponse({ error: "Scan not found", id }, 404, corsHeaders);
+  }
+  const acceptHeader = request.headers.get("Accept") || "";
+  const wantJson = acceptHeader.includes("application/json");
+  const r2Key = wantJson ? scan.report_json_path || `reports/${id}.json` : scan.report_html_path || `reports/${id}.html`;
+  try {
+    const object = await env.VIGILANTE_REPORTS.get(r2Key);
+    if (!object) {
+      const detections = [];
+      try {
+        const { results } = await env.VIGILANTE_DB.prepare(
+          `SELECT * FROM detections WHERE scan_id = ? ORDER BY created_at DESC`
+        ).bind(id).all();
+        if (results) {
+          for (const row of results) {
+            detections.push(rowToDetection(row));
+          }
+        }
+      } catch (e) {
+        await logError(env, "vigilante-api", "ERROR", `reportDetections: ${e.message}`, e.stack || "");
+      }
+      if (wantJson) {
+        return jsonResponse({
+          scan,
+          detections,
+          generated_at: (/* @__PURE__ */ new Date()).toISOString()
+        }, 200, corsHeaders);
+      }
+      const html = generateHTMLReport(scan, detections);
+      return htmlResponse(html, 200, corsHeaders);
+    }
+    const body = await object.arrayBuffer();
+    const contentType = wantJson ? "application/json" : "text/html; charset=utf-8";
+    return new Response(body, {
+      status: 200,
+      headers: { ...corsHeaders, "Content-Type": contentType }
+    });
+  } catch (e) {
+    await logError(env, "vigilante-api", "ERROR", `getScanReport: ${e.message}`, e.stack || "");
+    return jsonResponse({ error: "Failed to retrieve report" }, 500, corsHeaders);
+  }
+}
+__name(handleGetScanReport, "handleGetScanReport");
+async function handleHealth(_request, _env, corsHeaders) {
+  return jsonResponse({
+    status: "ok",
+    version: VERSION,
+    service: "vigilante-api",
+    timestamp: (/* @__PURE__ */ new Date()).toISOString()
+  }, 200, corsHeaders);
+}
+__name(handleHealth, "handleHealth");
+function generateHTMLReport(scan, detections) {
+  const botRows = detections.filter((d) => d.is_bot).map(
+    (d) => `<tr style="background:#fff0f0;">
+        <td style="padding:6px 10px;border:1px solid #ddd;">${escapeHtml(d.username)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;color:#c00;font-weight:bold;">BOT</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${d.bot_score.toFixed(1)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${escapeHtml(d.bot_type)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${escapeHtml(d.threat_level)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${d.confidence}</td>
+      </tr>`
+  ).join("");
+  const humanRows = detections.filter((d) => !d.is_bot).map(
+    (d) => `<tr style="background:#f0fff0;">
+        <td style="padding:6px 10px;border:1px solid #ddd;">${escapeHtml(d.username)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;color:#0a0;font-weight:bold;">HUMAN</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${d.bot_score.toFixed(1)}</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">\u2014</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">\u2014</td>
+        <td style="padding:6px 10px;border:1px solid #ddd;">${d.confidence}</td>
+      </tr>`
+  ).join("");
+  const botRatePercent = (scan.bot_rate * 100).toFixed(1);
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Vigilante Scan Report \u2014 ${escapeHtml(scan.id)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; max-width:960px; margin:40px auto; padding:0 20px; color:#222; }
+    h1 { font-size:28px; margin-bottom:8px; }
+    .subtitle { color:#666; font-size:14px; margin-bottom:24px; }
+    .summary { display:grid; grid-template-columns: repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:24px; }
+    .card { background:#f8f9fa; border:1px solid #e9ecef; border-radius:8px; padding:16px; text-align:center; }
+    .card .value { font-size:24px; font-weight:700; }
+    .card .label { font-size:12px; color:#666; margin-top:4px; }
+    .bot-rate { color:${scan.bot_rate > 0.5 ? "#c00" : "#0a0"}; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th { background:#f1f3f4; padding:8px 10px; border:1px solid #ddd; text-align:left; font-weight:600; }
+    .footer { margin-top:32px; font-size:11px; color:#999; text-align:center; }
+  </style>
+</head>
+<body>
+  <h1>Vigilante Bot Detection Report</h1>
+  <div class="subtitle">Scan ID: ${escapeHtml(scan.id)} | Generated: ${(/* @__PURE__ */ new Date()).toLocaleString()}</div>
+
+  <div class="summary">
+    <div class="card">
+      <div class="value">${scan.total_accounts}</div>
+      <div class="label">ACCOUNTS SCANNED</div>
+    </div>
+    <div class="card">
+      <div class="value bot-rate">${botRatePercent}%</div>
+      <div class="label">BOT RATE</div>
+    </div>
+    <div class="card">
+      <div class="value" style="color:#c00;">${scan.bots_found}</div>
+      <div class="label">BOTS FOUND</div>
+    </div>
+    <div class="card">
+      <div class="value" style="color:#0a0;">${scan.humans_found}</div>
+      <div class="label">HUMANS FOUND</div>
+    </div>
+    <div class="card">
+      <div class="value">${scan.duration_seconds}s</div>
+      <div class="label">DURATION</div>
+    </div>
+  </div>
+
+  <h2>Detection Results</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Username</th>
+        <th>Verdict</th>
+        <th>Score</th>
+        <th>Bot Type</th>
+        <th>Threat</th>
+        <th>Confidence</th>
+      </tr>
+    </thead>
+    <tbody>
+      ${botRows}${humanRows}
+      ${detections.length === 0 ? '<tr><td colspan="6" style="text-align:center;padding:20px;color:#999;">No detection results available</td></tr>' : ""}
+    </tbody>
+  </table>
+
+  <div class="footer">Powered by Vigilante Bot Detector v${VERSION} \u2014 Reflexion Software</div>
+</body>
+</html>`;
+}
+__name(generateHTMLReport, "generateHTMLReport");
+function escapeHtml(str) {
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+__name(escapeHtml, "escapeHtml");
+var index_default = {
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    const method = request.method;
+    const path = url.pathname;
+    const corsHeaders = getCORSHeaders(request);
+    if (method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+    try {
+      if (path === "/health" && method === "GET") {
+        return await handleHealth(request, env, corsHeaders);
+      }
+      if (path === "/detect" && method === "POST") {
+        return await handleDetect(request, env, corsHeaders);
+      }
+      if (path === "/detect/batch" && method === "POST") {
+        return await handleDetectBatch(request, env, corsHeaders);
+      }
+      const detectMatch = path.match(/^\/detect\/([^\/]+)$/);
+      if (detectMatch && method === "GET") {
+        return await handleGetDetection(request, env, corsHeaders, detectMatch[1]);
+      }
+      const scanMatch = path.match(/^\/scan\/([^\/]+)$/);
+      if (scanMatch && method === "GET") {
+        return await handleGetScan(request, env, corsHeaders, scanMatch[1]);
+      }
+      const reportMatch = path.match(/^\/scan\/([^\/]+)\/report$/);
+      if (reportMatch && method === "GET") {
+        return await handleGetScanReport(request, env, corsHeaders, reportMatch[1]);
+      }
+      if (path === "/" && method === "GET") {
+        return Response.redirect(`${url.origin}/health`, 302);
+      }
+      return jsonResponse({ error: "Not Found", path, method }, 404, corsHeaders);
+    } catch (e) {
+      await logError(env, "vigilante-api", "CRITICAL", `Unhandled: ${e.message}`, e.stack || "");
+      return jsonResponse({ error: "Internal Server Error", request_id: generateUUID() }, 500, corsHeaders);
+    }
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--adb03b2065b0fcab155f38abb746f8de42d6d7d1fe113abf9c13e2256d5a--

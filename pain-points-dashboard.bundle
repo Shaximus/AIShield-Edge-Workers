@@ -1,0 +1,601 @@
+--f2c1e77b3dfca5255cbe0f28ccf856703a353fe12fdb9f50c950119be108
+Content-Disposition: form-data; name="pain-points-dashboard.js"
+
+// ============================================================
+// Pain Points Dashboard Worker
+// Reflexion Platform Status - Dark Theme Dashboard
+// Reads from D1: auris-logs database
+// ============================================================
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const method = request.method;
+
+    // CORS headers
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
+    if (method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders, status: 204 });
+    }
+
+    // GET / — HTML Dashboard
+    if (path === '/' || path === '') {
+      const html = await generateDashboard(env.DB);
+      return new Response(html, {
+        headers: { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders }
+      });
+    }
+
+    // GET /api/pain-points — JSON API
+    if (path === '/api/pain-points' && method === 'GET') {
+      const painPoints = await getAllPainPoints(env.DB);
+      return jsonResponse(painPoints, corsHeaders);
+    }
+
+    // POST /api/pain-points/{id}/status — Update Status
+    const statusMatch = path.match(/^\/api\/pain-points\/([^/]+)\/status$/);
+    if (statusMatch && method === 'POST') {
+      const id = statusMatch[1];
+      const body = await request.json().catch(() => ({}));
+      const result = await updateStatus(env.DB, id, body.status, body.fixed_by);
+      return jsonResponse(result, corsHeaders);
+    }
+
+    // 404
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders }
+    });
+  }
+};
+
+async function getAllPainPoints(db) {
+  const { results } = await db.prepare(
+    'SELECT * FROM platform_pain_points ORDER BY CASE severity WHEN \'BLOCKER\' THEN 1 WHEN \'CRITICAL\' THEN 2 WHEN \'MAJOR\' THEN 3 WHEN \'MINOR\' THEN 4 END, id'
+  ).all();
+  return results || [];
+}
+
+async function updateStatus(db, id, status, fixedBy) {
+  if (!['open', 'in_progress', 'fixed'].includes(status)) {
+    return { error: 'Invalid status. Must be: open, in_progress, fixed' };
+  }
+  const fixedAt = status === 'fixed' ? Math.floor(Date.now() / 1000) : null;
+  const result = await db.prepare(
+    'UPDATE platform_pain_points SET status = ?, fixed_by = ?, fixed_at = ? WHERE id = ?'
+  ).bind(status, fixedBy || null, fixedAt, id).run();
+  return { success: result.success, changes: result.meta?.changes || 0 };
+}
+
+function jsonResponse(data, corsHeaders) {
+  return new Response(JSON.stringify(data, null, 2), {
+    headers: { 'Content-Type': 'application/json', ...corsHeaders }
+  });
+}
+
+// ============================================================
+// HTML Dashboard Generator
+// ============================================================
+async function generateDashboard(db) {
+  const painPoints = await getAllPainPoints(db);
+
+  // Stats
+  const total = painPoints.length;
+  const blockers = painPoints.filter(p => p.severity === 'BLOCKER').length;
+  const critical = painPoints.filter(p => p.severity === 'CRITICAL').length;
+  const major = painPoints.filter(p => p.severity === 'MAJOR').length;
+  const minor = painPoints.filter(p => p.severity === 'MINOR').length;
+  const fixed = painPoints.filter(p => p.status === 'fixed').length;
+  const open = painPoints.filter(p => p.status === 'open').length;
+  const inProgress = painPoints.filter(p => p.status === 'in_progress').length;
+
+  // Build table rows
+  const rows = painPoints.map(pp => {
+    const sevClass = pp.severity.toLowerCase();
+    const statusClass = pp.status.replace('_', '-');
+    const desc = escapeHtml(pp.description || '').substring(0, 120);
+    const fix = escapeHtml(pp.fix || '').substring(0, 80);
+    const effort = escapeHtml(pp.effort || 'Unknown');
+    return `
+      <tr data-severity="${pp.severity}" data-status="${pp.status}" data-category="${escapeHtml(pp.category || '')}">
+        <td class="col-id">${pp.id}</td>
+        <td class="col-sev"><span class="badge sev-${sevClass}">${pp.severity}</span></td>
+        <td class="col-cat">${escapeHtml(pp.category || '')}</td>
+        <td class="col-desc" title="${escapeHtml(pp.description || '')}">${desc}${(pp.description || '').length > 120 ? '...' : ''}</td>
+        <td class="col-fix" title="${escapeHtml(pp.fix || '')}">${fix}${(pp.fix || '').length > 80 ? '...' : ''}</td>
+        <td class="col-stat"><span class="badge stat-${statusClass}">${pp.status.replace('_', ' ')}</span></td>
+        <td class="col-eff">${effort}</td>
+      </tr>`;
+  }).join('');
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reflexion Platform Status — Pain Points Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg-primary: #020617;
+      --bg-secondary: #0f172a;
+      --bg-card: #1e293b;
+      --bg-hover: #334155;
+      --accent: #06b6d4;
+      --accent-glow: rgba(6,182,212,0.3);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --border: #1e3a5f;
+      --sev-blocker: #ef4444;
+      --sev-critical: #f97316;
+      --sev-major: #eab308;
+      --sev-minor: #64748b;
+      --stat-open: #ef4444;
+      --stat-in-progress: #f59e0b;
+      --stat-fixed: #22c55e;
+      --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      --font-mono: 'SF Mono', 'Fira Code', monospace;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* Header */
+    .header {
+      background: linear-gradient(135deg, var(--bg-secondary) 0%, #0a1628 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 1.5rem 2rem;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      backdrop-filter: blur(10px);
+    }
+    .header-content {
+      max-width: 1600px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .logo {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent), #0891b2);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+    .header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--text-primary), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header-sub {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-top: -2px;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      background: rgba(34,197,94,0.15);
+      color: #22c55e;
+      padding: 0.3rem 0.8rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      border: 1px solid rgba(34,197,94,0.3);
+    }
+    .live-dot {
+      width: 8px;
+      height: 8px;
+      background: #22c55e;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    /* Stats Grid */
+    .stats-section {
+      max-width: 1600px;
+      margin: 2rem auto;
+      padding: 0 2rem;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 1rem;
+    }
+    .stat-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.2rem 1rem;
+      text-align: center;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 3px;
+      background: var(--accent);
+      opacity: 0.5;
+    }
+    .stat-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+    .stat-card.total::before { background: var(--accent); }
+    .stat-card.blockers::before { background: var(--sev-blocker); }
+    .stat-card.critical::before { background: var(--sev-critical); }
+    .stat-card.major::before { background: var(--sev-major); }
+    .stat-card.minor::before { background: var(--sev-minor); }
+    .stat-card.fixed::before { background: var(--stat-fixed); }
+    .stat-card.open::before { background: var(--stat-open); }
+    .stat-card.inprogress::before { background: var(--stat-in-progress); }
+
+    .stat-number {
+      font-size: 2rem;
+      font-weight: 800;
+      line-height: 1;
+      margin-bottom: 0.3rem;
+    }
+    .stat-card.total .stat-number { color: var(--accent); }
+    .stat-card.blockers .stat-number { color: var(--sev-blocker); }
+    .stat-card.critical .stat-number { color: var(--sev-critical); }
+    .stat-card.major .stat-number { color: var(--sev-major); }
+    .stat-card.minor .stat-number { color: var(--sev-minor); }
+    .stat-card.fixed .stat-number { color: var(--stat-fixed); }
+    .stat-card.open .stat-number { color: var(--stat-open); }
+    .stat-card.inprogress .stat-number { color: var(--stat-in-progress); }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      font-weight: 600;
+    }
+
+    /* Filters */
+    .filters-section {
+      max-width: 1600px;
+      margin: 1.5rem auto;
+      padding: 0 2rem;
+    }
+    .filter-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    .filter-label {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-right: 0.5rem;
+    }
+    .filter-btn {
+      padding: 0.4rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-secondary);
+      color: var(--text-secondary);
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      font-family: var(--font);
+    }
+    .filter-btn:hover {
+      border-color: var(--accent);
+      color: var(--text-primary);
+    }
+    .filter-btn.active {
+      background: var(--accent);
+      color: #000;
+      border-color: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    /* Table */
+    .table-section {
+      max-width: 1600px;
+      margin: 1rem auto 3rem;
+      padding: 0 2rem;
+    }
+    .table-wrapper {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+    .table-scroll {
+      overflow-x: auto;
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    thead {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    th {
+      background: var(--bg-card);
+      color: var(--text-secondary);
+      font-weight: 600;
+      text-transform: uppercase;
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      padding: 0.8rem 1rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    td {
+      padding: 0.7rem 1rem;
+      border-bottom: 1px solid rgba(30,58,95,0.4);
+      color: var(--text-primary);
+      vertical-align: top;
+    }
+    tbody tr {
+      transition: background 0.15s ease;
+    }
+    tbody tr:hover {
+      background: var(--bg-hover);
+    }
+    tbody tr:last-child td {
+      border-bottom: none;
+    }
+
+    .col-id { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); white-space: nowrap; }
+    .col-cat { color: var(--text-secondary); font-size: 0.8rem; }
+    .col-desc { max-width: 400px; line-height: 1.5; color: var(--text-secondary); }
+    .col-fix { max-width: 250px; line-height: 1.5; color: var(--text-muted); font-size: 0.8rem; }
+    .col-eff { font-size: 0.8rem; color: var(--text-muted); white-space: nowrap; }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+    .sev-blocker { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+    .sev-critical { background: rgba(249,115,22,0.2); color: #fb923c; border: 1px solid rgba(249,115,22,0.3); }
+    .sev-major { background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.3); }
+    .sev-minor { background: rgba(100,116,139,0.2); color: #94a3b8; border: 1px solid rgba(100,116,139,0.3); }
+    .stat-open { background: rgba(239,68,68,0.2); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+    .stat-in-progress { background: rgba(245,158,11,0.2); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+    .stat-fixed { background: rgba(34,197,94,0.2); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); }
+
+    /* Footer */
+    .footer {
+      max-width: 1600px;
+      margin: 0 auto;
+      padding: 1.5rem 2rem;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      border-top: 1px solid var(--border);
+    }
+    .footer a { color: var(--accent); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+
+    /* Scrollbar */
+    .table-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+    .table-scroll::-webkit-scrollbar-track { background: var(--bg-secondary); }
+    .table-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .table-scroll::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+    /* Row visibility */
+    .row-hidden { display: none !important; }
+
+    /* Count display */
+    .showing-count {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-bottom: 0.8rem;
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header-content { flex-direction: column; align-items: flex-start; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .col-desc, .col-fix { max-width: 200px; }
+      .col-eff { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-content">
+      <div class="header-left">
+        <div class="logo">&#x1F6E1;</div>
+        <div>
+          <h1>Reflexion Platform Status</h1>
+          <div class="header-sub">Pain Points Dashboard &mdash; Live from D1</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="live-badge">
+          <div class="live-dot"></div>
+          LIVE
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- Stats -->
+  <section class="stats-section">
+    <div class="stats-grid">
+      <div class="stat-card total">
+        <div class="stat-number">${total}</div>
+        <div class="stat-label">Total</div>
+      </div>
+      <div class="stat-card blockers">
+        <div class="stat-number">${blockers}</div>
+        <div class="stat-label">Blockers</div>
+      </div>
+      <div class="stat-card critical">
+        <div class="stat-number">${critical}</div>
+        <div class="stat-label">Critical</div>
+      </div>
+      <div class="stat-card major">
+        <div class="stat-number">${major}</div>
+        <div class="stat-label">Major</div>
+      </div>
+      <div class="stat-card minor">
+        <div class="stat-number">${minor}</div>
+        <div class="stat-label">Minor</div>
+      </div>
+      <div class="stat-card open">
+        <div class="stat-number">${open}</div>
+        <div class="stat-label">Open</div>
+      </div>
+      <div class="stat-card inprogress">
+        <div class="stat-number">${inProgress}</div>
+        <div class="stat-label">In Progress</div>
+      </div>
+      <div class="stat-card fixed">
+        <div class="stat-number">${fixed}</div>
+        <div class="stat-label">Fixed</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Filters -->
+  <section class="filters-section">
+    <div class="filter-group">
+      <span class="filter-label">Filter:</span>
+      <button class="filter-btn active" data-filter="all" onclick="applyFilter('all')">All</button>
+      <button class="filter-btn" data-filter="BLOCKER" onclick="applyFilter('BLOCKER')">Blockers</button>
+      <button class="filter-btn" data-filter="CRITICAL" onclick="applyFilter('CRITICAL')">Critical</button>
+      <button class="filter-btn" data-filter="MAJOR" onclick="applyFilter('MAJOR')">Major</button>
+      <button class="filter-btn" data-filter="MINOR" onclick="applyFilter('MINOR')">Minor</button>
+      <button class="filter-btn" data-filter="open" onclick="applyFilter('status:open')">Open</button>
+      <button class="filter-btn" data-filter="fixed" onclick="applyFilter('status:fixed')">Fixed</button>
+    </div>
+  </section>
+
+  <!-- Table -->
+  <section class="table-section">
+    <div class="showing-count" id="showingCount">Showing all ${total} pain points</div>
+    <div class="table-wrapper">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Severity</th>
+              <th>Category</th>
+              <th>Description</th>
+              <th>Suggested Fix</th>
+              <th>Status</th>
+              <th>Effort</th>
+            </tr>
+          </thead>
+          <tbody id="tableBody">
+            ${rows}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <p>Reflexion Platform Pain Points Dashboard &middot; ${total} issues tracked &middot; <a href="/api/pain-points" target="_blank">JSON API</a></p>
+    <p style="margin-top:0.3rem; font-size:0.75rem;">Data source: D1 auris-logs &middot; Auto-refreshes on load</p>
+  </footer>
+
+  <script>
+    function applyFilter(filter) {
+      const rows = document.querySelectorAll('#tableBody tr');
+      const buttons = document.querySelectorAll('.filter-btn');
+      let visible = 0;
+
+      buttons.forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filter);
+      });
+
+      rows.forEach(row => {
+        let show = false;
+        if (filter === 'all') {
+          show = true;
+        } else if (filter.startsWith('status:')) {
+          show = row.dataset.status === filter.split(':')[1];
+        } else {
+          show = row.dataset.severity === filter;
+        }
+        row.classList.toggle('row-hidden', !show);
+        if (show) visible++;
+      });
+
+      document.getElementById('showingCount').textContent =
+        filter === 'all' ? 'Showing all ${total} pain points' :
+        'Showing ' + visible + ' pain point' + (visible !== 1 ? 's' : '');
+    }
+  </script>
+</body>
+</html>`;
+}
+
+function escapeHtml(text) {
+  if (!text) return '';
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+--f2c1e77b3dfca5255cbe0f28ccf856703a353fe12fdb9f50c950119be108--

@@ -1,0 +1,1 @@
+addEventListener("fetch", e => e.respondWith(new Response("OK: " + new URL(e.request.url).pathname, {status: 200})))

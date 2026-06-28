@@ -1,0 +1,1936 @@
+--e979bf390bfc700b408f222f26519015d8cb5f742ac05e2680fc458c26f1
+Content-Disposition: form-data; name="admin.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/_internal/utils.mjs
+// @__NO_SIDE_EFFECTS__
+function createNotImplementedError(name) {
+  return new Error(`[unenv] ${name} is not implemented yet!`);
+}
+__name(createNotImplementedError, "createNotImplementedError");
+// @__NO_SIDE_EFFECTS__
+function notImplemented(name) {
+  const fn = /* @__PURE__ */ __name(() => {
+    throw /* @__PURE__ */ createNotImplementedError(name);
+  }, "fn");
+  return Object.assign(fn, { __unenv__: true });
+}
+__name(notImplemented, "notImplemented");
+// @__NO_SIDE_EFFECTS__
+function notImplementedClass(name) {
+  return class {
+    __unenv__ = true;
+    constructor() {
+      throw new Error(`[unenv] ${name} is not implemented yet!`);
+    }
+  };
+}
+__name(notImplementedClass, "notImplementedClass");
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/perf_hooks/performance.mjs
+var _timeOrigin = globalThis.performance?.timeOrigin ?? Date.now();
+var _performanceNow = globalThis.performance?.now ? globalThis.performance.now.bind(globalThis.performance) : () => Date.now() - _timeOrigin;
+var nodeTiming = {
+  name: "node",
+  entryType: "node",
+  startTime: 0,
+  duration: 0,
+  nodeStart: 0,
+  v8Start: 0,
+  bootstrapComplete: 0,
+  environment: 0,
+  loopStart: 0,
+  loopExit: 0,
+  idleTime: 0,
+  uvMetricsInfo: {
+    loopCount: 0,
+    events: 0,
+    eventsWaiting: 0
+  },
+  detail: void 0,
+  toJSON() {
+    return this;
+  }
+};
+var PerformanceEntry = class {
+  static {
+    __name(this, "PerformanceEntry");
+  }
+  __unenv__ = true;
+  detail;
+  entryType = "event";
+  name;
+  startTime;
+  constructor(name, options) {
+    this.name = name;
+    this.startTime = options?.startTime || _performanceNow();
+    this.detail = options?.detail;
+  }
+  get duration() {
+    return _performanceNow() - this.startTime;
+  }
+  toJSON() {
+    return {
+      name: this.name,
+      entryType: this.entryType,
+      startTime: this.startTime,
+      duration: this.duration,
+      detail: this.detail
+    };
+  }
+};
+var PerformanceMark = class PerformanceMark2 extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceMark");
+  }
+  entryType = "mark";
+  constructor() {
+    super(...arguments);
+  }
+  get duration() {
+    return 0;
+  }
+};
+var PerformanceMeasure = class extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceMeasure");
+  }
+  entryType = "measure";
+};
+var PerformanceResourceTiming = class extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceResourceTiming");
+  }
+  entryType = "resource";
+  serverTiming = [];
+  connectEnd = 0;
+  connectStart = 0;
+  decodedBodySize = 0;
+  domainLookupEnd = 0;
+  domainLookupStart = 0;
+  encodedBodySize = 0;
+  fetchStart = 0;
+  initiatorType = "";
+  name = "";
+  nextHopProtocol = "";
+  redirectEnd = 0;
+  redirectStart = 0;
+  requestStart = 0;
+  responseEnd = 0;
+  responseStart = 0;
+  secureConnectionStart = 0;
+  startTime = 0;
+  transferSize = 0;
+  workerStart = 0;
+  responseStatus = 0;
+};
+var PerformanceObserverEntryList = class {
+  static {
+    __name(this, "PerformanceObserverEntryList");
+  }
+  __unenv__ = true;
+  getEntries() {
+    return [];
+  }
+  getEntriesByName(_name, _type) {
+    return [];
+  }
+  getEntriesByType(type) {
+    return [];
+  }
+};
+var Performance = class {
+  static {
+    __name(this, "Performance");
+  }
+  __unenv__ = true;
+  timeOrigin = _timeOrigin;
+  eventCounts = /* @__PURE__ */ new Map();
+  _entries = [];
+  _resourceTimingBufferSize = 0;
+  navigation = void 0;
+  timing = void 0;
+  timerify(_fn, _options) {
+    throw createNotImplementedError("Performance.timerify");
+  }
+  get nodeTiming() {
+    return nodeTiming;
+  }
+  eventLoopUtilization() {
+    return {};
+  }
+  markResourceTiming() {
+    return new PerformanceResourceTiming("");
+  }
+  onresourcetimingbufferfull = null;
+  now() {
+    if (this.timeOrigin === _timeOrigin) {
+      return _performanceNow();
+    }
+    return Date.now() - this.timeOrigin;
+  }
+  clearMarks(markName) {
+    this._entries = markName ? this._entries.filter((e) => e.name !== markName) : this._entries.filter((e) => e.entryType !== "mark");
+  }
+  clearMeasures(measureName) {
+    this._entries = measureName ? this._entries.filter((e) => e.name !== measureName) : this._entries.filter((e) => e.entryType !== "measure");
+  }
+  clearResourceTimings() {
+    this._entries = this._entries.filter((e) => e.entryType !== "resource" || e.entryType !== "navigation");
+  }
+  getEntries() {
+    return this._entries;
+  }
+  getEntriesByName(name, type) {
+    return this._entries.filter((e) => e.name === name && (!type || e.entryType === type));
+  }
+  getEntriesByType(type) {
+    return this._entries.filter((e) => e.entryType === type);
+  }
+  mark(name, options) {
+    const entry = new PerformanceMark(name, options);
+    this._entries.push(entry);
+    return entry;
+  }
+  measure(measureName, startOrMeasureOptions, endMark) {
+    let start;
+    let end;
+    if (typeof startOrMeasureOptions === "string") {
+      start = this.getEntriesByName(startOrMeasureOptions, "mark")[0]?.startTime;
+      end = this.getEntriesByName(endMark, "mark")[0]?.startTime;
+    } else {
+      start = Number.parseFloat(startOrMeasureOptions?.start) || this.now();
+      end = Number.parseFloat(startOrMeasureOptions?.end) || this.now();
+    }
+    const entry = new PerformanceMeasure(measureName, {
+      startTime: start,
+      detail: {
+        start,
+        end
+      }
+    });
+    this._entries.push(entry);
+    return entry;
+  }
+  setResourceTimingBufferSize(maxSize) {
+    this._resourceTimingBufferSize = maxSize;
+  }
+  addEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.addEventListener");
+  }
+  removeEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.removeEventListener");
+  }
+  dispatchEvent(event) {
+    throw createNotImplementedError("Performance.dispatchEvent");
+  }
+  toJSON() {
+    return this;
+  }
+};
+var PerformanceObserver = class {
+  static {
+    __name(this, "PerformanceObserver");
+  }
+  __unenv__ = true;
+  static supportedEntryTypes = [];
+  _callback = null;
+  constructor(callback) {
+    this._callback = callback;
+  }
+  takeRecords() {
+    return [];
+  }
+  disconnect() {
+    throw createNotImplementedError("PerformanceObserver.disconnect");
+  }
+  observe(options) {
+    throw createNotImplementedError("PerformanceObserver.observe");
+  }
+  bind(fn) {
+    return fn;
+  }
+  runInAsyncScope(fn, thisArg, ...args) {
+    return fn.call(thisArg, ...args);
+  }
+  asyncId() {
+    return 0;
+  }
+  triggerAsyncId() {
+    return 0;
+  }
+  emitDestroy() {
+    return this;
+  }
+};
+var performance2 = globalThis.performance && "addEventListener" in globalThis.performance ? globalThis.performance : new Performance();
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/polyfill/performance.mjs
+if (!("__unenv__" in performance2)) {
+  const proto = Performance.prototype;
+  for (const key of Object.getOwnPropertyNames(proto)) {
+    if (key !== "constructor" && !(key in performance2)) {
+      const desc = Object.getOwnPropertyDescriptor(proto, key);
+      if (desc) {
+        Object.defineProperty(performance2, key, desc);
+      }
+    }
+  }
+}
+globalThis.performance = performance2;
+globalThis.Performance = Performance;
+globalThis.PerformanceEntry = PerformanceEntry;
+globalThis.PerformanceMark = PerformanceMark;
+globalThis.PerformanceMeasure = PerformanceMeasure;
+globalThis.PerformanceObserver = PerformanceObserver;
+globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/console.mjs
+import { Writable } from "node:stream";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/mock/noop.mjs
+var noop_default = Object.assign(() => {
+}, { __unenv__: true });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/console.mjs
+var _console = globalThis.console;
+var _ignoreErrors = true;
+var _stderr = new Writable();
+var _stdout = new Writable();
+var log = _console?.log ?? noop_default;
+var info = _console?.info ?? log;
+var trace = _console?.trace ?? info;
+var debug = _console?.debug ?? log;
+var table = _console?.table ?? log;
+var error = _console?.error ?? log;
+var warn = _console?.warn ?? error;
+var createTask = _console?.createTask ?? /* @__PURE__ */ notImplemented("console.createTask");
+var clear = _console?.clear ?? noop_default;
+var count = _console?.count ?? noop_default;
+var countReset = _console?.countReset ?? noop_default;
+var dir = _console?.dir ?? noop_default;
+var dirxml = _console?.dirxml ?? noop_default;
+var group = _console?.group ?? noop_default;
+var groupEnd = _console?.groupEnd ?? noop_default;
+var groupCollapsed = _console?.groupCollapsed ?? noop_default;
+var profile = _console?.profile ?? noop_default;
+var profileEnd = _console?.profileEnd ?? noop_default;
+var time = _console?.time ?? noop_default;
+var timeEnd = _console?.timeEnd ?? noop_default;
+var timeLog = _console?.timeLog ?? noop_default;
+var timeStamp = _console?.timeStamp ?? noop_default;
+var Console = _console?.Console ?? /* @__PURE__ */ notImplementedClass("console.Console");
+var _times = /* @__PURE__ */ new Map();
+var _stdoutErrorHandler = noop_default;
+var _stderrErrorHandler = noop_default;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/node/console.mjs
+var workerdConsole = globalThis["console"];
+var {
+  assert,
+  clear: clear2,
+  // @ts-expect-error undocumented public API
+  context,
+  count: count2,
+  countReset: countReset2,
+  // @ts-expect-error undocumented public API
+  createTask: createTask2,
+  debug: debug2,
+  dir: dir2,
+  dirxml: dirxml2,
+  error: error2,
+  group: group2,
+  groupCollapsed: groupCollapsed2,
+  groupEnd: groupEnd2,
+  info: info2,
+  log: log2,
+  profile: profile2,
+  profileEnd: profileEnd2,
+  table: table2,
+  time: time2,
+  timeEnd: timeEnd2,
+  timeLog: timeLog2,
+  timeStamp: timeStamp2,
+  trace: trace2,
+  warn: warn2
+} = workerdConsole;
+Object.assign(workerdConsole, {
+  Console,
+  _ignoreErrors,
+  _stderr,
+  _stderrErrorHandler,
+  _stdout,
+  _stdoutErrorHandler,
+  _times
+});
+var console_default = workerdConsole;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-console
+globalThis.console = console_default;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/hrtime.mjs
+var hrtime = /* @__PURE__ */ Object.assign(/* @__PURE__ */ __name(function hrtime2(startTime) {
+  const now = Date.now();
+  const seconds = Math.trunc(now / 1e3);
+  const nanos = now % 1e3 * 1e6;
+  if (startTime) {
+    let diffSeconds = seconds - startTime[0];
+    let diffNanos = nanos - startTime[0];
+    if (diffNanos < 0) {
+      diffSeconds = diffSeconds - 1;
+      diffNanos = 1e9 + diffNanos;
+    }
+    return [diffSeconds, diffNanos];
+  }
+  return [seconds, nanos];
+}, "hrtime"), { bigint: /* @__PURE__ */ __name(function bigint() {
+  return BigInt(Date.now() * 1e6);
+}, "bigint") });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+import { EventEmitter } from "node:events";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/tty/read-stream.mjs
+var ReadStream = class {
+  static {
+    __name(this, "ReadStream");
+  }
+  fd;
+  isRaw = false;
+  isTTY = false;
+  constructor(fd) {
+    this.fd = fd;
+  }
+  setRawMode(mode) {
+    this.isRaw = mode;
+    return this;
+  }
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/tty/write-stream.mjs
+var WriteStream = class {
+  static {
+    __name(this, "WriteStream");
+  }
+  fd;
+  columns = 80;
+  rows = 24;
+  isTTY = false;
+  constructor(fd) {
+    this.fd = fd;
+  }
+  clearLine(dir3, callback) {
+    callback && callback();
+    return false;
+  }
+  clearScreenDown(callback) {
+    callback && callback();
+    return false;
+  }
+  cursorTo(x, y, callback) {
+    callback && typeof callback === "function" && callback();
+    return false;
+  }
+  moveCursor(dx, dy, callback) {
+    callback && callback();
+    return false;
+  }
+  getColorDepth(env2) {
+    return 1;
+  }
+  hasColors(count3, env2) {
+    return false;
+  }
+  getWindowSize() {
+    return [this.columns, this.rows];
+  }
+  write(str, encoding, cb) {
+    if (str instanceof Uint8Array) {
+      str = new TextDecoder().decode(str);
+    }
+    try {
+      console.log(str);
+    } catch {
+    }
+    cb && typeof cb === "function" && cb();
+    return false;
+  }
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/node-version.mjs
+var NODE_VERSION = "22.14.0";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+var Process = class _Process extends EventEmitter {
+  static {
+    __name(this, "Process");
+  }
+  env;
+  hrtime;
+  nextTick;
+  constructor(impl) {
+    super();
+    this.env = impl.env;
+    this.hrtime = impl.hrtime;
+    this.nextTick = impl.nextTick;
+    for (const prop of [...Object.getOwnPropertyNames(_Process.prototype), ...Object.getOwnPropertyNames(EventEmitter.prototype)]) {
+      const value = this[prop];
+      if (typeof value === "function") {
+        this[prop] = value.bind(this);
+      }
+    }
+  }
+  // --- event emitter ---
+  emitWarning(warning, type, code) {
+    console.warn(`${code ? `[${code}] ` : ""}${type ? `${type}: ` : ""}${warning}`);
+  }
+  emit(...args) {
+    return super.emit(...args);
+  }
+  listeners(eventName) {
+    return super.listeners(eventName);
+  }
+  // --- stdio (lazy initializers) ---
+  #stdin;
+  #stdout;
+  #stderr;
+  get stdin() {
+    return this.#stdin ??= new ReadStream(0);
+  }
+  get stdout() {
+    return this.#stdout ??= new WriteStream(1);
+  }
+  get stderr() {
+    return this.#stderr ??= new WriteStream(2);
+  }
+  // --- cwd ---
+  #cwd = "/";
+  chdir(cwd2) {
+    this.#cwd = cwd2;
+  }
+  cwd() {
+    return this.#cwd;
+  }
+  // --- dummy props and getters ---
+  arch = "";
+  platform = "";
+  argv = [];
+  argv0 = "";
+  execArgv = [];
+  execPath = "";
+  title = "";
+  pid = 200;
+  ppid = 100;
+  get version() {
+    return `v${NODE_VERSION}`;
+  }
+  get versions() {
+    return { node: NODE_VERSION };
+  }
+  get allowedNodeEnvironmentFlags() {
+    return /* @__PURE__ */ new Set();
+  }
+  get sourceMapsEnabled() {
+    return false;
+  }
+  get debugPort() {
+    return 0;
+  }
+  get throwDeprecation() {
+    return false;
+  }
+  get traceDeprecation() {
+    return false;
+  }
+  get features() {
+    return {};
+  }
+  get release() {
+    return {};
+  }
+  get connected() {
+    return false;
+  }
+  get config() {
+    return {};
+  }
+  get moduleLoadList() {
+    return [];
+  }
+  constrainedMemory() {
+    return 0;
+  }
+  availableMemory() {
+    return 0;
+  }
+  uptime() {
+    return 0;
+  }
+  resourceUsage() {
+    return {};
+  }
+  // --- noop methods ---
+  ref() {
+  }
+  unref() {
+  }
+  // --- unimplemented methods ---
+  umask() {
+    throw createNotImplementedError("process.umask");
+  }
+  getBuiltinModule() {
+    return void 0;
+  }
+  getActiveResourcesInfo() {
+    throw createNotImplementedError("process.getActiveResourcesInfo");
+  }
+  exit() {
+    throw createNotImplementedError("process.exit");
+  }
+  reallyExit() {
+    throw createNotImplementedError("process.reallyExit");
+  }
+  kill() {
+    throw createNotImplementedError("process.kill");
+  }
+  abort() {
+    throw createNotImplementedError("process.abort");
+  }
+  dlopen() {
+    throw createNotImplementedError("process.dlopen");
+  }
+  setSourceMapsEnabled() {
+    throw createNotImplementedError("process.setSourceMapsEnabled");
+  }
+  loadEnvFile() {
+    throw createNotImplementedError("process.loadEnvFile");
+  }
+  disconnect() {
+    throw createNotImplementedError("process.disconnect");
+  }
+  cpuUsage() {
+    throw createNotImplementedError("process.cpuUsage");
+  }
+  setUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.setUncaughtExceptionCaptureCallback");
+  }
+  hasUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.hasUncaughtExceptionCaptureCallback");
+  }
+  initgroups() {
+    throw createNotImplementedError("process.initgroups");
+  }
+  openStdin() {
+    throw createNotImplementedError("process.openStdin");
+  }
+  assert() {
+    throw createNotImplementedError("process.assert");
+  }
+  binding() {
+    throw createNotImplementedError("process.binding");
+  }
+  // --- attached interfaces ---
+  permission = { has: /* @__PURE__ */ notImplemented("process.permission.has") };
+  report = {
+    directory: "",
+    filename: "",
+    signal: "SIGUSR2",
+    compact: false,
+    reportOnFatalError: false,
+    reportOnSignal: false,
+    reportOnUncaughtException: false,
+    getReport: /* @__PURE__ */ notImplemented("process.report.getReport"),
+    writeReport: /* @__PURE__ */ notImplemented("process.report.writeReport")
+  };
+  finalization = {
+    register: /* @__PURE__ */ notImplemented("process.finalization.register"),
+    unregister: /* @__PURE__ */ notImplemented("process.finalization.unregister"),
+    registerBeforeExit: /* @__PURE__ */ notImplemented("process.finalization.registerBeforeExit")
+  };
+  memoryUsage = Object.assign(() => ({
+    arrayBuffers: 0,
+    rss: 0,
+    external: 0,
+    heapTotal: 0,
+    heapUsed: 0
+  }), { rss: /* @__PURE__ */ __name(() => 0, "rss") });
+  // --- undefined props ---
+  mainModule = void 0;
+  domain = void 0;
+  // optional
+  send = void 0;
+  exitCode = void 0;
+  channel = void 0;
+  getegid = void 0;
+  geteuid = void 0;
+  getgid = void 0;
+  getgroups = void 0;
+  getuid = void 0;
+  setegid = void 0;
+  seteuid = void 0;
+  setgid = void 0;
+  setgroups = void 0;
+  setuid = void 0;
+  // internals
+  _events = void 0;
+  _eventsCount = void 0;
+  _exiting = void 0;
+  _maxListeners = void 0;
+  _debugEnd = void 0;
+  _debugProcess = void 0;
+  _fatalException = void 0;
+  _getActiveHandles = void 0;
+  _getActiveRequests = void 0;
+  _kill = void 0;
+  _preload_modules = void 0;
+  _rawDebug = void 0;
+  _startProfilerIdleNotifier = void 0;
+  _stopProfilerIdleNotifier = void 0;
+  _tickCallback = void 0;
+  _disconnect = void 0;
+  _handleQueue = void 0;
+  _pendingMessage = void 0;
+  _channel = void 0;
+  _send = void 0;
+  _linkedBinding = void 0;
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/node/process.mjs
+var globalProcess = globalThis["process"];
+var getBuiltinModule = globalProcess.getBuiltinModule;
+var workerdProcess = getBuiltinModule("node:process");
+var unenvProcess = new Process({
+  env: globalProcess.env,
+  hrtime,
+  // `nextTick` is available from workerd process v1
+  nextTick: workerdProcess.nextTick
+});
+var { exit, features, platform } = workerdProcess;
+var {
+  _channel,
+  _debugEnd,
+  _debugProcess,
+  _disconnect,
+  _events,
+  _eventsCount,
+  _exiting,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _handleQueue,
+  _kill,
+  _linkedBinding,
+  _maxListeners,
+  _pendingMessage,
+  _preload_modules,
+  _rawDebug,
+  _send,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  arch,
+  argv,
+  argv0,
+  assert: assert2,
+  availableMemory,
+  binding,
+  channel,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  disconnect,
+  dlopen,
+  domain,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  exitCode,
+  finalization,
+  getActiveResourcesInfo,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getMaxListeners,
+  getuid,
+  hasUncaughtExceptionCaptureCallback,
+  hrtime: hrtime3,
+  initgroups,
+  kill,
+  listenerCount,
+  listeners,
+  loadEnvFile,
+  mainModule,
+  memoryUsage,
+  moduleLoadList,
+  nextTick,
+  off,
+  on,
+  once,
+  openStdin,
+  permission,
+  pid,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  reallyExit,
+  ref,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  send,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  setuid,
+  setUncaughtExceptionCaptureCallback,
+  sourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  throwDeprecation,
+  title,
+  traceDeprecation,
+  umask,
+  unref,
+  uptime,
+  version,
+  versions
+} = unenvProcess;
+var _process = {
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  hasUncaughtExceptionCaptureCallback,
+  setUncaughtExceptionCaptureCallback,
+  loadEnvFile,
+  sourceMapsEnabled,
+  arch,
+  argv,
+  argv0,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  availableMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  dlopen,
+  disconnect,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  exit,
+  finalization,
+  features,
+  getBuiltinModule,
+  getActiveResourcesInfo,
+  getMaxListeners,
+  hrtime: hrtime3,
+  kill,
+  listeners,
+  listenerCount,
+  memoryUsage,
+  nextTick,
+  on,
+  off,
+  once,
+  pid,
+  platform,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  title,
+  throwDeprecation,
+  traceDeprecation,
+  umask,
+  uptime,
+  version,
+  versions,
+  // @ts-expect-error old API
+  domain,
+  initgroups,
+  moduleLoadList,
+  reallyExit,
+  openStdin,
+  assert: assert2,
+  binding,
+  send,
+  exitCode,
+  channel,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getuid,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setuid,
+  permission,
+  mainModule,
+  _events,
+  _eventsCount,
+  _exiting,
+  _maxListeners,
+  _debugEnd,
+  _debugProcess,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _kill,
+  _preload_modules,
+  _rawDebug,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  _disconnect,
+  _handleQueue,
+  _pendingMessage,
+  _channel,
+  _send,
+  _linkedBinding
+};
+var process_default = _process;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-process
+globalThis.process = process_default;
+
+// src/logger.ts
+var LEVEL_PRIORITY = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+  AUDIT: 4
+};
+var minLogLevel = "INFO";
+function shouldLog(level) {
+  return LEVEL_PRIORITY[level] >= LEVEL_PRIORITY[minLogLevel];
+}
+__name(shouldLog, "shouldLog");
+function generateTraceId() {
+  const buf = new Uint8Array(12);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(generateTraceId, "generateTraceId");
+var Logger = class _Logger {
+  static {
+    __name(this, "Logger");
+  }
+  service;
+  traceId;
+  db;
+  constructor(service, traceId, db) {
+    this.service = service;
+    this.traceId = traceId ?? generateTraceId();
+    this.db = db ?? null;
+  }
+  child(meta) {
+    const child = new _Logger(this.service, this.traceId, this.db ?? void 0);
+    return child;
+  }
+  debug(message, metadata) {
+    this.emit("DEBUG", message, metadata);
+  }
+  info(message, metadata) {
+    this.emit("INFO", message, metadata);
+  }
+  warn(message, metadata) {
+    this.emit("WARN", message, metadata);
+  }
+  error(message, metadata) {
+    this.emit("ERROR", message, metadata);
+  }
+  /**
+   * AUDIT level: every admin action is written to D1 `admin_audit` table.
+   * This is non-blocking: failures are logged but do not throw.
+   */
+  async audit(adminId, action, target, result, extra) {
+    const entry = {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      level: "AUDIT",
+      service: this.service,
+      trace_id: this.traceId,
+      message: `ADMIN_AUDIT: ${adminId} performed ${action} on ${target} => ${result}`,
+      metadata: {
+        admin_id: adminId,
+        action,
+        target,
+        result,
+        ...extra
+      }
+    };
+    if (shouldLog("AUDIT")) {
+      console.log(JSON.stringify(entry));
+    }
+    if (this.db) {
+      try {
+        await this.db.prepare(
+          `INSERT INTO admin_audit
+             (timestamp, trace_id, admin_id, action, target, result, ip, user_agent, metadata)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          entry.timestamp,
+          this.traceId,
+          adminId,
+          action,
+          target,
+          result,
+          extra?.ip ?? null,
+          extra?.user_agent ?? null,
+          extra?.metadata ? JSON.stringify(extra.metadata) : null
+        ).run();
+      } catch (e) {
+        console.error(
+          JSON.stringify({
+            level: "ERROR",
+            service: this.service,
+            trace_id: this.traceId,
+            message: "Failed to write audit record to D1",
+            error: e.message
+          })
+        );
+      }
+    }
+  }
+  emit(level, message, metadata) {
+    if (!shouldLog(level)) return;
+    const entry = {
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      level,
+      service: this.service,
+      trace_id: this.traceId,
+      message,
+      metadata
+    };
+    const line = JSON.stringify(entry);
+    switch (level) {
+      case "ERROR":
+        console.error(line);
+        break;
+      case "WARN":
+        console.warn(line);
+        break;
+      default:
+        console.log(line);
+    }
+  }
+};
+
+// src/license.ts
+var LicenseValidator = class {
+  static {
+    __name(this, "LicenseValidator");
+  }
+  jwksUrl;
+  logger;
+  keyCache = /* @__PURE__ */ new Map();
+  jwksCache = null;
+  jwksFetchedAt = 0;
+  jwksTtlMs = 5 * 60 * 1e3;
+  // 5 minutes
+  constructor(jwksUrl, logger2) {
+    this.jwksUrl = jwksUrl;
+    this.logger = logger2;
+    this.logger.debug("[LicenseValidator.constructor] ENTER", { jwksUrl });
+    this.logger.debug("[LicenseValidator.constructor] EXIT");
+  }
+  // -----------------------------------------------------------------------
+  // Public API
+  // -----------------------------------------------------------------------
+  /** Validate the Authorization header of a request. */
+  async validate(request, requestId) {
+    this.logger.debug("[LicenseValidator.validate] ENTER", { requestId, url: request.url });
+    const authHeader = request.headers.get("Authorization");
+    if (!authHeader) {
+      this.logger.debug("[LicenseValidator.validate] BRANCH path=missing_header reason=no_authorization_header");
+      this.logger.debug("[LicenseValidator.validate] EXIT", { result: "invalid_missing_header", requestId });
+      return { valid: false, error: "Missing Authorization header" };
+    }
+    const [scheme, token] = authHeader.split(" ", 2);
+    if (scheme !== "Bearer" || !token) {
+      this.logger.debug("[LicenseValidator.validate] BRANCH path=invalid_scheme reason=not_bearer_token", { scheme });
+      this.logger.debug("[LicenseValidator.validate] EXIT", { result: "invalid_scheme", requestId });
+      return { valid: false, error: "Authorization header must be Bearer <token>" };
+    }
+    this.logger.debug("[LicenseValidator.validate] BRANCH path=token_present token_prefix=" + token.slice(0, 8) + "...");
+    this.logger.debug("[LicenseValidator.validate] CALLING target=verifyToken", { requestId });
+    return this.verifyToken(token, requestId);
+  }
+  /** Verify a raw JWT string. */
+  async verifyToken(token, requestId) {
+    this.logger.debug("[LicenseValidator.verifyToken] ENTER", { requestId, tokenPrefix: token.slice(0, 8) + "..." });
+    const parts = token.split(".");
+    if (parts.length !== 3) {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=invalid_format reason=not_three_parts");
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "invalid_format", requestId });
+      return { valid: false, error: "Invalid JWT format" };
+    }
+    let header;
+    try {
+      header = JSON.parse(this.base64UrlDecode(parts[0]));
+    } catch {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=invalid_header reason=header_decode_failed");
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "invalid_header", requestId });
+      return { valid: false, error: "Invalid JWT header" };
+    }
+    if (!header.kid) {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=missing_kid reason=no_key_id_in_header");
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "missing_kid", requestId });
+      return { valid: false, error: "JWT header missing kid" };
+    }
+    this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=header_ok", { kid: header.kid, alg: header.alg });
+    let claims;
+    try {
+      claims = JSON.parse(this.base64UrlDecode(parts[1]));
+    } catch {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=invalid_payload reason=payload_decode_failed");
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "invalid_payload", requestId });
+      return { valid: false, error: "Invalid JWT payload" };
+    }
+    const now = Math.floor(Date.now() / 1e3);
+    if (claims.exp && claims.exp < now) {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=expired reason=token_expired", { exp: claims.exp, now });
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "expired", requestId });
+      return { valid: false, error: "Token expired" };
+    }
+    if (claims.nbf && claims.nbf > now) {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=not_yet_valid reason=token_not_yet_valid", { nbf: claims.nbf, now });
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "not_yet_valid", requestId });
+      return { valid: false, error: "Token not yet valid" };
+    }
+    this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=time_valid", { now, exp: claims.exp });
+    this.logger.debug("[LicenseValidator.verifyToken] CALLING target=fetchSigningKey", { kid: header.kid });
+    const key = await this.fetchSigningKey(header.kid, requestId);
+    if (!key) {
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=key_not_found reason=no_matching_key", { kid: header.kid });
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "key_not_found", requestId });
+      return { valid: false, error: `Signing key not found: ${header.kid}` };
+    }
+    this.logger.debug("[LicenseValidator.verifyToken] CALLING target=crypto.verify", { kid: header.kid, alg: header.alg });
+    const signature = this.base64UrlToBytes(parts[2]);
+    const data = new TextEncoder().encode(parts[0] + "." + parts[1]);
+    try {
+      const valid = await crypto.subtle.verify(
+        { name: "RSASSA-PKCS1-v1_5" },
+        key,
+        signature,
+        data
+      );
+      if (!valid) {
+        this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=signature_invalid reason=crypto_verify_failed");
+        this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "signature_invalid", requestId });
+        return { valid: false, error: "Invalid token signature" };
+      }
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=signature_valid");
+      this.logger.info("[LicenseValidator.verifyToken] license_validated", {
+        requestId,
+        sub: claims.sub,
+        tier: claims.tier ?? "free",
+        issuer: claims.iss
+      });
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "valid", requestId, sub: claims.sub, tier: claims.tier });
+      return { valid: true, claims };
+    } catch (e) {
+      this.logger.error("[LicenseValidator.verifyToken] crypto verify error", { error: String(e), requestId });
+      this.logger.debug("[LicenseValidator.verifyToken] BRANCH path=crypto_error reason=verify_exception", { error: String(e) });
+      this.logger.debug("[LicenseValidator.verifyToken] EXIT", { result: "crypto_error", requestId });
+      return { valid: false, error: `Signature verification failed: ${String(e)}` };
+    }
+  }
+  // -----------------------------------------------------------------------
+  // Key management
+  // -----------------------------------------------------------------------
+  /** Fetch JWKS and cache keys. */
+  async fetchSigningKey(kid, requestId) {
+    this.logger.debug("[LicenseValidator.fetchSigningKey] ENTER", { kid, requestId });
+    if (this.keyCache.has(kid)) {
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=cache_hit reason=key_in_cache");
+      this.logger.debug("[LicenseValidator.fetchSigningKey] EXIT", { result: "cached" });
+      return this.keyCache.get(kid);
+    }
+    const now = Date.now();
+    if (!this.jwksCache || now - this.jwksFetchedAt > this.jwksTtlMs) {
+      this.logger.debug("[LicenseValidator.fetchSigningKey] CALLING target=fetchJWKS", { jwksUrl: this.jwksUrl });
+      const fetched = await this.fetchJWKS(requestId);
+      if (!fetched) {
+        this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=jwks_fetch_failed");
+        this.logger.debug("[LicenseValidator.fetchSigningKey] EXIT", { result: "null" });
+        return null;
+      }
+      this.jwksCache = fetched;
+      this.jwksFetchedAt = now;
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=jwks_fresh", { keyCount: fetched.keys.length });
+    } else {
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=jwks_cached reason=cache_still_valid", { ageMs: now - this.jwksFetchedAt });
+    }
+    const jwk = this.jwksCache.keys.find((k) => k.kid === kid);
+    if (!jwk) {
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=key_not_in_jwks", { kid, availableKids: this.jwksCache.keys.map((k) => k.kid) });
+      this.logger.debug("[LicenseValidator.fetchSigningKey] EXIT", { result: "null" });
+      return null;
+    }
+    this.logger.debug("[LicenseValidator.fetchSigningKey] CALLING target=crypto.subtle.importKey", { kid, kty: jwk.kty });
+    try {
+      const key = await crypto.subtle.importKey(
+        "jwk",
+        jwk,
+        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+        false,
+        ["verify"]
+      );
+      this.keyCache.set(kid, key);
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=key_imported");
+      this.logger.debug("[LicenseValidator.fetchSigningKey] EXIT", { result: "imported", kid });
+      return key;
+    } catch (e) {
+      this.logger.error("[LicenseValidator.fetchSigningKey] key import error", { error: String(e), kid });
+      this.logger.debug("[LicenseValidator.fetchSigningKey] BRANCH path=import_error", { error: String(e) });
+      this.logger.debug("[LicenseValidator.fetchSigningKey] EXIT", { result: "null" });
+      return null;
+    }
+  }
+  /** Fetch JWKS from the configured URL. */
+  async fetchJWKS(requestId) {
+    this.logger.debug("[LicenseValidator.fetchJWKS] ENTER", { jwksUrl: this.jwksUrl, requestId });
+    try {
+      this.logger.debug("[LicenseValidator.fetchJWKS] CALLING target=fetch", { jwksUrl: this.jwksUrl });
+      const resp = await fetch(this.jwksUrl, {
+        headers: { Accept: "application/json" }
+      });
+      if (!resp.ok) {
+        this.logger.error("[LicenseValidator.fetchJWKS] JWKS fetch error", { status: resp.status, statusText: resp.statusText });
+        this.logger.debug("[LicenseValidator.fetchJWKS] BRANCH path=fetch_failed reason=non_200", { status: resp.status });
+        this.logger.debug("[LicenseValidator.fetchJWKS] EXIT", { result: "null" });
+        return null;
+      }
+      const jwks = await resp.json();
+      this.logger.info("[LicenseValidator.fetchJWKS] jwks_fetched", {
+        keyCount: jwks.keys.length,
+        requestId
+      });
+      this.logger.debug("[LicenseValidator.fetchJWKS] BRANCH path=fetch_success");
+      this.logger.debug("[LicenseValidator.fetchJWKS] EXIT", { keyCount: jwks.keys.length });
+      return jwks;
+    } catch (e) {
+      this.logger.error("[LicenseValidator.fetchJWKS] JWKS fetch exception", { error: String(e), requestId });
+      this.logger.debug("[LicenseValidator.fetchJWKS] BRANCH path=fetch_exception", { error: String(e) });
+      this.logger.debug("[LicenseValidator.fetchJWKS] EXIT", { result: "null" });
+      return null;
+    }
+  }
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
+  base64UrlDecode(str) {
+    const padded = str.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((str.length + 3) % 4);
+    try {
+      return atob(padded);
+    } catch {
+      return atob(str.replace(/-/g, "+").replace(/_/g, "/"));
+    }
+  }
+  base64UrlToBytes(str) {
+    const binary = this.base64UrlDecode(str);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  }
+};
+
+// src/federation.ts
+var MAX_CONSECUTIVE_FAILURES = 3;
+var HEALTH_CHECK_TIMEOUT_MS = 5e3;
+var FederationRouter = class {
+  static {
+    __name(this, "FederationRouter");
+  }
+  kv;
+  logger;
+  healthCache = /* @__PURE__ */ new Map();
+  nodes = [];
+  nodesLoadedAt = 0;
+  nodesTtlMs = 6e4;
+  // 1 minute
+  constructor(kv, logger2) {
+    this.kv = kv;
+    this.logger = logger2;
+    this.logger.debug("[FederationRouter.constructor] ENTER");
+    this.logger.debug("[FederationRouter.constructor] EXIT");
+  }
+  // -----------------------------------------------------------------------
+  // Node management
+  // -----------------------------------------------------------------------
+  /** Load the node list from KV (cached for 1 minute). */
+  async loadNodes() {
+    this.logger.debug("[FederationRouter.loadNodes] ENTER");
+    const now = Date.now();
+    if (this.nodes.length > 0 && now - this.nodesLoadedAt < this.nodesTtlMs) {
+      this.logger.debug("[FederationRouter.loadNodes] BRANCH path=cache_hit reason=nodes_still_fresh", { ageMs: now - this.nodesLoadedAt, nodeCount: this.nodes.length });
+      this.logger.debug("[FederationRouter.loadNodes] EXIT", { nodeCount: this.nodes.length, source: "cache" });
+      return this.nodes;
+    }
+    this.logger.debug("[FederationRouter.loadNodes] BRANCH path=cache_miss reason=nodes_expired_or_empty");
+    this.logger.debug("[FederationRouter.loadNodes] CALLING target=KV.get key=federation:nodes");
+    try {
+      const raw = await this.kv.get("federation:nodes");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        this.nodes = parsed.filter((n) => n.enabled);
+        this.nodesLoadedAt = now;
+        this.logger.info("[FederationRouter.loadNodes] nodes_loaded", { nodeCount: this.nodes.length });
+        this.logger.debug("[FederationRouter.loadNodes] BRANCH path=nodes_loaded_from_kv", { totalNodes: parsed.length, enabledNodes: this.nodes.length });
+        this.logger.debug("[FederationRouter.loadNodes] EXIT", { nodeCount: this.nodes.length, source: "kv" });
+        return this.nodes;
+      } else {
+        this.logger.debug("[FederationRouter.loadNodes] BRANCH path=kv_empty reason=no_nodes_configured");
+        this.nodes = [];
+        this.nodesLoadedAt = now;
+      }
+    } catch (e) {
+      this.logger.error("[FederationRouter.loadNodes] nodes_load_error", { error: String(e) });
+      this.logger.debug("[FederationRouter.loadNodes] BRANCH path=kv_error reason=exception", { error: String(e) });
+    }
+    this.logger.debug("[FederationRouter.loadNodes] EXIT", { nodeCount: this.nodes.length, source: "fallback_empty" });
+    return this.nodes;
+  }
+  /** Persist the current node list to KV. */
+  async saveNodes(nodes) {
+    this.logger.debug("[FederationRouter.saveNodes] ENTER", { nodeCount: nodes.length });
+    try {
+      this.logger.debug("[FederationRouter.saveNodes] CALLING target=KV.put key=federation:nodes");
+      await this.kv.put("federation:nodes", JSON.stringify(nodes));
+      this.nodes = nodes.filter((n) => n.enabled);
+      this.nodesLoadedAt = Date.now();
+      this.logger.info("[FederationRouter.saveNodes] nodes_saved", { nodeCount: nodes.length });
+      this.logger.debug("[FederationRouter.saveNodes] BRANCH path=save_success");
+    } catch (e) {
+      this.logger.error("[FederationRouter.saveNodes] nodes_save_error", { error: String(e) });
+      this.logger.debug("[FederationRouter.saveNodes] BRANCH path=save_error", { error: String(e) });
+      throw e;
+    }
+    this.logger.debug("[FederationRouter.saveNodes] EXIT");
+  }
+  /** Register a new node (append if not exists). */
+  async registerNode(node) {
+    this.logger.debug("[FederationRouter.registerNode] ENTER", { nodeId: node.id, url: node.url, region: node.region });
+    const nodes = await this.loadNodes();
+    const existing = nodes.findIndex((n) => n.id === node.id);
+    if (existing >= 0) {
+      this.logger.debug("[FederationRouter.registerNode] BRANCH path=update_existing reason=node_already_exists", { nodeId: node.id });
+      nodes[existing] = { ...nodes[existing], ...node };
+    } else {
+      this.logger.debug("[FederationRouter.registerNode] BRANCH path=add_new reason=new_node", { nodeId: node.id });
+      nodes.push(node);
+    }
+    this.logger.debug("[FederationRouter.registerNode] CALLING target=saveNodes");
+    await this.saveNodes(nodes);
+    this.logger.debug("[FederationRouter.registerNode] EXIT", { nodeId: node.id });
+  }
+  /** Deregister a node by ID. */
+  async deregisterNode(nodeId) {
+    this.logger.debug("[FederationRouter.deregisterNode] ENTER", { nodeId });
+    const nodes = await this.loadNodes();
+    const beforeCount = nodes.length;
+    const filtered = nodes.filter((n) => n.id !== nodeId);
+    if (filtered.length === beforeCount) {
+      this.logger.debug("[FederationRouter.deregisterNode] BRANCH path=not_found reason=node_id_not_in_list", { nodeId });
+      this.logger.debug("[FederationRouter.deregisterNode] EXIT", { result: "not_found" });
+      return;
+    }
+    this.logger.debug("[FederationRouter.deregisterNode] BRANCH path=removed", { beforeCount, afterCount: filtered.length });
+    this.logger.debug("[FederationRouter.deregisterNode] CALLING target=saveNodes");
+    await this.saveNodes(filtered);
+    this.logger.debug("[FederationRouter.deregisterNode] EXIT", { nodeId, removed: true });
+  }
+  // -----------------------------------------------------------------------
+  // Health checking
+  // -----------------------------------------------------------------------
+  /** Check the health of a single node. */
+  async healthCheckNode(node) {
+    this.logger.debug("[FederationRouter.healthCheckNode] ENTER", { nodeId: node.id, healthUrl: node.health_url });
+    const t0 = performance.now();
+    let healthy = false;
+    let latencyMs = 0;
+    try {
+      this.logger.debug("[FederationRouter.healthCheckNode] CALLING target=fetch", { url: node.health_url, timeout: HEALTH_CHECK_TIMEOUT_MS });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
+      const resp = await fetch(node.health_url, {
+        method: "GET",
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      latencyMs = Math.round(performance.now() - t0);
+      healthy = resp.ok;
+      if (healthy) {
+        this.logger.debug("[FederationRouter.healthCheckNode] BRANCH path=healthy", { nodeId: node.id, latencyMs });
+      } else {
+        this.logger.debug("[FederationRouter.healthCheckNode] BRANCH path=unhealthy reason=non_200", { nodeId: node.id, status: resp.status, latencyMs });
+      }
+    } catch (e) {
+      latencyMs = Math.round(performance.now() - t0);
+      healthy = false;
+      this.logger.debug("[FederationRouter.healthCheckNode] BRANCH path=unhealthy reason=fetch_exception", { nodeId: node.id, error: String(e), latencyMs });
+    }
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    if (healthy) {
+      node.last_healthy_at = now;
+      node.consecutive_failures = 0;
+    } else {
+      node.consecutive_failures = (node.consecutive_failures ?? 0) + 1;
+    }
+    this.healthCache.set(node.id, { checkedAt: Date.now(), healthy, latencyMs });
+    const result = {
+      node_id: node.id,
+      url: node.url,
+      region: node.region,
+      healthy,
+      latency_ms: latencyMs,
+      last_checked: now,
+      consecutive_failures: node.consecutive_failures ?? 0
+    };
+    this.logger.info("[FederationRouter.healthCheckNode] health_check_complete", {
+      nodeId: node.id,
+      healthy,
+      latencyMs,
+      consecutiveFailures: node.consecutive_failures
+    });
+    this.logger.debug("[FederationRouter.healthCheckNode] EXIT", { nodeId: node.id, healthy, latencyMs });
+    return result;
+  }
+  /** Check health of all registered nodes in parallel. */
+  async healthCheckAll() {
+    this.logger.debug("[FederationRouter.healthCheckAll] ENTER");
+    const nodes = await this.loadNodes();
+    if (nodes.length === 0) {
+      this.logger.debug("[FederationRouter.healthCheckAll] BRANCH path=no_nodes reason=no_nodes_registered");
+      this.logger.debug("[FederationRouter.healthCheckAll] EXIT", { result: "[]" });
+      return [];
+    }
+    this.logger.debug("[FederationRouter.healthCheckAll] CALLING target=healthCheckNode for all nodes", { nodeCount: nodes.length });
+    this.logger.debug("[FederationRouter.healthCheckAll] BRANCH path=checking_all reason=parallel_health_checks");
+    const checks = await Promise.all(
+      nodes.map((n) => this.healthCheckNode(n))
+    );
+    const healthyCount = checks.filter((c) => c.healthy).length;
+    this.logger.info("[FederationRouter.healthCheckAll] all_checks_complete", {
+      totalNodes: nodes.length,
+      healthyCount,
+      unhealthyCount: nodes.length - healthyCount
+    });
+    this.logger.debug("[FederationRouter.healthCheckAll] EXIT", { totalNodes: nodes.length, healthyCount });
+    return checks;
+  }
+  // -----------------------------------------------------------------------
+  // Routing
+  // -----------------------------------------------------------------------
+  /** Pick the best node for a given service. */
+  pickNode(service) {
+    this.logger.debug("[FederationRouter.pickNode] ENTER", { service });
+    const nodes = this.nodes;
+    if (nodes.length === 0) {
+      this.logger.debug("[FederationRouter.pickNode] BRANCH path=local reason=no_nodes_configured");
+      this.logger.debug("[FederationRouter.pickNode] EXIT", { result: "local", reason: "no_nodes" });
+      return { url: null, nodeId: null, reason: "local" };
+    }
+    const healthyNodes = nodes.filter((n) => {
+      const cache = this.healthCache.get(n.id);
+      if (!cache) return true;
+      if (!cache.healthy && (n.consecutive_failures ?? 0) >= MAX_CONSECUTIVE_FAILURES) {
+        return false;
+      }
+      return true;
+    });
+    if (healthyNodes.length === 0) {
+      this.logger.warn("[FederationRouter.pickNode] BRANCH path=no_healthy_nodes reason=all_nodes_unhealthy");
+      this.logger.debug("[FederationRouter.pickNode] EXIT", { result: "local", reason: "no_healthy" });
+      return { url: null, nodeId: null, reason: "no_healthy_nodes" };
+    }
+    let bestNode = null;
+    let bestLatency = Infinity;
+    for (const node of healthyNodes) {
+      const cache = this.healthCache.get(node.id);
+      const latency = cache?.latencyMs ?? Infinity;
+      if (latency < bestLatency) {
+        bestLatency = latency;
+        bestNode = node;
+      }
+    }
+    if (!bestNode) {
+      this.logger.debug("[FederationRouter.pickNode] BRANCH path=local_fallback reason=no_best_node_selected");
+      this.logger.debug("[FederationRouter.pickNode] EXIT", { result: "local" });
+      return { url: null, nodeId: null, reason: "no_healthy_nodes" };
+    }
+    const url = `${bestNode.url}/${service}`;
+    this.logger.debug("[FederationRouter.pickNode] BRANCH path=routed reason=lowest_latency", { nodeId: bestNode.id, latencyMs: bestLatency });
+    this.logger.info("[FederationRouter.pickNode] node_selected", {
+      service,
+      nodeId: bestNode.id,
+      region: bestNode.region,
+      latencyMs: bestLatency
+    });
+    this.logger.debug("[FederationRouter.pickNode] EXIT", { result: "routed", nodeId: bestNode.id, url });
+    return { url, nodeId: bestNode.id, reason: "nearest_healthy" };
+  }
+  /** Pick a node weighted by the configured weights (for load balancing). */
+  pickWeightedNode(service) {
+    this.logger.debug("[FederationRouter.pickWeightedNode] ENTER", { service });
+    const nodes = this.nodes;
+    if (nodes.length === 0) {
+      this.logger.debug("[FederationRouter.pickWeightedNode] BRANCH path=local reason=no_nodes");
+      this.logger.debug("[FederationRouter.pickWeightedNode] EXIT", { result: "local" });
+      return { url: null, nodeId: null, reason: "local" };
+    }
+    const totalWeight = nodes.reduce((sum, n) => sum + (n.enabled ? n.weight : 0), 0);
+    if (totalWeight <= 0) {
+      this.logger.debug("[FederationRouter.pickWeightedNode] BRANCH path=local reason=zero_total_weight");
+      this.logger.debug("[FederationRouter.pickWeightedNode] EXIT", { result: "local" });
+      return { url: null, nodeId: null, reason: "local" };
+    }
+    let random = Math.random() * totalWeight;
+    let selectedNode = null;
+    for (const node of nodes) {
+      if (!node.enabled) continue;
+      random -= node.weight;
+      if (random <= 0) {
+        selectedNode = node;
+        break;
+      }
+    }
+    if (!selectedNode) {
+      this.logger.debug("[FederationRouter.pickWeightedNode] BRANCH path=fallback_to_last reason=rounding");
+      selectedNode = nodes[nodes.length - 1];
+    }
+    const url = `${selectedNode.url}/${service}`;
+    this.logger.debug("[FederationRouter.pickWeightedNode] BRANCH path=weighted_random", { nodeId: selectedNode.id, weight: selectedNode.weight });
+    this.logger.debug("[FederationRouter.pickWeightedNode] EXIT", { nodeId: selectedNode.id, url });
+    return { url, nodeId: selectedNode.id, reason: "weighted_random" };
+  }
+  // -----------------------------------------------------------------------
+  // Diagnostics
+  // -----------------------------------------------------------------------
+  /** Get current router state for diagnostics. */
+  async getState() {
+    this.logger.debug("[FederationRouter.getState] ENTER");
+    const nodes = await this.loadNodes();
+    const cache = {};
+    for (const [k, v] of this.healthCache.entries()) {
+      cache[k] = v;
+    }
+    this.logger.debug("[FederationRouter.getState] EXIT", { nodeCount: nodes.length, cacheSize: this.healthCache.size });
+    return { nodes, healthCache: cache, nodesLoadedAt: this.nodesLoadedAt };
+  }
+};
+
+// src/admin.ts
+var AdminGateway = class {
+  static {
+    __name(this, "AdminGateway");
+  }
+  env;
+  logger;
+  config;
+  licenseValidator;
+  federationRouter;
+  constructor(env2) {
+    this.env = env2;
+    this.logger = new Logger({ min_level: "DEBUG" }, env2.AURIS_LOGS);
+    this.logger.debug("[AdminGateway.constructor] ENTER");
+    const allowedOrigins = (env2.ADMIN_ALLOWED_ORIGINS ?? "*").split(",").map((s) => s.trim()).filter(Boolean);
+    this.config = {
+      require_license: !!env2.LICENSE_JWKS_URL,
+      license_jwks_url: env2.LICENSE_JWKS_URL,
+      allowed_origins: allowedOrigins,
+      max_body_bytes: 1024 * 1024,
+      // 1 MB
+      federation_enabled: env2.FEDERATION_ENABLED === "true"
+    };
+    this.logger.debug("[AdminGateway.constructor] BRANCH path=config_loaded", { requireLicense: this.config.require_license, federationEnabled: this.config.federation_enabled });
+    this.licenseValidator = this.config.require_license ? new LicenseValidator(this.config.license_jwks_url, this.logger) : null;
+    this.logger.debug("[AdminGateway.constructor] LicenseValidator", { initialised: !!this.licenseValidator });
+    this.federationRouter = this.config.federation_enabled ? new FederationRouter(env2.MOE_ROUTES, this.logger) : null;
+    this.logger.debug("[AdminGateway.constructor] FederationRouter", { initialised: !!this.federationRouter });
+    this.logger.debug("[AdminGateway.constructor] EXIT");
+  }
+  /** Main request handler — called from the fetch() entrypoint. */
+  async handle(request) {
+    const url = new URL(request.url);
+    const requestId = crypto.randomUUID();
+    this.logger.debug("[AdminGateway.handle] ENTER", { url: request.url, method: request.method, pathname: url.pathname, requestId });
+    const t0 = Date.now();
+    if (request.method === "OPTIONS") {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=cors_preflight");
+      logger.debug("[AdminGateway.handle] EXIT", { result: "cors_preflight", requestId });
+      return this.corsResponse();
+    }
+    const headers = this.corsHeaders();
+    if (url.pathname === "/health" || url.pathname === "/ready") {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=health_check");
+      this.logger.debug("[AdminGateway.handle] EXIT", { result: "health_ok", requestId });
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          service: "moe-admin",
+          request_id: requestId,
+          config: {
+            require_license: this.config.require_license,
+            federation_enabled: this.config.federation_enabled
+          }
+        }),
+        { status: 200, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+    if (url.pathname === "/admin/license-status") {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=license_status");
+      return this.handleLicenseStatus(headers, requestId);
+    }
+    if (url.pathname === "/admin/federation-status") {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=federation_status");
+      return this.handleFederationStatus(headers, requestId);
+    }
+    let claims = null;
+    if (this.config.require_license && this.licenseValidator) {
+      this.logger.debug("[AdminGateway.handle] CALLING target=LicenseValidator.validate");
+      const authResult = await this.licenseValidator.validate(request, requestId);
+      if (!authResult.valid) {
+        this.logger.warn("[AdminGateway.handle] BRANCH path=auth_failed", { requestId, reason: authResult.error });
+        this.logger.debug("[AdminGateway.handle] EXIT", { result: "401_unauthorized", requestId });
+        return new Response(
+          JSON.stringify({ error: "unauthorized", detail: authResult.error, request_id: requestId }),
+          { status: 401, headers: { ...headers, "Content-Type": "application/json" } }
+        );
+      }
+      claims = authResult.claims ?? null;
+      this.logger.debug("[AdminGateway.handle] BRANCH path=auth_success", { requestId, subject: claims?.sub });
+    } else {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=auth_skipped reason=license_not_required");
+    }
+    if (url.pathname === "/admin/route") {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=route_request");
+      return this.handleRoute(request, claims, headers, requestId);
+    }
+    if (url.pathname.startsWith("/draft/")) {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=proxy_draft");
+      return this.proxyToService(this.env.MOE_DRAFT, request, "draft", requestId, headers);
+    }
+    if (url.pathname.startsWith("/verify/")) {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=proxy_verify");
+      return this.proxyToService(this.env.MOE_VERIFIER, request, "verify", requestId, headers);
+    }
+    if (url.pathname.startsWith("/embed/")) {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=proxy_embed");
+      return this.proxyToService(this.env.MOE_EMBEDDING, request, "embed", requestId, headers);
+    }
+    if (url.pathname.startsWith("/telemetry/")) {
+      this.logger.debug("[AdminGateway.handle] BRANCH path=proxy_telemetry");
+      return this.proxyToService(this.env.MOE_TELEMETRY, request, "telemetry", requestId, headers);
+    }
+    this.logger.warn("[AdminGateway.handle] BRANCH path=not_found", { requestId, pathname: url.pathname });
+    this.logger.debug("[AdminGateway.handle] EXIT", { result: "404", requestId });
+    return new Response(
+      JSON.stringify({ error: "not found", request_id: requestId }),
+      { status: 404, headers: { ...headers, "Content-Type": "application/json" } }
+    );
+  }
+  // -----------------------------------------------------------------------
+  // Sub-handlers
+  // -----------------------------------------------------------------------
+  handleLicenseStatus(headers, requestId) {
+    this.logger.debug("[AdminGateway.handleLicenseStatus] ENTER", { requestId });
+    const enabled = this.config.require_license;
+    const status = {
+      license_required: enabled,
+      license_validator_initialised: !!this.licenseValidator,
+      jwks_url: this.config.license_jwks_url ?? null,
+      request_id: requestId
+    };
+    this.logger.debug("[AdminGateway.handleLicenseStatus] EXIT", { requestId, enabled });
+    return new Response(JSON.stringify(status), {
+      status: 200,
+      headers: { ...headers, "Content-Type": "application/json" }
+    });
+  }
+  async handleFederationStatus(headers, requestId) {
+    this.logger.debug("[AdminGateway.handleFederationStatus] ENTER", { requestId });
+    if (!this.federationRouter) {
+      this.logger.debug("[AdminGateway.handleFederationStatus] BRANCH path=federation_disabled");
+      this.logger.debug("[AdminGateway.handleFederationStatus] EXIT", { requestId, result: "disabled" });
+      return new Response(
+        JSON.stringify({
+          federation_enabled: false,
+          request_id: requestId
+        }),
+        { status: 200, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+    this.logger.debug("[AdminGateway.handleFederationStatus] CALLING target=FederationRouter.healthCheckAll");
+    const nodeHealth = await this.federationRouter.healthCheckAll();
+    this.logger.debug("[AdminGateway.handleFederationStatus] EXIT", { requestId, nodeCount: nodeHealth.length });
+    return new Response(
+      JSON.stringify({
+        federation_enabled: true,
+        nodes: nodeHealth,
+        request_id: requestId
+      }),
+      { status: 200, headers: { ...headers, "Content-Type": "application/json" } }
+    );
+  }
+  async handleRoute(request, _claims, headers, requestId) {
+    this.logger.debug("[AdminGateway.handleRoute] ENTER", { requestId, contentType: request.headers.get("content-type") });
+    let body;
+    try {
+      this.logger.debug("[AdminGateway.handleRoute] CALLING target=request.json");
+      body = await request.json();
+    } catch {
+      this.logger.warn("[AdminGateway.handleRoute] BRANCH path=invalid_json");
+      this.logger.debug("[AdminGateway.handleRoute] EXIT", { result: "400_invalid_json", requestId });
+      return new Response(
+        JSON.stringify({ error: "invalid json", request_id: requestId }),
+        { status: 400, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+    if (!body.service || !body.payload) {
+      this.logger.warn("[AdminGateway.handleRoute] BRANCH path=bad_request reason=missing_service_or_payload");
+      this.logger.debug("[AdminGateway.handleRoute] EXIT", { result: "400", requestId });
+      return new Response(
+        JSON.stringify({ error: "service and payload are required", request_id: requestId }),
+        { status: 400, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+    this.logger.debug("[AdminGateway.handleRoute] BRANCH path=valid_request", { service: body.service, requestId });
+    const serviceFetcher = this.serviceFetcher(body.service);
+    if (!serviceFetcher) {
+      this.logger.warn("[AdminGateway.handleRoute] BRANCH path=unknown_service", { service: body.service });
+      this.logger.debug("[AdminGateway.handleRoute] EXIT", { result: "400_unknown_service", requestId });
+      return new Response(
+        JSON.stringify({ error: `unknown service: ${body.service}`, request_id: requestId }),
+        { status: 400, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+    let targetUrl = `http://internal/${body.service}`;
+    let nodeId = "local";
+    if (this.federationRouter && body.service !== "telemetry") {
+      this.logger.debug("[AdminGateway.handleRoute] CALLING target=FederationRouter.pickNode", { service: body.service });
+      const pickResult = this.federationRouter.pickNode(body.service);
+      if (pickResult.url) {
+        targetUrl = pickResult.url;
+        nodeId = pickResult.nodeId ?? "unknown";
+        this.logger.debug("[AdminGateway.handleRoute] BRANCH path=federation_routed", { nodeId, url: targetUrl });
+      } else {
+        this.logger.debug("[AdminGateway.handleRoute] BRANCH path=federation_local_fallback reason=no_healthy_node");
+      }
+    }
+    this.logger.debug("[AdminGateway.handleRoute] CALLING target=service_fetch", { service: body.service, targetUrl, nodeId });
+    const proxyT0 = Date.now();
+    try {
+      const upstreamResponse = await serviceFetcher.fetch(
+        new Request(targetUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Request-ID": requestId },
+          body: JSON.stringify(body.payload)
+        })
+      );
+      const upstreamLatency = Date.now() - proxyT0;
+      const upstreamBody = await upstreamResponse.text();
+      this.logger.debug("[AdminGateway.handleRoute] BRANCH path=proxy_success", { status: upstreamResponse.status, upstreamLatency, nodeId });
+      this.logger.info("[AdminGateway.handleRoute] route_complete", {
+        service: body.service,
+        node_id: nodeId,
+        upstream_status: upstreamResponse.status,
+        upstream_latency_ms: upstreamLatency,
+        request_id: requestId
+      });
+      this.logger.debug("[AdminGateway.handleRoute] EXIT", { result: "proxy_success", status: upstreamResponse.status, requestId });
+      return new Response(upstreamBody, {
+        status: upstreamResponse.status,
+        headers: {
+          ...headers,
+          "Content-Type": upstreamResponse.headers.get("Content-Type") ?? "application/json",
+          "X-Upstream-Status": String(upstreamResponse.status),
+          "X-Upstream-Latency-Ms": String(upstreamLatency),
+          "X-Upstream-Node": nodeId
+        }
+      });
+    } catch (err) {
+      const upstreamLatency = Date.now() - proxyT0;
+      this.logger.error("[AdminGateway.handleRoute] route_proxy_error", {
+        service: body.service,
+        node_id: nodeId,
+        error: String(err),
+        upstream_latency_ms: upstreamLatency,
+        request_id: requestId
+      });
+      this.logger.debug("[AdminGateway.handleRoute] BRANCH path=proxy_error", { error: String(err), nodeId });
+      this.logger.debug("[AdminGateway.handleRoute] EXIT", { result: "502", requestId });
+      return new Response(
+        JSON.stringify({
+          error: "upstream unavailable",
+          detail: String(err),
+          service: body.service,
+          node_id: nodeId,
+          request_id: requestId
+        }),
+        { status: 502, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+  }
+  async proxyToService(fetcher, request, service, requestId, headers) {
+    this.logger.debug(`[AdminGateway.proxyToService] ENTER`, { service, requestId, url: request.url });
+    const proxyT0 = Date.now();
+    const url = new URL(request.url);
+    const path = url.pathname.replace(new RegExp(`^/${service}/`), "/");
+    let targetUrl = `http://internal${path}${url.search}`;
+    let nodeId = "local";
+    if (this.federationRouter) {
+      this.logger.debug(`[AdminGateway.proxyToService] CALLING target=FederationRouter.pickNode`, { service });
+      const pickResult = this.federationRouter.pickNode(service);
+      if (pickResult.url) {
+        targetUrl = `${pickResult.url}${path}${url.search}`;
+        nodeId = pickResult.nodeId ?? "unknown";
+        this.logger.debug(`[AdminGateway.proxyToService] BRANCH path=federation_routed`, { nodeId });
+      } else {
+        this.logger.debug(`[AdminGateway.proxyToService] BRANCH path=federation_local_fallback reason=no_healthy_node`);
+      }
+    }
+    this.logger.debug(`[AdminGateway.proxyToService] CALLING target=service_fetch`, { service, targetUrl, method: request.method });
+    try {
+      const upstreamResponse = await fetcher.fetch(
+        new Request(targetUrl, {
+          method: request.method,
+          headers: {
+            ...Object.fromEntries(request.headers),
+            "X-Request-ID": requestId
+          },
+          body: request.body
+        })
+      );
+      const upstreamLatency = Date.now() - proxyT0;
+      this.logger.debug(`[AdminGateway.proxyToService] BRANCH path=proxy_success`, { service, status: upstreamResponse.status, upstreamLatency });
+      const responseBody = await upstreamResponse.text();
+      this.logger.info(`[AdminGateway.proxyToService] proxy_complete`, {
+        service,
+        node_id: nodeId,
+        upstream_status: upstreamResponse.status,
+        upstream_latency_ms: upstreamLatency,
+        request_id: requestId
+      });
+      this.logger.debug(`[AdminGateway.proxyToService] EXIT`, { service, status: upstreamResponse.status, requestId });
+      return new Response(responseBody, {
+        status: upstreamResponse.status,
+        headers: {
+          ...headers,
+          "Content-Type": upstreamResponse.headers.get("Content-Type") ?? "application/json",
+          "X-Upstream-Status": String(upstreamResponse.status),
+          "X-Upstream-Latency-Ms": String(upstreamLatency),
+          "X-Upstream-Node": nodeId
+        }
+      });
+    } catch (err) {
+      const upstreamLatency = Date.now() - proxyT0;
+      this.logger.error(`[AdminGateway.proxyToService] proxy_error`, {
+        service,
+        node_id: nodeId,
+        error: String(err),
+        upstream_latency_ms: upstreamLatency,
+        request_id: requestId
+      });
+      this.logger.debug(`[AdminGateway.proxyToService] BRANCH path=proxy_error`, { service, error: String(err) });
+      this.logger.debug(`[AdminGateway.proxyToService] EXIT`, { service, result: "502", requestId });
+      return new Response(
+        JSON.stringify({
+          error: "upstream unavailable",
+          detail: String(err),
+          service,
+          node_id: nodeId,
+          request_id: requestId
+        }),
+        { status: 502, headers: { ...headers, "Content-Type": "application/json" } }
+      );
+    }
+  }
+  // -----------------------------------------------------------------------
+  // Helpers
+  // -----------------------------------------------------------------------
+  serviceFetcher(service) {
+    switch (service) {
+      case "draft":
+        return this.env.MOE_DRAFT;
+      case "verify":
+        return this.env.MOE_VERIFIER;
+      case "embed":
+        return this.env.MOE_EMBEDDING;
+      case "telemetry":
+        return this.env.MOE_TELEMETRY;
+      default:
+        return null;
+    }
+  }
+  corsHeaders() {
+    const origin = this.config.allowed_origins.includes("*") ? "*" : this.config.allowed_origins[0] ?? "*";
+    return {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400"
+    };
+  }
+  corsResponse() {
+    return new Response(null, {
+      status: 204,
+      headers: this.corsHeaders()
+    });
+  }
+};
+var admin_default = {
+  async fetch(request, env2, _ctx) {
+    const gateway = new AdminGateway(env2);
+    return gateway.handle(request);
+  }
+};
+export {
+  AdminGateway,
+  admin_default as default
+};
+//# sourceMappingURL=admin.js.map
+
+--e979bf390bfc700b408f222f26519015d8cb5f742ac05e2680fc458c26f1--

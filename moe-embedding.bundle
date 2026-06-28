@@ -1,0 +1,755 @@
+--9b5a9ad6dddbd3b1b72d1fbc02de8b7fdfeec17cc3468a3875387ef39a59
+Content-Disposition: form-data; name="embedding.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/logger.ts
+var AurisLogger = class _AurisLogger {
+  static {
+    __name(this, "AurisLogger");
+  }
+  d1;
+  reqId;
+  verbose;
+  constructor(opts) {
+    this.d1 = opts.d1;
+    this.reqId = opts.reqId ?? this._genReqId();
+    this.verbose = opts.verbose ?? true;
+  }
+  _genReqId() {
+    const now = Date.now().toString(36);
+    const rnd = Math.random().toString(36).slice(2, 8);
+    return `moe-${now}-${rnd}`;
+  }
+  getReqId() {
+    return this.reqId;
+  }
+  withReqId(reqId) {
+    return new _AurisLogger({ d1: this.d1, reqId, verbose: this.verbose });
+  }
+  /**
+   * Write a structured log entry to AURIS_LOGS (D1) and echo to console.
+   */
+  async log(stage, message, meta) {
+    const entry = {
+      req_id: this.reqId,
+      timestamp: Date.now(),
+      stage,
+      message,
+      meta
+    };
+    if (this.verbose) {
+      const metaStr = meta ? ` | meta=${JSON.stringify(meta)}` : "";
+      console.log(`[${entry.timestamp}] [${stage.toUpperCase()}] [${this.reqId}] ${message}${metaStr}`);
+    }
+    try {
+      const metaJson = meta ? JSON.stringify(meta) : null;
+      await this.d1.prepare(
+        `INSERT INTO logs (req_id, timestamp, stage, message, meta)
+           VALUES (?, ?, ?, ?, ?)`
+      ).bind(entry.req_id, entry.timestamp, stage, message, metaJson).run();
+    } catch (err) {
+      console.error(`[AurisLogger] D1 insert failed: ${err.message}`);
+    }
+  }
+  async embedDebug(model, inputLength, outputDims, latencyMs) {
+    return this.log("embed", "embedding generated", {
+      model,
+      input_length: inputLength,
+      output_dims: outputDims,
+      latency_ms: latencyMs
+    });
+  }
+  async compressDebug(inputSize, outputSize, ratio, reconstructionError, latencyMs) {
+    return this.log("compress", "compression complete", {
+      input_size: inputSize,
+      output_size: outputSize,
+      ratio,
+      reconstruction_error: reconstructionError,
+      latency_ms: latencyMs
+    });
+  }
+  async decompressDebug(compressedSize, outputSize, latencyMs) {
+    return this.log("decompress", "decompression complete", {
+      compressed_size: compressedSize,
+      output_size: outputSize,
+      latency_ms: latencyMs
+    });
+  }
+  async routeDebug(inputEmbeddingSample, predictedExperts, confidence) {
+    return this.log("route", "routing prediction computed", {
+      input_embedding_sample: inputEmbeddingSample.slice(0, 4),
+      predicted_experts: predictedExperts,
+      confidence
+    });
+  }
+  async error(context, err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return this.log("error", `${context}: ${msg}`, { stack: err instanceof Error ? err.stack : void 0 });
+  }
+  async lifecycle(fnName, direction, extra) {
+    return this.log("lifecycle", `${direction === "enter" ? ">>" : "<<"} ${fnName}`, extra);
+  }
+};
+
+// src/bcc_compression.ts
+var DEFAULT_BLOCK_SIZE = 8;
+var DEFAULT_QUANT_FACTOR = 4;
+function getBestBCCConfig() {
+  return { block_size: DEFAULT_BLOCK_SIZE, quant_factor: DEFAULT_QUANT_FACTOR };
+}
+__name(getBestBCCConfig, "getBestBCCConfig");
+function compressBCC(input, config) {
+  const logger = new AurisLogger("embedding", void 0);
+  logger.debug("compressBCC ENTER", { inputBytes: input.length, blockSize: config?.block_size ?? DEFAULT_BLOCK_SIZE, quantFactor: config?.quant_factor ?? DEFAULT_QUANT_FACTOR });
+  const cfg = config ?? getBestBCCConfig();
+  const bs = cfg.block_size;
+  const qf = cfg.quant_factor;
+  if (input.length === 0) {
+    logger.debug("compressBCC BRANCH path=empty_input");
+    logger.debug("compressBCC EXIT", { outputBytes: 0 });
+    return new Uint8Array(0);
+  }
+  const numBlocks = Math.ceil(input.length / bs);
+  const paddedLen = numBlocks * bs;
+  const padded = new Uint8Array(paddedLen);
+  padded.set(input);
+  logger.debug("compressBCC CALLING target=transformBlocks", { numBlocks });
+  const quantisedBlocks = [];
+  for (let b = 0; b < numBlocks; b++) {
+    const block = new Float64Array(bs);
+    for (let i = 0; i < bs; i++) {
+      block[i] = padded[b * bs + i];
+    }
+    const transformed = simplifiedDCTII(block);
+    const quantised = transformed.map((c) => Math.round(c / qf));
+    quantisedBlocks.push(Array.from(quantised));
+  }
+  logger.debug("compressBCC CALLING target=flattenAndRLE", { totalCoeffs: quantisedBlocks.length * bs });
+  const flat = [];
+  for (const qb of quantisedBlocks) {
+    flat.push(...qb);
+  }
+  const { symbols, counts } = runLengthEncode(flat);
+  logger.debug("compressBCC CALLING target=packBytes", { symbolCount: symbols.length });
+  const symbolCount = symbols.length;
+  const headerSize = 6;
+  const bodySize = symbolCount * 2;
+  const output = new Uint8Array(headerSize + bodySize);
+  output[0] = bs;
+  output[1] = qf & 255;
+  new DataView(output.buffer).setUint16(2, numBlocks, true);
+  new DataView(output.buffer).setUint16(4, symbolCount, true);
+  let offset = headerSize;
+  for (let i = 0; i < symbolCount; i++) {
+    output[offset++] = symbols[i] + 128 & 255;
+    output[offset++] = Math.min(255, counts[i]);
+  }
+  logger.debug("compressBCC EXIT", { inputBytes: input.length, outputBytes: output.length, ratio: output.length / input.length });
+  return output;
+}
+__name(compressBCC, "compressBCC");
+function decompressBCC(input, originalByteLength, config) {
+  const logger = new AurisLogger("embedding", void 0);
+  logger.debug("decompressBCC ENTER", { inputBytes: input.length, originalByteLength });
+  if (input.length === 0) {
+    logger.debug("decompressBCC BRANCH path=empty_input");
+    logger.debug("decompressBCC EXIT", { outputBytes: 0 });
+    return new Uint8Array(0);
+  }
+  const bs = input[0];
+  const qf = input[1];
+  const numBlocks = new DataView(input.buffer).getUint16(2, true);
+  const symbolCount = new DataView(input.buffer).getUint16(4, true);
+  logger.debug("decompressBCC BRANCH path=parse_header", { blockSize: bs, quantFactor: qf, numBlocks, symbolCount });
+  logger.debug("decompressBCC CALLING target=unpackRLE");
+  const symbols = [];
+  const counts = [];
+  let offset = 6;
+  for (let i = 0; i < symbolCount; i++) {
+    if (offset >= input.length) break;
+    symbols.push((input[offset++] & 255) - 128);
+    counts.push(input[offset++] & 255);
+  }
+  logger.debug("decompressBCC CALLING target=runLengthDecode");
+  const flat = runLengthDecode(symbols, counts);
+  logger.debug("decompressBCC CALLING target=inverseTransformBlocks", { numBlocks });
+  const output = new Uint8Array(Math.min(originalByteLength, numBlocks * bs));
+  for (let b = 0; b < numBlocks; b++) {
+    const blockCoeffs = [];
+    for (let i = 0; i < bs; i++) {
+      const idx = b * bs + i;
+      blockCoeffs.push(idx < flat.length ? flat[idx] * qf : 0);
+    }
+    const restored = simplifiedIDCTII(Float64Array.from(blockCoeffs));
+    for (let i = 0; i < bs; i++) {
+      const outIdx = b * bs + i;
+      if (outIdx < output.length) {
+        output[outIdx] = Math.max(0, Math.min(255, Math.round(restored[i])));
+      }
+    }
+  }
+  logger.debug("decompressBCC EXIT", { outputBytes: output.length });
+  return output;
+}
+__name(decompressBCC, "decompressBCC");
+function simplifiedDCTII(block) {
+  const N = block.length;
+  const out = new Float64Array(N);
+  for (let k = 0; k < N; k++) {
+    let sum = 0;
+    for (let n = 0; n < N; n++) {
+      sum += block[n] * Math.cos(Math.PI / N * (n + 0.5) * k);
+    }
+    out[k] = sum * (k === 0 ? 1 / Math.sqrt(2) : 1);
+  }
+  return out;
+}
+__name(simplifiedDCTII, "simplifiedDCTII");
+function simplifiedIDCTII(coeffs) {
+  const N = coeffs.length;
+  const out = new Float64Array(N);
+  for (let n = 0; n < N; n++) {
+    let sum = 0;
+    for (let k = 0; k < N; k++) {
+      sum += coeffs[k] * Math.cos(Math.PI / N * (n + 0.5) * k) * (k === 0 ? 1 / Math.sqrt(2) : 1);
+    }
+    out[n] = 2 / N * sum;
+  }
+  return out;
+}
+__name(simplifiedIDCTII, "simplifiedIDCTII");
+function runLengthEncode(values) {
+  if (values.length === 0) return { symbols: [], counts: [] };
+  const symbols = [];
+  const counts = [];
+  let current = values[0];
+  let count = 1;
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] === current && count < 255) {
+      count++;
+    } else {
+      symbols.push(current);
+      counts.push(count);
+      current = values[i];
+      count = 1;
+    }
+  }
+  symbols.push(current);
+  counts.push(count);
+  return { symbols, counts };
+}
+__name(runLengthEncode, "runLengthEncode");
+function runLengthDecode(symbols, counts) {
+  const out = [];
+  for (let i = 0; i < symbols.length; i++) {
+    const c = counts[i] ?? 0;
+    for (let j = 0; j < c; j++) {
+      out.push(symbols[i]);
+    }
+  }
+  return out;
+}
+__name(runLengthDecode, "runLengthDecode");
+
+// src/embedding.ts
+var MODEL = "@cf/baai/bge-base-en-v1.5";
+var EMBEDDING_DIM = 768;
+var QUANTISATION_TARGET_DIM = 16;
+var DEFAULT_CONFIG = {
+  enable_sbe: true,
+  enable_bicc: true,
+  enable_llc: true,
+  sbe_bytes_per_float: 2,
+  llc_codebook: 32,
+  llc_splits: 4
+};
+var Cortex = class {
+  static {
+    __name(this, "Cortex");
+  }
+  ai;
+  logger;
+  constructor(ai, logger) {
+    this.ai = ai;
+    this.logger = logger;
+    this.logger.debug("Cortex.constructor called");
+  }
+  async perceive(prompt) {
+    const fnName = "perceive";
+    this.logger.debug("Cortex calling AI embedding model", { model: MODEL, promptLength: prompt.length });
+    this.logger.lifecycle(fnName, "start", { model: MODEL, promptLength: prompt.length });
+    this.logger.lifecycle("Cortex.perceive", "ENTER", { promptLen: prompt.length, model: MODEL });
+    try {
+      this.logger.debug("Cortex.perceive CALLING target=WorkersAI.run", { model: MODEL, promptLength: prompt.length });
+      const res = await this.ai.run(MODEL, {
+        text: [prompt]
+      });
+      if (!res.data || !res.data[0]) {
+        this.logger.error("Cortex.perceive BRANCH path=empty_response reason=no_embedding_data");
+        throw new Error("Empty embedding response from Workers AI");
+      }
+      const embedding = res.data[0];
+      this.logger.debug("Cortex.perceive BRANCH path=success reason=embedding_received", { dimensions: embedding.length });
+      const floats = Float32Array.from(embedding);
+      this.logger.lifecycle(fnName, "finish", { dimensions: floats.length, firstFive: Array.from(floats.slice(0, 5)) });
+      this.logger.lifecycle("Cortex.perceive", "EXIT", { dimensions: floats.length });
+      return floats;
+    } catch (err) {
+      this.logger.error("Cortex.perceive BRANCH path=error reason=ai_run_failed", { error: String(err) });
+      this.logger.error(`Cortex perceive error: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.lifecycle("Cortex.perceive", "EXIT", { error: true });
+      throw err;
+    }
+  }
+};
+var Axon = class {
+  static {
+    __name(this, "Axon");
+  }
+  logger;
+  bytesPerFloat;
+  constructor(logger, bytesPerFloat) {
+    this.logger = logger;
+    this.bytesPerFloat = bytesPerFloat;
+    this.logger.debug("Axon.constructor called");
+  }
+  encode(floats, targetDim) {
+    this.logger.lifecycle("Axon.encode", "ENTER", { inputBytes: floats.length * 4, targetDim, bytesPerFloat: this.bytesPerFloat });
+    const fnName = "encode";
+    this.logger.lifecycle(fnName, "start", { inputBytes: floats.length * 4, targetDim, bytesPerFloat: this.bytesPerFloat });
+    const activeDim = Math.min(floats.length, targetDim);
+    this.logger.debug(`Axon.encode BRANCH path=active_dim=${activeDim} reason=min_of_input_and_target`);
+    const mins = new Float32Array(activeDim);
+    const maxs = new Float32Array(activeDim);
+    for (let d = 0; d < activeDim; d++) {
+      mins[d] = maxs[d] = floats[d];
+    }
+    const globalScale = 1;
+    const out = new Uint8Array(activeDim * this.bytesPerFloat);
+    this.logger.debug(`Axon.encode CALLING target=quantise_floats dim=${activeDim} bpp=${this.bytesPerFloat}`);
+    if (this.bytesPerFloat === 2) {
+      const view = new DataView(out.buffer);
+      for (let d = 0; d < activeDim; d++) {
+        const clamped = Math.max(-1, Math.min(1, floats[d]));
+        const u16 = Math.round((clamped + 1) / 2 * 65535);
+        view.setUint16(d * 2, u16, true);
+      }
+    } else {
+      for (let d = 0; d < activeDim; d++) {
+        const clamped = Math.max(-1, Math.min(1, floats[d]));
+        out[d] = Math.round((clamped + 1) / 2 * 255);
+      }
+    }
+    this.logger.lifecycle(fnName, "finish", { outputBytes: out.length, activeDim });
+    this.logger.debug(`Axon.encode EXIT outputBytes=${out.length}`);
+    this.logger.lifecycle("Axon.encode", "EXIT", { outputBytes: out.length, activeDim });
+    return out;
+  }
+  decode(bytes, targetDim) {
+    this.logger.lifecycle("Axon.decode", "ENTER", { inputBytes: bytes.length, targetDim });
+    const fnName = "decode";
+    this.logger.lifecycle(fnName, "start", { inputBytes: bytes.length, targetDim });
+    const out = new Float32Array(targetDim);
+    if (this.bytesPerFloat === 2) {
+      const view = new DataView(bytes.buffer, bytes.byteOffset);
+      const activeDim = Math.min(targetDim, Math.floor(bytes.length / 2));
+      this.logger.debug(`Axon.decode BRANCH path=fp16 dim=${activeDim}`);
+      for (let d = 0; d < activeDim; d++) {
+        const u16 = view.getUint16(d * 2, true);
+        out[d] = u16 / 65535 * 2 - 1;
+      }
+    } else {
+      const activeDim = Math.min(targetDim, bytes.length);
+      this.logger.debug(`Axon.decode BRANCH path=int8 dim=${activeDim}`);
+      for (let d = 0; d < activeDim; d++) {
+        out[d] = bytes[d] / 255 * 2 - 1;
+      }
+    }
+    this.logger.lifecycle(fnName, "finish", { outputFloats: out.length });
+    this.logger.lifecycle("Axon.decode", "EXIT", { outputFloats: out.length });
+    return out;
+  }
+};
+var Synapse = class {
+  static {
+    __name(this, "Synapse");
+  }
+  logger;
+  bccConfig;
+  constructor(logger, config) {
+    this.logger = logger;
+    this.bccConfig = getBestBCCConfig();
+    this.logger.debug("Synapse.constructor called");
+  }
+  compress(bytes) {
+    this.logger.lifecycle("Synapse.compress", "ENTER", { inputBytes: bytes.length });
+    const fnName = "compress";
+    this.logger.lifecycle(fnName, "start", { inputBytes: bytes.length });
+    this.logger.debug(`Synapse.compress CALLING target=BICC_compress inputBytes=${bytes.length}`);
+    const compressed = compressBCC(bytes, this.bccConfig);
+    this.logger.lifecycle(fnName, "finish", { outputBytes: compressed.length, ratio: compressed.length / bytes.length });
+    this.logger.debug(`Synapse.compress EXIT outputBytes=${compressed.length} ratio=${(compressed.length / bytes.length).toFixed(4)}`);
+    this.logger.lifecycle("Synapse.compress", "EXIT", { outputBytes: compressed.length, ratio: compressed.length / bytes.length });
+    return compressed;
+  }
+  decompress(bytes, originalByteLength) {
+    this.logger.lifecycle("Synapse.decompress", "ENTER", { inputBytes: bytes.length, expectedOutput: originalByteLength });
+    const fnName = "decompress";
+    this.logger.lifecycle(fnName, "start", { inputBytes: bytes.length, originalByteLength });
+    this.logger.debug(`Synapse.decompress CALLING target=BICC_decompress inputBytes=${bytes.length}`);
+    const decompressed = decompressBCC(bytes, originalByteLength);
+    this.logger.lifecycle(fnName, "finish", { outputBytes: decompressed.length });
+    this.logger.lifecycle("Synapse.decompress", "EXIT", { outputBytes: decompressed.length });
+    return decompressed;
+  }
+};
+var Dendrite = class {
+  static {
+    __name(this, "Dendrite");
+  }
+  logger;
+  codebook;
+  splits;
+  constructor(logger, codebookSize, splits) {
+    this.logger = logger;
+    this.splits = splits;
+    this.codebook = this.buildCodebook(codebookSize, splits);
+    this.logger.debug("Dendrite.constructor called");
+  }
+  /**
+   * Build a deterministic codebook.  For production quality this should
+   * be trained on a representative corpus of embeddings and shipped as a
+   * binary asset.  Here we use a deterministic pseudo-random codebook
+   * seeded from dimension index so results are reproducible.
+   */
+  buildCodebook(K, S) {
+    this.logger.lifecycle("Dendrite.buildCodebook", "ENTER", { codebookSize: K, splits: S });
+    const book = [];
+    for (let s = 0; s < S; s++) {
+      for (let k = 0; k < K; k++) {
+        const centroid = new Float32Array(QUANTISATION_TARGET_DIM);
+        for (let d = 0; d < QUANTISATION_TARGET_DIM; d++) {
+          const seed = Math.sin(s * 127.1 + k * 311.7 + d * 74.3) * 43758.5453;
+          centroid[d] = (seed - Math.floor(seed)) * 2 - 1;
+        }
+        book.push(centroid);
+      }
+    }
+    this.logger.lifecycle("Dendrite.buildCodebook", "EXIT", { codebookEntries: book.length });
+    return book;
+  }
+  /**
+   * Vector-quantise the active dimensions of the embedding.
+   * Returns Uint8Array of codebook indices (1 byte each).
+   */
+  quantise(floats) {
+    this.logger.lifecycle("Dendrite.quantise", "ENTER", { inputFloats: floats.length, codebookSize: this.codebook.length });
+    const fnName = "quantise";
+    this.logger.lifecycle(fnName, "start", { inputFloats: floats.length, codebookSize: this.codebook.length });
+    const activeDim = Math.min(floats.length, QUANTISATION_TARGET_DIM);
+    const indices = new Uint8Array(activeDim);
+    this.logger.debug(`Dendrite.quantise CALLING target=nearest_centroid_search dim=${activeDim}`);
+    for (let d = 0; d < activeDim; d++) {
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      for (let c = 0; c < this.codebook.length; c++) {
+        const dist = Math.abs(floats[d] - this.codebook[c][d]);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = c;
+        }
+      }
+      indices[d] = bestIdx % 256;
+    }
+    this.logger.lifecycle(fnName, "finish", { outputBytes: indices.length, activeDim });
+    this.logger.debug(`Dendrite.quantise EXIT outputBytes=${indices.length}`);
+    this.logger.lifecycle("Dendrite.quantise", "EXIT", { outputBytes: indices.length, activeDim });
+    return indices;
+  }
+  /** Reconstruct the embedding from codebook indices. */
+  reconstruct(indices) {
+    this.logger.lifecycle("Dendrite.reconstruct", "ENTER", { inputBytes: indices.length });
+    const fnName = "reconstruct";
+    this.logger.lifecycle(fnName, "start", { inputBytes: indices.length });
+    const out = new Float32Array(indices.length);
+    for (let d = 0; d < indices.length; d++) {
+      const idx = indices[d];
+      if (idx < this.codebook.length) {
+        out[d] = this.codebook[idx][d];
+      } else {
+        out[d] = 0;
+      }
+    }
+    this.logger.lifecycle(fnName, "finish", { outputFloats: out.length });
+    this.logger.lifecycle("Dendrite.reconstruct", "EXIT", { outputFloats: out.length });
+    return out;
+  }
+};
+var DataflowPipeline = class {
+  static {
+    __name(this, "DataflowPipeline");
+  }
+  cortex;
+  axon;
+  synapse;
+  dendrite;
+  logger;
+  constructor(ai, logger, config) {
+    this.logger = logger;
+    this.cortex = new Cortex(ai, logger);
+    this.axon = new Axon(logger, config.sbe_bytes_per_float);
+    this.synapse = new Synapse(logger, config);
+    this.dendrite = new Dendrite(logger, config.llc_codebook, config.llc_splits);
+    this.logger.debug("DataflowPipeline.constructor called");
+  }
+  async process(req) {
+    this.logger.lifecycle("DataflowPipeline.process", "ENTER", { promptLen: req.prompt.length, config: req.config });
+    const fnName = "process";
+    const overallT0 = performance.now();
+    this.logger.lifecycle(fnName, "start", { promptLength: req.prompt.length });
+    const stages = [];
+    this.logger.debug(`DataflowPipeline.process CALLING target=Cortex.perceive`);
+    const embedT0 = performance.now();
+    let embedding;
+    try {
+      embedding = await this.cortex.perceive(req.prompt);
+    } catch (err) {
+      this.logger.error("DataflowPipeline.process BRANCH path=embed_failed reason=cortex_perceive_error", { error: String(err) });
+      throw err;
+    }
+    const embedT1 = performance.now();
+    const embedMs = embedT1 - embedT0;
+    stages.push({
+      stage: "EMBED",
+      input_bytes: 0,
+      // conceptual
+      output_bytes: embedding.length * 4,
+      ratio: 1,
+      latency_ms: Number(embedMs.toFixed(3))
+    });
+    this.logger.debug(`DataflowPipeline.process BRANCH path=embed_success dim=${embedding.length} ms=${embedMs.toFixed(2)}`);
+    let activeBytes = embedding.length * 4;
+    let currentBytes;
+    this.logger.debug(`DataflowPipeline.process CALLING target=Axon.encode`);
+    const sbeT0 = performance.now();
+    const sbeBytes = this.axon.encode(embedding, QUANTISATION_TARGET_DIM);
+    const sbeT1 = performance.now();
+    const sbeMs = sbeT1 - sbeT0;
+    stages.push({
+      stage: "SBE",
+      input_bytes: activeBytes,
+      output_bytes: sbeBytes.length,
+      ratio: Number((sbeBytes.length / activeBytes).toFixed(4)),
+      latency_ms: Number(sbeMs.toFixed(3)),
+      config: { bytes_per_float: 2, active_dimensions: QUANTISATION_TARGET_DIM }
+    });
+    this.logger.debug(`DataflowPipeline.process BRANCH path=sbe_complete outputBytes=${sbeBytes.length} ratio=${(sbeBytes.length / activeBytes).toFixed(4)}`);
+    currentBytes = sbeBytes;
+    activeBytes = sbeBytes.length;
+    this.logger.debug(`DataflowPipeline.process CALLING target=Synapse.compress`);
+    const biccT0 = performance.now();
+    const biccBytes = this.synapse.compress(sbeBytes);
+    const biccT1 = performance.now();
+    const biccMs = biccT1 - biccT0;
+    stages.push({
+      stage: "BICC",
+      input_bytes: sbeBytes.length,
+      output_bytes: biccBytes.length,
+      ratio: Number((biccBytes.length / sbeBytes.length).toFixed(4)),
+      latency_ms: Number(biccMs.toFixed(3))
+    });
+    this.logger.debug(`DataflowPipeline.process BRANCH path=bicc_complete outputBytes=${biccBytes.length} ratio=${(biccBytes.length / sbeBytes.length).toFixed(4)}`);
+    currentBytes = biccBytes;
+    this.logger.debug(`DataflowPipeline.process CALLING target=Synapse.decompress`);
+    const decompressT0 = performance.now();
+    const decompressedSbe = this.synapse.decompress(biccBytes, sbeBytes.length);
+    this.logger.debug(`DataflowPipeline.process CALLING target=Axon.decode`);
+    const decodedFloats = this.axon.decode(decompressedSbe, QUANTISATION_TARGET_DIM);
+    this.logger.debug(`DataflowPipeline.process decompression_chain ms=${(performance.now() - decompressT0).toFixed(2)}`);
+    this.logger.debug(`DataflowPipeline.process CALLING target=Dendrite.quantise`);
+    const llcT0 = performance.now();
+    const llcIndices = this.dendrite.quantise(decodedFloats);
+    const llcT1 = performance.now();
+    const llcMs = llcT1 - llcT0;
+    stages.push({
+      stage: "LLC",
+      input_bytes: decodedFloats.length * 4,
+      output_bytes: llcIndices.length,
+      ratio: Number((llcIndices.length / (decodedFloats.length * 4)).toFixed(4)),
+      latency_ms: Number(llcMs.toFixed(3)),
+      config: { codebook: 32, splits: 4 }
+    });
+    this.logger.debug(`DataflowPipeline.process BRANCH path=llc_complete outputBytes=${llcIndices.length} ratio=${(llcIndices.length / (decodedFloats.length * 4)).toFixed(4)}`);
+    currentBytes = llcIndices;
+    this.logger.debug(`DataflowPipeline.process CALLING target=btoa encoding`);
+    const finalBytes = currentBytes;
+    const base64 = btoa(String.fromCharCode(...finalBytes));
+    const totalMs = performance.now() - overallT0;
+    this.logger.lifecycle(fnName, "finish", {
+      totalMs: Number(totalMs.toFixed(3)),
+      finalBytes: finalBytes.length,
+      base64Length: base64.length,
+      stages
+    });
+    this.logger.info(`Pipeline complete: ${finalBytes.length} bytes \u2192 base64 ${base64.length} chars in ${totalMs.toFixed(2)}ms`);
+    this.logger.lifecycle("DataflowPipeline.process", "EXIT", {
+      totalMs: Number(totalMs.toFixed(3)),
+      finalBytes: finalBytes.length,
+      base64Length: base64.length,
+      stageCount: stages.length
+    });
+    return {
+      compressed_embedding: base64,
+      original_dimensions: EMBEDDING_DIM,
+      compressed_bytes: finalBytes.length,
+      pipeline_stages: stages,
+      raw_embedding: req.return_raw ? Array.from(embedding) : void 0,
+      latency_ms: Number(totalMs.toFixed(3)),
+      quantisation_dimensions: QUANTISATION_TARGET_DIM
+    };
+  }
+};
+async function tryKVCache(kv, key, logger) {
+  logger.lifecycle("tryKVCache", "ENTER", { key });
+  try {
+    logger.debug(`tryKVCache CALLING target=KV.get key=${key.slice(0, 16)}...`);
+    const cached = await kv.get(key);
+    if (cached) {
+      logger.debug(`tryKVCache BRANCH path=cache_hit reason=entry_found`);
+      const parsed = JSON.parse(cached);
+      logger.lifecycle("tryKVCache", "EXIT", { hit: true });
+      return { ...parsed, kv_cache_hit: true };
+    }
+    logger.debug(`tryKVCache BRANCH path=cache_miss reason=no_entry`);
+    logger.lifecycle("tryKVCache", "EXIT", { hit: false });
+    return null;
+  } catch {
+    logger.debug(`tryKVCache BRANCH path=cache_error reason=exception`);
+    logger.lifecycle("tryKVCache", "EXIT", { hit: false, error: true });
+    return null;
+  }
+}
+__name(tryKVCache, "tryKVCache");
+async function storeKVCache(kv, key, response, logger) {
+  logger.lifecycle("storeKVCache", "ENTER", { key, compressedBytes: response.compressed_bytes });
+  try {
+    logger.debug(`storeKVCache CALLING target=KV.put key=${key.slice(0, 16)}...`);
+    await kv.put(key, JSON.stringify(response), { expirationTtl: 3600 });
+    logger.debug(`storeKVCache BRANCH path=stored reason=write_success`);
+    logger.lifecycle("storeKVCache", "EXIT", { stored: true });
+  } catch (err) {
+    logger.debug(`storeKVCache BRANCH path=store_failed reason=exception`, { error: String(err) });
+    logger.error(`storeKVCache error: ${String(err)}`);
+    logger.lifecycle("storeKVCache", "EXIT", { stored: false, error: true });
+  }
+}
+__name(storeKVCache, "storeKVCache");
+var embedding_default = {
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    const logger = new AurisLogger("embedding", env.AURIS_LOGS);
+    logger.lifecycle("embedding.fetch", "ENTER", { url: request.url, method: request.method });
+    if (url.pathname === "/health" || url.pathname === "/ready") {
+      logger.debug(`embedding.fetch BRANCH path=health_check`);
+      logger.lifecycle("embedding.fetch", "EXIT", { path: "health" });
+      return new Response(JSON.stringify({ status: "ok", service: "moe-embedding" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (request.method !== "POST" || url.pathname !== "/embed") {
+      logger.warn(`embedding.fetch BRANCH path=not_found method=${request.method} path=${url.pathname}`);
+      logger.lifecycle("embedding.fetch", "EXIT", { status: 404 });
+      return new Response(JSON.stringify({ error: "not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    let body;
+    try {
+      logger.debug(`embedding.fetch CALLING target=request.json`);
+      body = await request.json();
+    } catch {
+      logger.error("embedding.fetch BRANCH path=invalid_json");
+      logger.lifecycle("embedding.fetch", "EXIT", { status: 400, reason: "invalid_json" });
+      return new Response(JSON.stringify({ error: "invalid json" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (!body.prompt || body.prompt.trim().length === 0) {
+      logger.warn(`embedding.fetch BRANCH path=bad_request reason=missing_prompt`);
+      logger.lifecycle("embedding.fetch", "EXIT", { status: 400, reason: "missing_prompt" });
+      return new Response(JSON.stringify({ error: "prompt is required" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    logger.debug(`embedding.fetch BRANCH path=valid_request promptLen=${body.prompt.length}`);
+    const config = { ...DEFAULT_CONFIG, ...body.config };
+    logger.debug(`embedding.fetch config=${JSON.stringify(config)}`);
+    const cacheKey = body.kv_cache_key ?? await hashPrompt(body.prompt);
+    if (!body.bypass_kv_cache) {
+      logger.debug(`embedding.fetch CALLING target=tryKVCache key=${cacheKey.slice(0, 16)}...`);
+      const cached = await tryKVCache(env.MOE_ROUTES, cacheKey, logger);
+      if (cached) {
+        logger.info(`KV cache hit for ${cacheKey.slice(0, 16)} \u2014 ${cached.compressed_bytes} bytes`);
+        logger.debug(`embedding.fetch BRANCH path=kv_cache_hit`);
+        logger.lifecycle("embedding.fetch", "EXIT", { status: 200, cached: true });
+        return new Response(JSON.stringify(cached), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      logger.debug(`embedding.fetch BRANCH path=kv_cache_miss`);
+    } else {
+      logger.debug(`embedding.fetch BRANCH path=kv_cache_bypassed reason=bypass_kv_cache=true`);
+    }
+    logger.debug(`embedding.fetch CALLING target=DataflowPipeline`);
+    const pipelineT0 = performance.now();
+    const pipeline = new DataflowPipeline(env.AI, logger, config);
+    let response;
+    try {
+      response = await pipeline.process(body);
+    } catch (err) {
+      logger.error(`Pipeline error: ${String(err)}`);
+      logger.lifecycle("embedding.fetch", "EXIT", { status: 500, error: true });
+      return new Response(
+        JSON.stringify({
+          error: "pipeline failed",
+          detail: err instanceof Error ? err.message : String(err)
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const pipelineMs = performance.now() - pipelineT0;
+    logger.debug(`embedding.fetch BRANCH path=pipeline_success totalMs=${pipelineMs.toFixed(2)}`);
+    logger.debug(`embedding.fetch CALLING target=storeKVCache key=${cacheKey.slice(0, 16)}...`);
+    await storeKVCache(env.MOE_ROUTES, cacheKey, response, logger);
+    logger.info(`embedding.fetch complete: prompt ${body.prompt.length} chars \u2192 ${response.compressed_bytes} bytes in ${response.latency_ms}ms`);
+    logger.lifecycle("embedding.fetch", "EXIT", { status: 200, compressedBytes: response.compressed_bytes, latencyMs: response.latency_ms });
+    return new Response(JSON.stringify(response), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Compressed-Bytes": String(response.compressed_bytes),
+        "X-Latency-Ms": String(response.latency_ms)
+      }
+    });
+  }
+};
+async function hashPrompt(prompt) {
+  const encoder = new TextEncoder();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(prompt));
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(hashPrompt, "hashPrompt");
+export {
+  embedding_default as default
+};
+//# sourceMappingURL=embedding.js.map
+
+--9b5a9ad6dddbd3b1b72d1fbc02de8b7fdfeec17cc3468a3875387ef39a59--

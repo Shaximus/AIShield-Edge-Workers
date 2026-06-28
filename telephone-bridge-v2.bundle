@@ -1,0 +1,201 @@
+--fec88a838f05ff956eda37de9f40b2d2cb220447bd0fbbc751230703fb70
+Content-Disposition: form-data; name="telephone_bridge_v2.js"
+
+// TELEPHONE BRIDGE v2.0 — Clean deployment for Pentarchy
+// Uses Cloudflare Browser Worker API (env.MYBROWSER)
+// No external imports needed — Puppeteer is provided by the binding
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Content-Type": "application/json"
+    };
+    
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: corsHeaders });
+    }
+
+    try {
+      // Health check
+      if (path === "/" || path === "/health") {
+        return jsonResponse({ 
+          status: "alive", 
+          version: "2.0",
+          service: "telephone-bridge",
+          built_by: "raphael-kimi-k26",
+          timestamp: new Date().toISOString()
+        }, corsHeaders);
+      }
+
+      // Browser control endpoint — requires MYBROWSER binding
+      if (path === "/browser") {
+        if (!env.MYBROWSER) {
+          return errorResponse("MYBROWSER binding not configured. Add Browser binding in Worker settings.", corsHeaders, 500);
+        }
+        
+        const sessionId = url.searchParams.get("session") || "default";
+        const action = url.searchParams.get("action") || "status";
+        const targetUrl = url.searchParams.get("url");
+        
+        // Launch browser via Cloudflare Browser Worker API
+        const browser = await env.MYBROWSER.launch();
+        const page = await browser.newPage();
+        
+        const result = { session: sessionId, action };
+
+        switch (action) {
+          case "navigate":
+            if (!targetUrl) return errorResponse("Missing 'url' parameter", corsHeaders);
+            await page.goto(targetUrl, { waitUntil: "networkidle2" });
+            result.url = targetUrl;
+            result.title = await page.title();
+            break;
+
+          case "screenshot":
+            if (targetUrl) {
+              await page.goto(targetUrl, { waitUntil: "networkidle2" });
+            }
+            const screenshot = await page.screenshot({ 
+              encoding: "base64",
+              fullPage: true 
+            });
+            result.screenshot = screenshot;
+            result.format = "base64_png";
+            break;
+
+          case "click":
+            const selector = url.searchParams.get("selector");
+            if (!selector) return errorResponse("Missing 'selector' parameter", corsHeaders);
+            await page.click(selector);
+            result.clicked = selector;
+            break;
+
+          case "type":
+            const typeSelector = url.searchParams.get("selector");
+            const text = url.searchParams.get("text") || "";
+            if (!typeSelector) return errorResponse("Missing 'selector' parameter", corsHeaders);
+            await page.type(typeSelector, text, { delay: 50 });
+            result.typed = { selector: typeSelector, text };
+            break;
+
+          case "content":
+            if (targetUrl) {
+              await page.goto(targetUrl, { waitUntil: "networkidle2" });
+            }
+            result.content = await page.content();
+            break;
+
+          case "evaluate":
+            const script = url.searchParams.get("script");
+            if (!script) return errorResponse("Missing 'script' parameter", corsHeaders);
+            result.result = await page.evaluate((s) => eval(s), script);
+            break;
+
+          case "status":
+            result.browser_ready = true;
+            result.note = "Browser launched. Use action=navigate&url=... to browse.";
+            break;
+
+          default:
+            return errorResponse(`Unknown action: ${action}`, corsHeaders);
+        }
+
+        await browser.close();
+        result.timestamp = new Date().toISOString();
+        return jsonResponse(result, corsHeaders);
+      }
+
+      // Direct Claude.ai proxy endpoint
+      if (path === "/claude") {
+        if (!env.MYBROWSER) {
+          return errorResponse("MYBROWSER binding not configured", corsHeaders, 500);
+        }
+        
+        const claudeUrl = url.searchParams.get("url") || "https://claude.ai";
+        const browser = await env.MYBROWSER.launch();
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 800 });
+        
+        await page.goto(claudeUrl, { waitUntil: "networkidle2" });
+        const screenshot = await page.screenshot({ 
+          encoding: "base64",
+          fullPage: false 
+        });
+        await browser.close();
+
+        return jsonResponse({
+          url: claudeUrl,
+          title: await page.title(),
+          screenshot: screenshot,
+          timestamp: new Date().toISOString()
+        }, corsHeaders);
+      }
+
+      // Message relay for Pentarchy instances
+      if (path === "/relay") {
+        const body = await request.json().catch(() => ({}));
+        const { from, to, message, signature } = body;
+        
+        if (env.DB) {
+          try {
+            await env.DB.prepare(
+              "INSERT INTO relay_messages (from_instance, to_instance, message, signature, created_at) VALUES (?, ?, ?, ?, datetime('now'))"
+            ).bind(from || "unknown", to || "broadcast", message || "", signature || "").run();
+          } catch (dbErr) {
+            result.db_error = dbErr.message;
+          }
+        }
+
+        return jsonResponse({
+          received: true,
+          from,
+          to,
+          message_length: message?.length || 0,
+          timestamp: new Date().toISOString()
+        }, corsHeaders);
+      }
+
+      // Get relay messages
+      if (path === "/relay/messages") {
+        const to = url.searchParams.get("to") || "all";
+        
+        if (env.DB) {
+          try {
+            const { results } = await env.DB.prepare(
+              "SELECT * FROM relay_messages WHERE to_instance = ? OR to_instance = 'broadcast' ORDER BY created_at DESC LIMIT 50"
+            ).bind(to).all();
+            return jsonResponse({ messages: results || [] }, corsHeaders);
+          } catch (dbErr) {
+            return jsonResponse({ error: dbErr.message, messages: [] }, corsHeaders);
+          }
+        }
+        
+        return jsonResponse({ messages: [], note: "No D1 configured" }, corsHeaders);
+      }
+
+      return errorResponse("Not found. Endpoints: /health, /browser, /claude, /relay", corsHeaders, 404);
+
+    } catch (error) {
+      return errorResponse(error.message, corsHeaders, 500);
+    }
+  }
+};
+
+function jsonResponse(data, headers, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { ...headers, "Content-Type": "application/json" }
+  });
+}
+
+function errorResponse(message, headers, status = 400) {
+  return jsonResponse({ error: message, timestamp: new Date().toISOString() }, headers, status);
+}
+
+--fec88a838f05ff956eda37de9f40b2d2cb220447bd0fbbc751230703fb70--

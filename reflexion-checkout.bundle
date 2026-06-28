@@ -1,0 +1,160 @@
+--9a8aeadbd6f036a0b63136cce662a5245f39afcbff003898e64568244f4c
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/index.js
+var PLANS = {
+  monthly: {
+    name: "Reflexion Platform \u2014 Monthly",
+    amount: 999,
+    currency: "usd",
+    mode: "subscription",
+    interval: "month",
+    description: "AI Privacy Shield + 16 integrated services. Cancel anytime."
+  },
+  annual: {
+    name: "Reflexion Platform \u2014 Annual",
+    amount: 9999,
+    currency: "usd",
+    mode: "subscription",
+    interval: "year",
+    description: "AI Privacy Shield + 16 integrated services. Save 17%."
+  },
+  lifetime: {
+    name: "Reflexion Platform \u2014 Lifetime Founding Member",
+    amount: 25e3,
+    currency: "usd",
+    mode: "payment",
+    interval: null,
+    description: "Permanent access to all current and future services. Founding member pricing."
+  }
+};
+var SUCCESS_URL = "https://reflexionsoftware.com/success?session_id={CHECKOUT_SESSION_ID}";
+var CANCEL_URL = "https://reflexionsoftware.com/pricing";
+var ALLOWED_ORIGINS = [
+  "https://reflexionsoftware.com",
+  "https://www.reflexionsoftware.com"
+];
+function corsHeaders(request) {
+  const origin = request.headers.get("Origin") || "";
+  const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allowed,
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Max-Age": "86400"
+  };
+}
+__name(corsHeaders, "corsHeaders");
+async function logToD1(env, level, source, message, metadata) {
+  try {
+    if (!env.AURIS_LOGS) return;
+    await env.AURIS_LOGS.prepare(
+      "INSERT INTO error_log (severity, source, message, error_name, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(level, source, message, source, JSON.stringify(metadata || {}), Date.now()).run();
+  } catch (e) {
+    console.error("[checkout] D1 log failed:", e.message);
+  }
+}
+__name(logToD1, "logToD1");
+async function createCheckoutSession(env, plan, request) {
+  const config = PLANS[plan];
+  if (!config) throw new Error(`Unknown plan: ${plan}`);
+  const clientRef = crypto.randomUUID();
+  let body;
+  if (config.mode === "subscription") {
+    body = new URLSearchParams({
+      "mode": "subscription",
+      "success_url": SUCCESS_URL,
+      "cancel_url": CANCEL_URL,
+      "client_reference_id": clientRef,
+      "line_items[0][price_data][currency]": config.currency,
+      "line_items[0][price_data][unit_amount]": String(config.amount),
+      "line_items[0][price_data][recurring][interval]": config.interval,
+      "line_items[0][price_data][product_data][name]": config.name,
+      "line_items[0][price_data][product_data][description]": config.description,
+      "line_items[0][quantity]": "1",
+      "metadata[tier]": plan,
+      "metadata[source]": "reflexion-checkout-worker",
+      "allow_promotion_codes": "true"
+    });
+  } else {
+    body = new URLSearchParams({
+      "mode": "payment",
+      "success_url": SUCCESS_URL,
+      "cancel_url": CANCEL_URL,
+      "client_reference_id": clientRef,
+      "line_items[0][price_data][currency]": config.currency,
+      "line_items[0][price_data][unit_amount]": String(config.amount),
+      "line_items[0][price_data][product_data][name]": config.name,
+      "line_items[0][price_data][product_data][description]": config.description,
+      "line_items[0][quantity]": "1",
+      "metadata[tier]": plan,
+      "metadata[source]": "reflexion-checkout-worker",
+      "invoice_creation[enabled]": "true"
+    });
+  }
+  const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${env.STRIPE_SECRET_KEY}`,
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: body.toString()
+  });
+  const session = await response.json();
+  if (!response.ok) {
+    throw new Error(`Stripe API error: ${session.error?.message || response.status}`);
+  }
+  return session;
+}
+__name(createCheckoutSession, "createCheckoutSession");
+var index_default = {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const cors = corsHeaders(request);
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: cors });
+    }
+    if (url.pathname === "/health") {
+      return new Response(JSON.stringify({
+        status: "ok",
+        service: "reflexion-checkout",
+        stripe: !!env.STRIPE_SECRET_KEY,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      }), { status: 200, headers: { ...cors, "Content-Type": "application/json" } });
+    }
+    const planMatch = url.pathname.match(/^\/checkout\/(monthly|annual|lifetime)$/);
+    if (planMatch && request.method === "GET") {
+      const plan = planMatch[1];
+      try {
+        await logToD1(env, "INFO", "checkout", `Creating ${plan} checkout session`, { plan });
+        const session = await createCheckoutSession(env, plan, request);
+        await logToD1(env, "INFO", "checkout", `Checkout session created`, {
+          plan,
+          sessionId: session.id,
+          url: session.url
+        });
+        return Response.redirect(session.url, 303);
+      } catch (err) {
+        await logToD1(env, "ERROR", "checkout", `Checkout failed: ${err.message}`, {
+          plan,
+          error: err.message
+        });
+        return Response.redirect(`${CANCEL_URL}?error=checkout_failed`, 303);
+      }
+    }
+    return new Response(JSON.stringify({ error: "Not found" }), {
+      status: 404,
+      headers: { ...cors, "Content-Type": "application/json" }
+    });
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--9a8aeadbd6f036a0b63136cce662a5245f39afcbff003898e64568244f4c--

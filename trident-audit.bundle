@@ -1,0 +1,1016 @@
+--e4301a00fbdd736df5dfe616f5a3d70d732e5606a18337a4178ed6dcf8fa
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/audit.ts
+var GENESIS_HASH = "0".repeat(64);
+var AUDIT_TRAIL_V2 = "audit_trail_v2";
+var AUDIT_TRAIL_V1 = "audit_trail";
+async function computeHash(data) {
+  const encoder = new TextEncoder();
+  const buffer = await crypto.subtle.digest("SHA-256", encoder.encode(data));
+  return Array.from(new Uint8Array(buffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+__name(computeHash, "computeHash");
+function canonicalJson(obj) {
+  const sorted = {};
+  for (const key of Object.keys(obj).sort()) {
+    const val = obj[key];
+    if (val && typeof val === "object") {
+      sorted[key] = JSON.parse(canonicalJson(val));
+    } else {
+      sorted[key] = val;
+    }
+  }
+  return JSON.stringify(sorted);
+}
+__name(canonicalJson, "canonicalJson");
+async function getLastAuditHash(db) {
+  const fn = "getLastAuditHash";
+  console.log(`[${fn}] entry: querying last audit hash`);
+  try {
+    try {
+      const stmt = db.prepare(
+        `SELECT seq_num, entry_hash FROM ${AUDIT_TRAIL_V2} ORDER BY seq_num DESC LIMIT 1`
+      );
+      const row = await stmt.first();
+      if (row) {
+        console.log(`[${fn}] exit: found v2 entry seqNum=${row.seq_num}`);
+        return { seqNum: row.seq_num, entryHash: row.entry_hash };
+      }
+    } catch (v2Err) {
+      console.error(`[${fn}] branch: v2 table not available, falling back to v1`, {
+        error: v2Err.message
+      });
+    }
+    try {
+      const stmt = db.prepare(
+        `SELECT rowid as id, details FROM ${AUDIT_TRAIL_V1} ORDER BY rowid DESC LIMIT 1`
+      );
+      const row = await stmt.first();
+      if (row) {
+        const entryHash = await computeHash(row.details);
+        console.log(`[${fn}] exit: found v1 entry rowid=${row.id}, derived hash`);
+        return { seqNum: row.id, entryHash };
+      }
+    } catch (v1Err) {
+      console.error(`[${fn}] branch: v1 table also not available`, {
+        error: v1Err.message
+      });
+    }
+    console.log(`[${fn}] exit: no entries found, returning genesis`);
+    return { seqNum: 0, entryHash: GENESIS_HASH };
+  } catch (err) {
+    console.error(`[${fn}] exit: unexpected error`, {
+      error: err.message
+    });
+    throw err;
+  }
+}
+__name(getLastAuditHash, "getLastAuditHash");
+async function buildHashChainEntry(entry, prevSeqNum, prevHash) {
+  const fn = "buildHashChainEntry";
+  console.log(`[${fn}] entry: building hash chain entry seqNum=${prevSeqNum + 1}`);
+  const seqNum = prevSeqNum + 1;
+  const hashInput = canonicalJson({
+    ...entry,
+    prevHash,
+    seqNum
+  });
+  const entryHash = await computeHash(hashInput);
+  console.log(`[${fn}] exit: built entry seqNum=${seqNum} entryHash=${entryHash.slice(0, 16)}...`);
+  return {
+    ...entry,
+    prevHash,
+    entryHash,
+    seqNum
+  };
+}
+__name(buildHashChainEntry, "buildHashChainEntry");
+async function appendAuditLog(env, entry) {
+  const fn = "appendAuditLog";
+  console.log(`[${fn}] entry: appending audit log`, {
+    method: entry.method,
+    url: entry.url.slice(0, 80)
+  });
+  try {
+    const { seqNum: prevSeqNum, entryHash: prevHash } = await getLastAuditHash(env.AURIS_LOGS);
+    const chainEntry = await buildHashChainEntry(entry, prevSeqNum, prevHash);
+    try {
+      await insertHashChainV2(env.AURIS_LOGS, chainEntry);
+      console.log(`[${fn}] exit: hash-chain entry written to v2 seqNum=${chainEntry.seqNum}`);
+      return chainEntry;
+    } catch (v2Err) {
+      console.error(`[${fn}] branch: v2 insert failed, trying v1 fallback`, {
+        error: v2Err.message
+      });
+      try {
+        await insertHashChainV1(env.AURIS_LOGS, chainEntry);
+        console.log(`[${fn}] exit: hash-chain entry written to v1 (fallback) seqNum=${chainEntry.seqNum}`);
+        return chainEntry;
+      } catch (v1Err) {
+        console.error(`[${fn}] branch: v1 insert also failed`, {
+          error: v1Err.message
+        });
+        throw v1Err;
+      }
+    }
+  } catch (err) {
+    console.error(`[${fn}] branch: all D1 writes failed, falling back to KV`, {
+      error: err.message
+    });
+    try {
+      const chainEntry = await buildHashChainEntryFallback(entry);
+      await writeToKvFallback(env.SESSION_META, entry.timestamp, JSON.stringify(chainEntry));
+      console.log(`[${fn}] exit: hash-chain entry written to KV fallback`);
+      return chainEntry;
+    } catch (kvErr) {
+      console.error(`[${fn}] exit: KV fallback also failed \u2014 entry lost`, {
+        error: kvErr.message
+      });
+      return null;
+    }
+  }
+}
+__name(appendAuditLog, "appendAuditLog");
+async function insertHashChainV2(db, entry) {
+  const fn = "insertHashChainV2";
+  try {
+    const detailsJson = JSON.stringify(entry);
+    const timestamp = Math.floor(entry.timestamp / 1e3);
+    const stmt = db.prepare(
+      `INSERT INTO ${AUDIT_TRAIL_V2}
+       (timestamp, action, module, details, seq_num, prev_hash, entry_hash)
+       VALUES (?, 'request_audit', 'trident', ?, ?, ?, ?)`
+    );
+    const result = await stmt.bind(
+      timestamp,
+      detailsJson,
+      entry.seqNum,
+      entry.prevHash,
+      entry.entryHash
+    ).run();
+    if (!result.success) {
+      throw new Error(`D1 v2 insert unsuccessful: ${JSON.stringify(result)}`);
+    }
+  } catch (err) {
+    console.error(`[${fn}] exit: v2 insert failed`, {
+      error: err.message,
+      seqNum: entry.seqNum
+    });
+    throw err;
+  }
+}
+__name(insertHashChainV2, "insertHashChainV2");
+async function insertHashChainV1(db, entry) {
+  const fn = "insertHashChainV1";
+  try {
+    const detailsJson = JSON.stringify(entry);
+    const timestamp = Math.floor(entry.timestamp / 1e3);
+    const stmt = db.prepare(
+      `INSERT INTO ${AUDIT_TRAIL_V1} (timestamp, action, module, details) VALUES (?, 'request_audit', 'trident', ?)`
+    );
+    const result = await stmt.bind(timestamp, detailsJson).run();
+    if (!result.success) {
+      throw new Error(`D1 v1 insert unsuccessful: ${JSON.stringify(result)}`);
+    }
+  } catch (err) {
+    console.error(`[${fn}] exit: v1 insert failed`, {
+      error: err.message,
+      seqNum: entry.seqNum
+    });
+    throw err;
+  }
+}
+__name(insertHashChainV1, "insertHashChainV1");
+async function buildHashChainEntryFallback(entry) {
+  const timestamp = Date.now();
+  const prevHash = await computeHash(`genesis:${timestamp}:${Math.random()}`);
+  const hashInput = canonicalJson({
+    ...entry,
+    prevHash,
+    seqNum: -1,
+    // Indicates KV fallback (no true sequence)
+    fallback: true
+  });
+  const entryHash = await computeHash(hashInput);
+  return {
+    ...entry,
+    prevHash,
+    entryHash,
+    seqNum: -1
+  };
+}
+__name(buildHashChainEntryFallback, "buildHashChainEntryFallback");
+function extractJwtClaims(authHeader) {
+  const entry = "extractJwtClaims";
+  try {
+    if (!authHeader)
+      return null;
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : authHeader;
+    const parts = token.split(".");
+    if (parts.length !== 3) {
+      return null;
+    }
+    const payloadB64 = parts[1];
+    const payloadJson = base64UrlDecode(payloadB64);
+    if (!payloadJson) {
+      return null;
+    }
+    const claims = JSON.parse(payloadJson);
+    return claims;
+  } catch (err) {
+    console.error(`[${entry}] branch: failed to decode JWT claims`, {
+      error: err.message,
+      headerPrefix: authHeader ? `${authHeader.slice(0, 8)}...` : null
+    });
+    return null;
+  }
+}
+__name(extractJwtClaims, "extractJwtClaims");
+function base64UrlDecode(input) {
+  try {
+    let padded = input.replace(/-/g, "+").replace(/_/g, "/");
+    while (padded.length % 4 !== 0) {
+      padded += "=";
+    }
+    return atob(padded);
+  } catch (err) {
+    console.error("[base64UrlDecode] branch: invalid base64url input", {
+      error: err.message
+    });
+    return null;
+  }
+}
+__name(base64UrlDecode, "base64UrlDecode");
+async function writeToKvFallback(kv, timestampMs, detailsJson) {
+  const fn = "writeToKvFallback";
+  const key = `audit:backup:${timestampMs}:${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await kv.put(key, detailsJson, {
+      expirationTtl: 60 * 60 * 24 * 7
+      // 7 days
+    });
+  } catch (err) {
+    console.error(`[${fn}] exit: KV fallback write failed`, {
+      error: err.message,
+      key
+    });
+    throw err;
+  }
+}
+__name(writeToKvFallback, "writeToKvFallback");
+
+// src/token-binding.ts
+var BINDING_KEY_PREFIX = "token_binding:";
+var REPLAY_WINDOW_MS = 3e5;
+function extractClientFingerprint(request) {
+  const fn = "extractClientFingerprint";
+  console.log(`[${fn}] entry: extracting fingerprint`);
+  const ip = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? "unknown";
+  const userAgent = request.headers.get("User-Agent") ?? "unknown";
+  const uaHash = computeHash(userAgent);
+  console.log(`[${fn}] exit: ip=${ip} uaLen=${userAgent.length}`);
+  return { ip, userAgent, uaHash };
+}
+__name(extractClientFingerprint, "extractClientFingerprint");
+async function createBinding(jwtClaims, request) {
+  const fn = "createBinding";
+  console.log(`[${fn}] entry: creating binding`, { jti: jwtClaims.jti });
+  try {
+    const jti = jwtClaims.jti;
+    if (!jti) {
+      console.error(`[${fn}] branch: missing jti in JWT claims \u2014 cannot create binding`);
+      return null;
+    }
+    const { ip, uaHash } = extractClientFingerprint(request);
+    const resolvedUaHash = await uaHash;
+    const now = Date.now();
+    const binding = {
+      jti,
+      issuedAt: jwtClaims.iat ? jwtClaims.iat * 1e3 : now,
+      boundIp: ip,
+      boundUaHash: resolvedUaHash,
+      lastUsed: now,
+      useCount: 0
+    };
+    console.log(`[${fn}] exit: binding created jti=${jti} ip=${ip}`);
+    return binding;
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to create binding`, {
+      error: err.message,
+      jti: jwtClaims.jti
+    });
+    throw err;
+  }
+}
+__name(createBinding, "createBinding");
+async function validateBinding(jwtClaims, request, env) {
+  const fn = "validateBinding";
+  const jti = jwtClaims.jti;
+  console.log(`[${fn}] entry: validating binding`, { jti });
+  try {
+    if (!jti) {
+      return {
+        valid: false,
+        replaySuspected: false,
+        details: "JWT has no jti claim \u2014 cannot validate binding"
+      };
+    }
+    const binding = await getBinding(env, jti);
+    if (!binding) {
+      console.log(`[${fn}] branch: no binding found for jti=${jti} \u2014 token pre-dates binding`);
+      return {
+        valid: true,
+        // Allow through — no binding means no violation
+        replaySuspected: false,
+        details: "No binding record found \u2014 token may pre-date binding system"
+      };
+    }
+    const { ip: currentIp, uaHash: currentUaHashPromise } = extractClientFingerprint(request);
+    const currentUaHash = await currentUaHashPromise;
+    const ipMatch = binding.boundIp === currentIp;
+    const uaMatch = binding.boundUaHash === currentUaHash;
+    const replayDetected = !ipMatch && detectTokenReplay(binding, currentIp);
+    const valid = ipMatch && uaMatch;
+    const details = valid ? `Binding valid for jti=${jti}` : `Binding mismatch for jti=${jti}: ipMatch=${ipMatch} (${binding.boundIp} vs ${currentIp}), uaMatch=${uaMatch}, replayDetected=${replayDetected}`;
+    if (!valid) {
+      console.error(`[${fn}] branch: binding validation failed`, {
+        jti,
+        ipMatch,
+        uaMatch,
+        replayDetected,
+        boundIp: binding.boundIp,
+        currentIp
+      });
+    }
+    console.log(`[${fn}] exit: valid=${valid} replayDetected=${replayDetected}`);
+    return {
+      valid,
+      replaySuspected: replayDetected,
+      details,
+      binding
+    };
+  } catch (err) {
+    console.error(`[${fn}] exit: validation error`, {
+      error: err.message,
+      jti
+    });
+    return {
+      valid: true,
+      replaySuspected: false,
+      details: `Binding validation error: ${err.message} \u2014 failing open`
+    };
+  }
+}
+__name(validateBinding, "validateBinding");
+async function recordTokenUse(jti, env) {
+  const fn = "recordTokenUse";
+  console.log(`[${fn}] entry: recording use jti=${jti}`);
+  try {
+    const binding = await getBinding(env, jti);
+    if (!binding) {
+      console.log(`[${fn}] branch: no binding found for jti=${jti}`);
+      return null;
+    }
+    binding.useCount += 1;
+    binding.lastUsed = Date.now();
+    await storeBinding(env, binding);
+    console.log(`[${fn}] exit: use recorded count=${binding.useCount}`);
+    return binding;
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to record use`, {
+      error: err.message,
+      jti
+    });
+    throw err;
+  }
+}
+__name(recordTokenUse, "recordTokenUse");
+function detectTokenReplay(binding, currentIp) {
+  const fn = "detectTokenReplay";
+  console.log(`[${fn}] entry: checking replay jti=${binding.jti} currentIp=${currentIp}`);
+  try {
+    if (binding.boundIp === currentIp) {
+      console.log(`[${fn}] exit: same IP \u2014 not replay`);
+      return false;
+    }
+    const now = Date.now();
+    const timeSinceLastUse = now - binding.lastUsed;
+    const isReplay = timeSinceLastUse < REPLAY_WINDOW_MS;
+    console.log(`[${fn}] exit: timeSinceLastUse=${timeSinceLastUse}ms isReplay=${isReplay}`);
+    return isReplay;
+  } catch (err) {
+    console.error(`[${fn}] exit: error during replay detection`, {
+      error: err.message,
+      jti: binding.jti
+    });
+    return false;
+  }
+}
+__name(detectTokenReplay, "detectTokenReplay");
+function bindingKey(jti) {
+  return `${BINDING_KEY_PREFIX}${jti}`;
+}
+__name(bindingKey, "bindingKey");
+async function storeBinding(env, binding) {
+  const fn = "storeBinding";
+  const key = bindingKey(binding.jti);
+  console.log(`[${fn}] entry: storing binding key=${key}`);
+  try {
+    const value = JSON.stringify(binding);
+    const ttlSeconds = Math.max(
+      3600,
+      // minimum 1 hour
+      Math.floor((binding.issuedAt + 24 * 3600 * 1e3 - Date.now()) / 1e3)
+    );
+    await env.SESSION_META.put(key, value, { expirationTtl: ttlSeconds });
+    console.log(`[${fn}] exit: binding stored key=${key} ttl=${ttlSeconds}s`);
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to store binding`, {
+      error: err.message,
+      key,
+      jti: binding.jti
+    });
+    throw err;
+  }
+}
+__name(storeBinding, "storeBinding");
+async function getBinding(env, jti) {
+  const fn = "getBinding";
+  const key = bindingKey(jti);
+  console.log(`[${fn}] entry: retrieving binding key=${key}`);
+  try {
+    const value = await env.SESSION_META.get(key);
+    if (!value) {
+      console.log(`[${fn}] exit: binding not found key=${key}`);
+      return null;
+    }
+    const binding = JSON.parse(value);
+    console.log(`[${fn}] exit: binding retrieved key=${key} useCount=${binding.useCount}`);
+    return binding;
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to retrieve binding`, {
+      error: err.message,
+      key,
+      jti
+    });
+    throw err;
+  }
+}
+__name(getBinding, "getBinding");
+
+// src/integrity-check.ts
+var AUDIT_TRAIL_V22 = "audit_trail_v2";
+var AUDIT_TRAIL_V12 = "audit_trail";
+async function verifyChain(env, options = {}) {
+  const fn = "verifyChain";
+  const { startSeq, endSeq, emitAlert = true } = options;
+  const verifiedAt = (/* @__PURE__ */ new Date()).toISOString();
+  console.log(`[${fn}] entry: starting full chain verification`, {
+    startSeq: startSeq ?? "auto",
+    endSeq: endSeq ?? "auto",
+    emitAlert,
+    verifiedAt
+  });
+  try {
+    const stats = await getChainStats(env);
+    console.log(`[${fn}] branch: chain stats`, {
+      totalEntries: stats.totalEntries,
+      minSeq: stats.minSeq,
+      maxSeq: stats.maxSeq,
+      v2Table: stats.v2Table
+    });
+    if (stats.totalEntries === 0) {
+      console.log(`[${fn}] exit: empty chain, nothing to verify`);
+      return {
+        valid: true,
+        brokenAt: [],
+        tamperEvidence: [],
+        stats,
+        verifiedAt
+      };
+    }
+    const tamperEvidence = await detectTampering(env, startSeq, endSeq);
+    const valid = tamperEvidence.length === 0;
+    const brokenAt = tamperEvidence.map((t) => t.seqNum);
+    if (!valid && emitAlert) {
+      for (const evidence of tamperEvidence) {
+        console.error(`[${fn}] CRITICAL: TAMPERING DETECTED at seqNum=${evidence.seqNum}`, {
+          expected: evidence.expectedHash,
+          actual: evidence.actualHash,
+          description: evidence.description
+        });
+      }
+      try {
+        await emitCriticalAlert(env, tamperEvidence, verifiedAt);
+      } catch (alertErr) {
+        console.error(`[${fn}] branch: failed to emit critical alert`, {
+          error: alertErr.message
+        });
+      }
+    }
+    console.log(`[${fn}] exit: verification complete valid=${valid} tamperCount=${tamperEvidence.length}`);
+    return {
+      valid,
+      brokenAt,
+      tamperEvidence,
+      stats,
+      verifiedAt
+    };
+  } catch (err) {
+    console.error(`[${fn}] exit: verification failed with error`, {
+      error: err.message
+    });
+    throw err;
+  }
+}
+__name(verifyChain, "verifyChain");
+async function getChainStats(env) {
+  const fn = "getChainStats";
+  console.log(`[${fn}] entry: gathering chain statistics`);
+  try {
+    let v2Table = true;
+    let rows = [];
+    try {
+      const stmt = env.AURIS_LOGS.prepare(
+        `SELECT seq_num, timestamp as ts FROM ${AUDIT_TRAIL_V22} ORDER BY seq_num ASC`
+      );
+      const result = await stmt.all();
+      rows = result.results ?? [];
+    } catch (v2Err) {
+      console.error(`[${fn}] branch: v2 table query failed, trying v1`, {
+        error: v2Err.message
+      });
+      v2Table = false;
+      try {
+        const stmt = env.AURIS_LOGS.prepare(
+          `SELECT rowid as seq_num, timestamp as ts FROM ${AUDIT_TRAIL_V12} ORDER BY rowid ASC`
+        );
+        const result = await stmt.all();
+        rows = result.results ?? [];
+      } catch (v1Err) {
+        console.error(`[${fn}] branch: v1 table query also failed`, {
+          error: v1Err.message
+        });
+        throw v1Err;
+      }
+    }
+    if (rows.length === 0) {
+      return {
+        totalEntries: 0,
+        minSeq: 0,
+        maxSeq: 0,
+        lastEntryTimestamp: 0,
+        gaps: [],
+        gapCount: 0,
+        computedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        v2Table
+      };
+    }
+    const totalEntries = rows.length;
+    const minSeq = rows[0].seq_num;
+    const maxSeq = rows[rows.length - 1].seq_num;
+    const lastEntryTimestamp = rows[rows.length - 1].ts * 1e3;
+    const gaps = [];
+    const expectedCount = maxSeq - minSeq + 1;
+    if (expectedCount !== totalEntries) {
+      const seqSet = new Set(rows.map((r) => r.seq_num));
+      let gapStart = null;
+      for (let s = minSeq; s <= maxSeq; s++) {
+        if (!seqSet.has(s)) {
+          if (gapStart === null)
+            gapStart = s;
+        } else if (gapStart !== null) {
+          const gapEnd = s - 1;
+          gaps.push(
+            gapStart === gapEnd ? `missing seq ${gapStart}` : `missing seq ${gapStart}-${gapEnd}`
+          );
+          gapStart = null;
+        }
+      }
+      if (gapStart !== null) {
+        gaps.push(`missing seq ${gapStart}-${maxSeq}`);
+      }
+    }
+    const stats = {
+      totalEntries,
+      minSeq,
+      maxSeq,
+      lastEntryTimestamp,
+      gaps,
+      gapCount: gaps.length,
+      computedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      v2Table
+    };
+    console.log(`[${fn}] exit: stats total=${totalEntries} min=${minSeq} max=${maxSeq} gaps=${gaps.length}`);
+    return stats;
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to gather chain stats`, {
+      error: err.message
+    });
+    throw err;
+  }
+}
+__name(getChainStats, "getChainStats");
+async function detectTampering(env, startSeq, endSeq) {
+  const fn = "detectTampering";
+  console.log(`[${fn}] entry: detecting tampering`, { startSeq: startSeq ?? "auto", endSeq: endSeq ?? "auto" });
+  try {
+    const rangeStmt = env.AURIS_LOGS.prepare(
+      `SELECT COALESCE(MIN(seq_num), 0) as min_seq, COALESCE(MAX(seq_num), 0) as max_seq FROM ${AUDIT_TRAIL_V22}`
+    );
+    const rangeRow = await rangeStmt.first();
+    let effectiveStart = startSeq ?? (rangeRow?.min_seq ?? 0);
+    let effectiveEnd = endSeq ?? (rangeRow?.max_seq ?? 0);
+    if (!rangeRow || rangeRow.max_seq === 0) {
+      const v1RangeStmt = env.AURIS_LOGS.prepare(
+        `SELECT COALESCE(MIN(rowid), 0) as min_seq, COALESCE(MAX(rowid), 0) as max_seq FROM ${AUDIT_TRAIL_V12}`
+      );
+      const v1Range = await v1RangeStmt.first();
+      effectiveStart = startSeq ?? (v1Range?.min_seq ?? 0);
+      effectiveEnd = endSeq ?? (v1Range?.max_seq ?? 0);
+    }
+    if (effectiveStart === 0 && effectiveEnd === 0) {
+      console.log(`[${fn}] exit: no entries to check`);
+      return [];
+    }
+    let rows = [];
+    try {
+      const stmt = env.AURIS_LOGS.prepare(
+        `SELECT seq_num, entry_hash, prev_hash, details
+         FROM ${AUDIT_TRAIL_V22}
+         WHERE seq_num >= ? AND seq_num <= ?
+         ORDER BY seq_num ASC`
+      );
+      const result = await stmt.bind(effectiveStart, effectiveEnd).all();
+      rows = result.results ?? [];
+    } catch (v2Err) {
+      console.error(`[${fn}] branch: v2 fetch failed, trying v1`, {
+        error: v2Err.message
+      });
+      try {
+        const stmt = env.AURIS_LOGS.prepare(
+          `SELECT rowid as seq_num, NULL as entry_hash, NULL as prev_hash, details
+           FROM ${AUDIT_TRAIL_V12}
+           WHERE rowid >= ? AND rowid <= ?
+           ORDER BY rowid ASC`
+        );
+        const result = await stmt.bind(effectiveStart, effectiveEnd).all();
+        rows = result.results ?? [];
+      } catch (v1Err) {
+        console.error(`[${fn}] branch: v1 fetch also failed`, {
+          error: v1Err.message
+        });
+        throw v1Err;
+      }
+    }
+    const evidence = [];
+    let previousEntryHash = "";
+    let previousSeqNum = 0;
+    for (const row of rows) {
+      let storedEntry;
+      try {
+        storedEntry = JSON.parse(row.details);
+      } catch (parseErr) {
+        evidence.push({
+          seqNum: row.seq_num,
+          expectedHash: "valid-json",
+          actualHash: "parse-error",
+          description: `Failed to parse details JSON: ${parseErr.message}`
+        });
+        previousEntryHash = row.entry_hash ?? "";
+        previousSeqNum = row.seq_num;
+        continue;
+      }
+      const storedEntryHash = row.entry_hash ?? await computeHash(row.details);
+      const storedPrevHash = row.prev_hash ?? storedEntry.prevHash ?? "";
+      const canonicalData = buildCanonicalData(storedEntry);
+      const recomputedEntryHash = await computeHash(canonicalData);
+      if (recomputedEntryHash !== storedEntryHash) {
+        evidence.push({
+          seqNum: row.seq_num,
+          expectedHash: storedEntryHash,
+          actualHash: recomputedEntryHash,
+          description: `Entry hash mismatch at seqNum=${row.seq_num}: data may have been modified`
+        });
+      }
+      if (previousSeqNum > 0 && row.seq_num > previousSeqNum) {
+        if (storedPrevHash !== previousEntryHash) {
+          evidence.push({
+            seqNum: row.seq_num,
+            expectedHash: previousEntryHash,
+            actualHash: storedPrevHash,
+            description: `Chain link broken at seqNum=${row.seq_num}: prevHash does not match previous entryHash`
+          });
+        }
+      }
+      previousEntryHash = storedEntryHash;
+      previousSeqNum = row.seq_num;
+    }
+    console.log(`[${fn}] exit: checked ${rows.length} entries, found ${evidence.length} tampering indicators`);
+    return evidence;
+  } catch (err) {
+    console.error(`[${fn}] exit: tamper detection failed`, {
+      error: err.message
+    });
+    throw err;
+  }
+}
+__name(detectTampering, "detectTampering");
+async function emitCriticalAlert(env, evidence, detectedAt) {
+  const fn = "emitCriticalAlert";
+  console.log(`[${fn}] entry: emitting CRITICAL tamper alert`, {
+    evidenceCount: evidence.length,
+    detectedAt
+  });
+  try {
+    const details = JSON.stringify({
+      alertType: "INTEGRITY_TAMPER_DETECTED",
+      severity: "CRITICAL",
+      detectedAt,
+      evidence,
+      summary: `Tampering detected in audit chain: ${evidence.length} broken links`
+    });
+    const timestamp = Math.floor(Date.now() / 1e3);
+    const stmt = env.AURIS_LOGS.prepare(
+      `INSERT INTO audit_trail (timestamp, action, module, metadata, details) VALUES (?, 'integrity_alert', 'trident-audit', ?, ?)`
+    );
+    await stmt.bind(timestamp, details, details).run();
+    console.log(`[${fn}] exit: CRITICAL alert written to audit_trail`);
+  } catch (err) {
+    console.error(`[${fn}] exit: failed to write critical alert`, {
+      error: err.message
+    });
+    throw err;
+  }
+}
+__name(emitCriticalAlert, "emitCriticalAlert");
+function buildCanonicalData(entry) {
+  const hashFields = {};
+  const includeKeys = [
+    "timestamp",
+    "method",
+    "url",
+    "sourceIp",
+    "userAgent",
+    "authPresent",
+    "jwtClaims",
+    "responseStatus",
+    "latencyMs",
+    "route",
+    "workerTarget",
+    "tokenReplaySuspected",
+    "tokenBindingJti",
+    "prevHash",
+    "seqNum"
+  ];
+  for (const key of includeKeys) {
+    if (key in entry) {
+      hashFields[key] = entry[key];
+    }
+  }
+  const sorted = {};
+  for (const key of Object.keys(hashFields).sort()) {
+    const val = hashFields[key];
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      sorted[key] = sortObjectKeys(val);
+    } else {
+      sorted[key] = val;
+    }
+  }
+  return JSON.stringify(sorted);
+}
+__name(buildCanonicalData, "buildCanonicalData");
+function sortObjectKeys(obj) {
+  const sorted = {};
+  for (const key of Object.keys(obj).sort()) {
+    const val = obj[key];
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      sorted[key] = sortObjectKeys(val);
+    } else {
+      sorted[key] = val;
+    }
+  }
+  return sorted;
+}
+__name(sortObjectKeys, "sortObjectKeys");
+async function handleIntegrityRequest(request, env) {
+  const fn = "handleIntegrityRequest";
+  const url = new URL(request.url);
+  const path = url.pathname;
+  console.log(`[${fn}] entry: handling ${request.method} ${path}`);
+  try {
+    if (path === "/verify" || path === "/verify/") {
+      const startSeq = url.searchParams.has("start") ? parseInt(url.searchParams.get("start"), 10) : void 0;
+      const endSeq = url.searchParams.has("end") ? parseInt(url.searchParams.get("end"), 10) : void 0;
+      const result = await verifyChain(env, { startSeq, endSeq });
+      return jsonResponse(result, result.valid ? 200 : 409);
+    }
+    if (path === "/stats" || path === "/stats/") {
+      const stats = await getChainStats(env);
+      return jsonResponse(stats, 200);
+    }
+    if (path === "/tamper" || path === "/tamper/") {
+      const startSeq = url.searchParams.has("start") ? parseInt(url.searchParams.get("start"), 10) : void 0;
+      const endSeq = url.searchParams.has("end") ? parseInt(url.searchParams.get("end"), 10) : void 0;
+      const evidence = await detectTampering(env, startSeq, endSeq);
+      return jsonResponse(
+        {
+          tampered: evidence.length > 0,
+          evidenceCount: evidence.length,
+          evidence,
+          checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+        },
+        evidence.length > 0 ? 409 : 200
+      );
+    }
+    return jsonResponse({ error: "Unknown endpoint. Use /verify, /stats, or /tamper" }, 404);
+  } catch (err) {
+    console.error(`[${fn}] exit: request handler error`, {
+      error: err.message,
+      path
+    });
+    return jsonResponse(
+      {
+        error: "Integrity check failed",
+        message: err.message,
+        checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+      },
+      500
+    );
+  }
+}
+__name(handleIntegrityRequest, "handleIntegrityRequest");
+function jsonResponse(data, status) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store"
+    }
+  });
+}
+__name(jsonResponse, "jsonResponse");
+
+// src/index.ts
+var src_default = {
+  async fetch(request, env, ctx) {
+    const fn = "fetch";
+    const parsedUrl = new URL(request.url);
+    if (parsedUrl.pathname === "/verify" || parsedUrl.pathname === "/verify/" || parsedUrl.pathname === "/stats" || parsedUrl.pathname === "/stats/" || parsedUrl.pathname === "/tamper" || parsedUrl.pathname === "/tamper/") {
+      console.log(`[${fn}] branch: routing to integrity check endpoint ${parsedUrl.pathname}`);
+      return handleIntegrityRequest(request, env);
+    }
+    const startNs = performance.now();
+    const timestamp = Date.now();
+    const method = request.method;
+    const url = request.url;
+    const sourceIp = request.headers.get("CF-Connecting-IP") ?? request.headers.get("X-Forwarded-For") ?? null;
+    const userAgent = request.headers.get("User-Agent");
+    const authHeader = request.headers.get("Authorization");
+    const authPresent = !!authHeader;
+    const jwtClaims = extractJwtClaims(authHeader);
+    let response;
+    let workerTarget;
+    try {
+      if (env.REFLEXION_API) {
+        workerTarget = "reflexion-api";
+        response = await env.REFLEXION_API.fetch(request.clone());
+      } else {
+        response = new Response(null, { status: 204 });
+      }
+    } catch (upstreamErr) {
+      console.error(`[${fn}] branch: upstream fetch failed`, {
+        error: upstreamErr.message,
+        url,
+        method
+      });
+      response = new Response("Bad Gateway", {
+        status: 502,
+        headers: { "Content-Type": "text/plain" }
+      });
+    }
+    const latencyMs = Math.round(performance.now() - startNs);
+    const auditEntry = {
+      timestamp,
+      method,
+      url,
+      sourceIp,
+      userAgent,
+      authPresent,
+      jwtClaims,
+      responseStatus: response.status,
+      latencyMs,
+      workerTarget
+    };
+    ctx.waitUntil(
+      logAuditWithBinding(env, auditEntry, jwtClaims, request).catch((logErr) => {
+        console.error(`[${fn}] last-resort: logAuditWithBinding rejected`, {
+          error: logErr.message,
+          url
+        });
+      })
+    );
+    return response;
+  }
+};
+async function logAuditWithBinding(env, baseEntry, jwtClaims, request) {
+  const fn = "logAuditWithBinding";
+  console.log(`[${fn}] entry: starting audit log with binding check`);
+  try {
+    let enrichedEntry = { ...baseEntry };
+    if (jwtClaims?.jti) {
+      try {
+        const bindingResult = await handleTokenBinding(env, jwtClaims, request);
+        enrichedEntry.tokenBindingJti = jwtClaims.jti;
+        enrichedEntry.tokenReplaySuspected = bindingResult.replaySuspected;
+        if (bindingResult.replaySuspected) {
+          console.error(`[${fn}] CRITICAL: token replay suspected jti=${jwtClaims.jti}`, {
+            details: bindingResult.details
+          });
+        }
+      } catch (bindingErr) {
+        console.error(`[${fn}] branch: token binding failed, continuing with audit log`, {
+          error: bindingErr.message,
+          jti: jwtClaims.jti
+        });
+      }
+    }
+    try {
+      const chainEntry = await appendAuditLog(env, enrichedEntry);
+      if (chainEntry) {
+        console.log(`[${fn}] exit: hash-chain entry appended seqNum=${chainEntry.seqNum}`);
+      } else {
+        console.error(`[${fn}] exit: appendAuditLog returned null \u2014 entry may be lost`);
+      }
+      return chainEntry;
+    } catch (auditErr) {
+      console.error(`[${fn}] exit: hash-chain append failed`, {
+        error: auditErr.message
+      });
+      return null;
+    }
+  } catch (err) {
+    console.error(`[${fn}] last-resort: unexpected error`, {
+      error: err.message
+    });
+    return null;
+  }
+}
+__name(logAuditWithBinding, "logAuditWithBinding");
+async function handleTokenBinding(env, jwtClaims, request) {
+  const fn = "handleTokenBinding";
+  const jti = jwtClaims.jti;
+  console.log(`[${fn}] entry: handling token binding jti=${jti}`);
+  try {
+    let validationResult = await validateBinding(jwtClaims, request, env);
+    if (!validationResult.binding) {
+      console.log(`[${fn}] branch: no existing binding, creating new binding jti=${jti}`);
+      try {
+        const newBinding = await createBinding(jwtClaims, request);
+        if (newBinding) {
+          await storeBinding(env, newBinding);
+          validationResult = {
+            valid: true,
+            replaySuspected: false,
+            details: `Created new binding for jti=${jti}`,
+            binding: newBinding
+          };
+        }
+      } catch (createErr) {
+        console.error(`[${fn}] branch: failed to create binding`, {
+          error: createErr.message,
+          jti
+        });
+      }
+    }
+    try {
+      await recordTokenUse(jti, env);
+    } catch (useErr) {
+      console.error(`[${fn}] branch: failed to record token use`, {
+        error: useErr.message,
+        jti
+      });
+    }
+    console.log(`[${fn}] exit: binding valid=${validationResult.valid} replaySuspected=${validationResult.replaySuspected}`);
+    return validationResult;
+  } catch (err) {
+    console.error(`[${fn}] exit: error in handleTokenBinding`, {
+      error: err.message,
+      jti
+    });
+    return {
+      valid: true,
+      replaySuspected: false,
+      details: `Token binding handler error: ${err.message} \u2014 failing open`
+    };
+  }
+}
+__name(handleTokenBinding, "handleTokenBinding");
+export {
+  src_default as default
+};
+--e4301a00fbdd736df5dfe616f5a3d70d732e5606a18337a4178ed6dcf8fa--

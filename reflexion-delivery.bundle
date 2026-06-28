@@ -1,0 +1,171 @@
+--6636577ba9f366863c7d946d45329c2a656a33eb31732a906bd77dcbfd8b
+Content-Disposition: form-data; name="index.js"
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    let path = url.pathname;
+
+    // === CORS PREFLIGHT ===
+    if (request.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+          'Access-Control-Allow-Headers': 'Content-Type, X-License-Key',
+        }
+      });
+    }
+
+    // === LICENSE VALIDATION ENDPOINT ===
+    if (path === '/license/verify-license' || path === '/validate-license') {
+      try {
+        const keyFromHeader = request.headers.get('X-License-Key');
+        let keyFromBody = null;
+        try {
+          const body = await request.clone().json();
+          keyFromBody = body.key;
+        } catch {}
+        
+        const licenseKey = (keyFromHeader || keyFromBody || '').trim();
+        
+        if (!licenseKey) {
+          return jsonResponse({ valid: false, error: 'No license key provided' }, 400);
+        }
+        
+        let value = await env.LICENSES.get(licenseKey);
+        if (!value) value = await env.LICENSES.get(licenseKey.toUpperCase());
+        if (!value && licenseKey.includes('-')) {
+          value = await env.LICENSES.get(licenseKey.replace(/-/g, ''));
+        }
+        
+        if (value) {
+          let plan = 'active';
+          let type = 'STANDARD';
+          try {
+            const meta = JSON.parse(value);
+            plan = meta.plan || meta.tier || 'active';
+            if (licenseKey.startsWith('SHAX')) type = 'LIFETIME';
+            else if (licenseKey.startsWith('REF-L')) type = 'LIFETIME';
+            else if (licenseKey.startsWith('REF-A')) type = 'ANNUAL';
+            else if (licenseKey.startsWith('REF-M')) type = 'MONTHLY';
+            else if (meta.stripe_customer_id) type = 'PAID';
+          } catch {
+            if (licenseKey.startsWith('SHAX')) type = 'LIFETIME';
+            else if (licenseKey.startsWith('REF-L')) type = 'LIFETIME';
+            else if (licenseKey.startsWith('REF-A')) type = 'ANNUAL';
+            else if (licenseKey.startsWith('REF-M')) type = 'MONTHLY';
+          }
+          
+          return jsonResponse({ valid: true, plan, type });
+        }
+        
+        return jsonResponse({ valid: false, error: 'License key not found' }, 401);
+      } catch (e) {
+        return jsonResponse({ valid: false, error: 'Server error: ' + e.message }, 500);
+      }
+    }
+
+    // Default to index.html
+    if (path === '/' || path === '') {
+      path = '/index.html';
+    }
+
+    // === KV OVERRIDE FOR DOWNLOADS ===
+    // Check KV first for download files — bypasses R2 cache issues
+    if (path.startsWith('/downloads/') && env.BCC_CONTEXT_CACHE) {
+      try {
+        const kvKey = 'downloads:' + path.split('/downloads/')[1];
+        const kvValue = await env.BCC_CONTEXT_CACHE.get(kvKey, { type: 'arrayBuffer' });
+        if (kvValue) {
+          const contentType = path.endsWith('.zip') ? 'application/zip'
+            : path.endsWith('.apk') ? 'application/vnd.android.package-archive'
+            : 'application/octet-stream';
+          const filename = path.split('/').pop();
+          return new Response(kvValue, {
+            headers: {
+              'Content-Type': contentType,
+              'Content-Disposition': 'attachment; filename="' + filename + '"',
+              'Cache-Control': 'no-cache',
+              'X-Content-Type-Options': 'nosniff',
+              'X-Served-From': 'kv-override'
+            }
+          });
+        }
+      } catch (e) {
+        // KV failed, fall through to R2
+      }
+    }
+
+    // Map paths like /product-shield to /product-shield.html
+    if (!path.includes('.')) {
+      const htmlPath = path + '.html';
+      const htmlKey = `website${htmlPath}`;
+      const htmlObject = await env.SITE_BUCKET.get(htmlKey);
+      if (htmlObject) {
+        return new Response(htmlObject.body, {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff'
+          }
+        });
+      }
+    }
+
+    // Direct file lookup from R2
+    const key = `website${path}`;
+
+    try {
+      const object = await env.SITE_BUCKET.get(key);
+      if (!object) {
+        const htmlKey = key + '.html';
+        const htmlObject = await env.SITE_BUCKET.get(htmlKey);
+        if (!htmlObject) {
+          return new Response('Not found', { status: 404 });
+        }
+        return new Response(htmlObject.body, {
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'public, max-age=3600',
+            'X-Content-Type-Options': 'nosniff'
+          }
+        });
+      }
+
+      const contentType = key.endsWith('.html') ? 'text/html; charset=utf-8'
+        : key.endsWith('.css') ? 'text/css'
+        : key.endsWith('.js') ? 'application/javascript'
+        : key.endsWith('.json') ? 'application/json'
+        : key.endsWith('.zip') ? 'application/zip'
+        : key.endsWith('.apk') ? 'application/vnd.android.package-archive'
+        : key.endsWith('.png') ? 'image/png'
+        : 'application/octet-stream';
+
+      return new Response(object.body, {
+        headers: {
+          'Content-Type': contentType,
+          'Cache-Control': 'public, max-age=3600',
+          'X-Content-Type-Options': 'nosniff'
+        }
+      });
+    } catch (e) {
+      return new Response(`Server error: ${e.message}`, { status: 500 });
+    }
+  }
+};
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-License-Key',
+    }
+  });
+}
+
+--6636577ba9f366863c7d946d45329c2a656a33eb31732a906bd77dcbfd8b--

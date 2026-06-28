@@ -1,0 +1,185 @@
+--75313fd71e1eeb5fd02bdb298064d70683357b095ca932ad0e596122f034
+Content-Disposition: form-data; name="worker.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// worker.js
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-API-Key"
+};
+var worker_default = {
+  async fetch(request, env, ctx) {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { headers: CORS_HEADERS });
+    }
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (path !== "/health") {
+      const authKey = url.searchParams.get("key") || request.headers.get("X-API-Key");
+      if (authKey !== env.API_SECRET) {
+        return json({ error: "Unauthorized" }, 401);
+      }
+    }
+    try {
+      switch (path) {
+        case "/webhook":
+          return await handleWebhook(request, env);
+        case "/sms":
+          return await getSMS(url, env);
+        case "/fetch":
+          return await fetchFromProvider(url, env);
+        case "/numbers":
+          return await listNumbers(env);
+        case "/health":
+          return json({ status: "ok", service: "sms-gateway", timestamp: Date.now() });
+        default:
+          return json({ error: "Not found", endpoints: ["/webhook", "/sms", "/fetch", "/numbers", "/health"] }, 404);
+      }
+    } catch (err) {
+      return json({ error: err.message }, 500);
+    }
+  }
+};
+async function handleWebhook(request, env) {
+  const body = await request.json();
+  const { number, from, message, timestamp } = body;
+  if (!number || !message) {
+    return json({ error: "Missing required fields: number, message" }, 400);
+  }
+  const smsRecord = {
+    id: crypto.randomUUID(),
+    number: normalizeNumber(number),
+    from: from || "unknown",
+    message,
+    timestamp: timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+    receivedAt: Date.now(),
+    // Extract verification codes automatically
+    codes: extractCodes(message)
+  };
+  const key = `sms:${smsRecord.number}:${smsRecord.id}`;
+  await env.SMS_INBOX.put(key, JSON.stringify(smsRecord), { expirationTtl: 604800 });
+  await env.SMS_INBOX.put(`latest:${smsRecord.number}`, JSON.stringify(smsRecord), { expirationTtl: 604800 });
+  await updateNumberIndex(env, smsRecord.number);
+  console.log(`SMS received for ${smsRecord.number}: ${message.substring(0, 50)}...`);
+  return json({ success: true, id: smsRecord.id, codes: smsRecord.codes });
+}
+__name(handleWebhook, "handleWebhook");
+async function getSMS(url, env) {
+  const number = normalizeNumber(url.searchParams.get("number"));
+  const latestOnly = url.searchParams.get("latest") === "true";
+  if (!number) {
+    return json({ error: "Missing number parameter" }, 400);
+  }
+  if (latestOnly) {
+    const latest = await env.SMS_INBOX.get(`latest:${number}`, "json");
+    return json({ number, latest, count: latest ? 1 : 0 });
+  }
+  const list = await env.SMS_INBOX.list({ prefix: `sms:${number}:` });
+  const messages = await Promise.all(
+    list.keys.map((k) => env.SMS_INBOX.get(k.name, "json"))
+  );
+  messages.sort((a, b) => b.receivedAt - a.receivedAt);
+  return json({ number, messages, count: messages.length });
+}
+__name(getSMS, "getSMS");
+async function fetchFromProvider(url, env) {
+  const number = normalizeNumber(url.searchParams.get("number"));
+  if (!number) {
+    return json({ error: "Missing number parameter" }, 400);
+  }
+  if (!env.PVAPINS_API_KEY) {
+    return json({ error: "PVAPins API key not configured" }, 503);
+  }
+  const pvapinsUrl = `https://pvapins.com/api/sms?number=${encodeURIComponent(number)}&apikey=${env.PVAPINS_API_KEY}`;
+  const response = await fetch(pvapinsUrl);
+  const data = await response.json();
+  if (data.messages && Array.isArray(data.messages)) {
+    for (const msg of data.messages) {
+      const smsRecord = {
+        id: crypto.randomUUID(),
+        number,
+        from: msg.from || "unknown",
+        message: msg.text || msg.message,
+        timestamp: msg.timestamp || (/* @__PURE__ */ new Date()).toISOString(),
+        receivedAt: Date.now(),
+        codes: extractCodes(msg.text || msg.message),
+        source: "pvapins-fetch"
+      };
+      const key = `sms:${number}:${smsRecord.id}`;
+      await env.SMS_INBOX.put(key, JSON.stringify(smsRecord), { expirationTtl: 604800 });
+      await env.SMS_INBOX.put(`latest:${number}`, JSON.stringify(smsRecord), { expirationTtl: 604800 });
+    }
+  }
+  return json({ number, provider: "pvapins", data });
+}
+__name(fetchFromProvider, "fetchFromProvider");
+async function listNumbers(env) {
+  const indexData = await env.SMS_INBOX.get("index:numbers", "json") || { numbers: [] };
+  const numbersWithLatest = await Promise.all(
+    indexData.numbers.map(async (num) => {
+      const latest = await env.SMS_INBOX.get(`latest:${num}`, "json");
+      return {
+        number: num,
+        lastMessage: latest ? latest.timestamp : null,
+        lastCode: latest ? latest.codes[0] : null
+      };
+    })
+  );
+  return json({ numbers: numbersWithLatest, count: numbersWithLatest.length });
+}
+__name(listNumbers, "listNumbers");
+async function updateNumberIndex(env, number) {
+  const indexData = await env.SMS_INBOX.get("index:numbers", "json") || { numbers: [] };
+  if (!indexData.numbers.includes(number)) {
+    indexData.numbers.push(number);
+    await env.SMS_INBOX.put("index:numbers", JSON.stringify(indexData));
+  }
+}
+__name(updateNumberIndex, "updateNumberIndex");
+function normalizeNumber(num) {
+  if (!num) return null;
+  let normalized = num.replace(/[^\d+]/g, "");
+  if (!normalized.startsWith("+")) {
+    normalized = "+" + normalized;
+  }
+  return normalized;
+}
+__name(normalizeNumber, "normalizeNumber");
+function extractCodes(text) {
+  if (!text) return [];
+  const codes = [];
+  const sixDigit = text.match(/\b(\d{6})\b/g);
+  if (sixDigit) codes.push(...sixDigit);
+  const fourDigit = text.match(/\b(\d{4})\b/g);
+  if (fourDigit) codes.push(...fourDigit);
+  const codePattern = text.match(/code[:\s]+([A-Z0-9]{4,8})/gi);
+  if (codePattern) {
+    codePattern.forEach((match) => {
+      const code = match.replace(/code[:\s]+/i, "");
+      if (!codes.includes(code)) codes.push(code);
+    });
+  }
+  const googleCode = text.match(/G-(\d{6})/g);
+  if (googleCode) codes.push(...googleCode);
+  return [...new Set(codes)];
+}
+__name(extractCodes, "extractCodes");
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS
+    }
+  });
+}
+__name(json, "json");
+export {
+  worker_default as default
+};
+//# sourceMappingURL=worker.js.map
+
+--75313fd71e1eeb5fd02bdb298064d70683357b095ca932ad0e596122f034--

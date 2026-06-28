@@ -1,0 +1,1323 @@
+--303d62f201867d7f55174ad1ecc5f57206ed90ba9787ad1be6377bcb3c16
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/fingerprint.ts
+var JA3_KNOWN_SIGNATURES = {
+  "769,47-53-5-10-49161-49162-49171-49172-50-56-19-4,0-10-11,23-24-25,0": "nmap",
+  "769,255-49188-49187-49162-49161-159-158-57-51-156-61-60-53-47-5-4-65281-10,0-23-35-13-5-18-16-30032-11-10-21,29-23-24-25,0": "sqlmap",
+  "771,49195-49199-49196-49200-52393-52392-49161-49171-49162-49172-156-157-47-53-10,65281-0-23-35-13-5-18-16-30032-11-10,29-23-24-25,0": "metasploit",
+  "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53-10,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-17513,29-23-24-25-256-257,0": "chrome",
+  "771,49195-49199-52393-52392-49171-49172-156-157-47-53-10,0-23-65281-10-11-35-16-5-51-43-13-45-28-65037,29-23-24-25,256-257-0": "firefox"
+};
+var HEADER_ORDER_KNOWN = {
+  "host,user-agent,accept": "curl",
+  "user-agent,accept,host,connection": "python-requests",
+  "host,connection,upgrade-insecure-requests,user-agent,accept": "chrome",
+  "host,user-agent,accept,accept-language,accept-encoding,connection": "firefox",
+  "host,user-agent,accept,connection,accept-encoding": "wget",
+  "host,connection,user-agent,accept": "nmap_http"
+};
+var UA_KNOWN_TOOLS = {
+  "nmap": "nmap",
+  "sqlmap": "sqlmap",
+  "nikto": "nikto",
+  "gobuster": "gobuster",
+  "dirbuster": "dirbuster",
+  "burp": "burpsuite",
+  "metasploit": "metasploit",
+  "masscan": "masscan",
+  "nessus": "nessus",
+  "zgrab": "zgrab",
+  "wfuzz": "wfuzz",
+  "wpscan": "wpscan",
+  "nuclei": "nuclei",
+  "feroxbuster": "feroxbuster",
+  "python-requests": "python-requests",
+  "python-urllib": "python-urllib",
+  "curl": "curl",
+  "wget": "wget",
+  "libwww-perl": "perl-lwp",
+  "httpie": "httpie",
+  "axios": "nodejs-axios"
+};
+async function extractFingerprint(ctx) {
+  console.log("[FINGERPRINT] ENTRY extractFingerprint ip=", ctx.ip);
+  const req = ctx.request;
+  const headers = req.headers;
+  const headerOrder = extractHeaderOrder(headers);
+  console.log("[FINGERPRINT] BRANCH headerOrder length=", headerOrder.length);
+  const encodingPreferences = extractEncodingPreferences(headers);
+  console.log("[FINGERPRINT] BRANCH encodingPreferences=", encodingPreferences);
+  const tlsFingerprint = extractTlsFingerprint(headers, ctx.env);
+  console.log("[FINGERPRINT] BRANCH tlsFingerprint=", tlsFingerprint.substring(0, 40));
+  const http2Fingerprint = extractHttp2Fingerprint(headers, ctx.env);
+  console.log("[FINGERPRINT] BRANCH http2Fingerprint=", http2Fingerprint.substring(0, 40));
+  const userAgent = headers.get("user-agent") || "";
+  console.log("[FINGERPRINT] BRANCH userAgent present=", userAgent.length > 0);
+  const acceptLanguage = headers.get("accept-language") || "";
+  const requestTiming = await fetchRequestTiming(ctx.ip, ctx.env);
+  console.log("[FINGERPRINT] BRANCH requestTiming count=", requestTiming.length);
+  const toolSignature = detectToolSignature(userAgent, headerOrder, tlsFingerprint, encodingPreferences);
+  console.log("[FINGERPRINT] BRANCH toolSignature=", toolSignature);
+  const fingerprint = {
+    ip: ctx.ip,
+    userAgent,
+    acceptLanguage,
+    tlsFingerprint,
+    http2Fingerprint,
+    requestTiming,
+    toolSignature,
+    encodingPreferences,
+    headerOrder
+  };
+  await persistFingerprint(ctx.ip, fingerprint, ctx.env);
+  console.log("[FINGERPRINT] EXIT extractFingerprint tool=", toolSignature);
+  return fingerprint;
+}
+__name(extractFingerprint, "extractFingerprint");
+function extractHeaderOrder(headers) {
+  console.log("[FINGERPRINT] ENTRY extractHeaderOrder");
+  const order = [];
+  headers.forEach((_value, key) => {
+    order.push(key.toLowerCase());
+  });
+  console.log("[FINGERPRINT] EXIT extractHeaderOrder count=", order.length);
+  return order;
+}
+__name(extractHeaderOrder, "extractHeaderOrder");
+function extractEncodingPreferences(headers) {
+  console.log("[FINGERPRINT] ENTRY extractEncodingPreferences");
+  const acceptEncoding = headers.get("accept-encoding") || "";
+  const parts = acceptEncoding.split(",").map((s) => s.trim().split(";")[0].trim()).filter((s) => s.length > 0);
+  console.log("[FINGERPRINT] EXIT extractEncodingPreferences count=", parts.length);
+  return parts;
+}
+__name(extractEncodingPreferences, "extractEncodingPreferences");
+function extractTlsFingerprint(headers, _env) {
+  console.log("[FINGERPRINT] ENTRY extractTlsFingerprint");
+  const ja3 = headers.get("cf-ja3-hash") || headers.get("cf-ja3") || "";
+  if (ja3) {
+    console.log("[FINGERPRINT] EXIT extractTlsFingerprint (from CF header)");
+    return ja3;
+  }
+  const tlsVersion = headers.get("cf-tls-version") || "";
+  const alpn = headers.get("cf-alpn") || "";
+  const cipher = headers.get("cf-cipher") || "";
+  const derived = `derived|${tlsVersion}|${alpn}|${cipher}`;
+  console.log("[FINGERPRINT] EXIT extractTlsFingerprint (derived)");
+  return derived;
+}
+__name(extractTlsFingerprint, "extractTlsFingerprint");
+function extractHttp2Fingerprint(headers, _env) {
+  console.log("[FINGERPRINT] ENTRY extractHttp2Fingerprint");
+  const h2 = headers.get("cf-http2") || headers.get("cf-h2-fingerprint") || "";
+  if (h2) {
+    console.log("[FINGERPRINT] EXIT extractHttp2Fingerprint (from CF header)");
+    return h2;
+  }
+  const protocol = headers.get("cf-visitor") || "";
+  const scheme = headers.get("cf-https") || "";
+  const derived = `h2derived|${protocol}|${scheme}`;
+  console.log("[FINGERPRINT] EXIT extractHttp2Fingerprint (derived)");
+  return derived;
+}
+__name(extractHttp2Fingerprint, "extractHttp2Fingerprint");
+async function fetchRequestTiming(ip, env) {
+  console.log("[FINGERPRINT] ENTRY fetchRequestTiming ip=", ip);
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      "SELECT timestamp FROM audit_trail WHERE ip = ? AND timestamp > datetime('now', '-1 hour') ORDER BY timestamp DESC LIMIT 20"
+    ).bind(ip);
+    const result = await stmt.all();
+    const rows = result.results;
+    if (!rows || rows.length < 2) {
+      console.log("[FINGERPRINT] EXIT fetchRequestTiming (insufficient data)");
+      return [];
+    }
+    const timestamps = rows.map((r) => new Date(r.timestamp).getTime()).sort((a, b) => a - b);
+    const intervals = [];
+    for (let i = 1; i < timestamps.length; i++) {
+      intervals.push(timestamps[i] - timestamps[i - 1]);
+    }
+    console.log("[FINGERPRINT] EXIT fetchRequestTiming intervals=", intervals.length);
+    return intervals;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[FINGERPRINT] ERROR fetchRequestTiming:", msg);
+    return [];
+  }
+}
+__name(fetchRequestTiming, "fetchRequestTiming");
+function detectToolSignature(userAgent, headerOrder, tlsFingerprint, encodingPreferences) {
+  console.log("[FINGERPRINT] ENTRY detectToolSignature");
+  const uaLower = userAgent.toLowerCase();
+  for (const [marker, tool] of Object.entries(UA_KNOWN_TOOLS)) {
+    if (uaLower.includes(marker)) {
+      console.log("[FINGERPRINT] BRANCH direct UA match tool=", tool);
+      console.log("[FINGERPRINT] EXIT detectToolSignature (UA match)");
+      return tool;
+    }
+  }
+  const headerKey = headerOrder.join(",");
+  const knownHeaderOrder = HEADER_ORDER_KNOWN[headerKey];
+  if (knownHeaderOrder) {
+    console.log("[FINGERPRINT] BRANCH headerOrder match tool=", knownHeaderOrder);
+    console.log("[FINGERPRINT] EXIT detectToolSignature (header order)");
+    return knownHeaderOrder;
+  }
+  for (const [sig, tool] of Object.entries(JA3_KNOWN_SIGNATURES)) {
+    if (tlsFingerprint.includes(sig) || sig.includes(tlsFingerprint)) {
+      console.log("[FINGERPRINT] BRANCH TLS match tool=", tool);
+      console.log("[FINGERPRINT] EXIT detectToolSignature (TLS)");
+      return tool;
+    }
+  }
+  if (encodingPreferences.length === 1 && encodingPreferences[0] === "identity") {
+    console.log("[FINGERPRINT] BRANCH encoding heuristic tool=minimal-http-client");
+    console.log("[FINGERPRINT] EXIT detectToolSignature (encoding heuristic)");
+    return "minimal-http-client";
+  }
+  const entropy = calculateStringEntropy(userAgent);
+  if (entropy < 3.5 && userAgent.length > 0) {
+    console.log("[FINGERPRINT] BRANCH low entropy bot detected entropy=", entropy);
+    console.log("[FINGERPRINT] EXIT detectToolSignature (entropy)");
+    return "low-entropy-bot";
+  }
+  if (userAgent.length === 0) {
+    console.log("[FINGERPRINT] BRANCH no user-agent");
+    console.log("[FINGERPRINT] EXIT detectToolSignature (no UA)");
+    return "no-ua";
+  }
+  console.log("[FINGERPRINT] EXIT detectToolSignature (unknown)");
+  return "unknown";
+}
+__name(detectToolSignature, "detectToolSignature");
+function calculateStringEntropy(str) {
+  if (str.length === 0)
+    return 0;
+  const freq = {};
+  for (const ch of str) {
+    freq[ch] = (freq[ch] || 0) + 1;
+  }
+  let entropy = 0;
+  const len = str.length;
+  for (const count of Object.values(freq)) {
+    const p = count / len;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+__name(calculateStringEntropy, "calculateStringEntropy");
+async function persistFingerprint(ip, fingerprint, env) {
+  console.log("[FINGERPRINT] ENTRY persistFingerprint ip=", ip);
+  try {
+    const key = `intel:fingerprint:${ip}`;
+    const value = JSON.stringify({
+      ...fingerprint,
+      recordedAt: Date.now()
+    });
+    await env.SESSION_META.put(key, value, { expirationTtl: 86400 * 7 });
+    console.log("[FINGERPRINT] EXIT persistFingerprint (success)");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[FINGERPRINT] ERROR persistFingerprint:", msg);
+    throw new Error(`Failed to persist fingerprint for ${ip}: ${msg}`);
+  }
+}
+__name(persistFingerprint, "persistFingerprint");
+async function getStoredFingerprint(ip, env) {
+  console.log("[FINGERPRINT] ENTRY getStoredFingerprint ip=", ip);
+  try {
+    const key = `intel:fingerprint:${ip}`;
+    const raw = await env.SESSION_META.get(key);
+    if (!raw) {
+      console.log("[FINGERPRINT] EXIT getStoredFingerprint (not found)");
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    console.log("[FINGERPRINT] EXIT getStoredFingerprint (found)");
+    return parsed;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[FINGERPRINT] ERROR getStoredFingerprint:", msg);
+    return null;
+  }
+}
+__name(getStoredFingerprint, "getStoredFingerprint");
+function fingerprintHash(fp) {
+  console.log("[FINGERPRINT] ENTRY fingerprintHash");
+  const components = [
+    fp.tlsFingerprint,
+    fp.http2Fingerprint,
+    fp.toolSignature,
+    fp.headerOrder.join("|"),
+    fp.encodingPreferences.join("|")
+  ].join("::");
+  let hash = 0;
+  for (let i = 0; i < components.length; i++) {
+    const char = components.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash |= 0;
+  }
+  const result = "fp_" + Math.abs(hash).toString(16);
+  console.log("[FINGERPRINT] EXIT fingerprintHash result=", result);
+  return result;
+}
+__name(fingerprintHash, "fingerprintHash");
+
+// src/correlate.ts
+var CORRELATION_THRESHOLDS = {
+  TLS_FP_DIFFERENT_IP_1H: { confidence: 0.9, rule: "same_tls_fp", label: "Same TLS fingerprint across different IPs within 1h" },
+  HEADER_ORDER_TIMING: { confidence: 0.95, rule: "same_header_order", label: "Same header order + request timing cadence" },
+  ATTACK_PATTERN: { confidence: 0.85, rule: "same_goal", label: "Same attack pattern (endpoints + sequence)" },
+  UA_ASN_VPN: { confidence: 0.7, rule: "same_ua", label: "Same UA from different IPs in same ASN" },
+  SAME_TOOL_MULTI_IP: { confidence: 0.88, rule: "same_tool", label: "Same tool signature across multiple IPs" }
+};
+async function correlateAttacks(sessions, env) {
+  console.log("[CORRELATE] ENTRY correlateAttacks sessions=", sessions.length);
+  if (sessions.length === 0) {
+    console.log("[CORRELATE] EXIT correlateAttacks (empty input)");
+    return [];
+  }
+  const groups = /* @__PURE__ */ new Map();
+  for (const session of sessions) {
+    const hash = fingerprintHash(session.fingerprint);
+    const existing = groups.get(hash) || [];
+    existing.push(session);
+    groups.set(hash, existing);
+  }
+  console.log("[CORRELATE] BRANCH initial groups count=", groups.size);
+  const correlated = [];
+  for (const [hash, groupSessions] of groups.entries()) {
+    const attacker = await buildCorrelatedAttacker(hash, groupSessions, env);
+    correlated.push(attacker);
+  }
+  const merged = await mergeCorrelatedGroups(correlated, env);
+  console.log("[CORRELATE] BRANCH merged groups count=", merged.length);
+  for (const attacker of merged) {
+    await persistCorrelation(attacker, env);
+  }
+  console.log("[CORRELATE] EXIT correlateAttacks result=", merged.length);
+  return merged;
+}
+__name(correlateAttacks, "correlateAttacks");
+async function buildCorrelatedAttacker(hash, sessions, env) {
+  console.log("[CORRELATE] ENTRY buildCorrelatedAttacker hash=", hash);
+  const primary = sessions[0];
+  const relatedIps = /* @__PURE__ */ new Set();
+  const relatedSessions = /* @__PURE__ */ new Set();
+  const rules = [];
+  let firstSeen = primary.timestamp;
+  let lastSeen = primary.timestamp;
+  for (const sess of sessions) {
+    relatedIps.add(sess.ip);
+    relatedSessions.add(sess.sessionId);
+    firstSeen = Math.min(firstSeen, sess.timestamp);
+    lastSeen = Math.max(lastSeen, sess.timestamp);
+  }
+  for (let i = 0; i < sessions.length; i++) {
+    for (let j = i + 1; j < sessions.length; j++) {
+      const a = sessions[i];
+      const b = sessions[j];
+      const newRules = evaluateRules(a, b);
+      rules.push(...newRules);
+    }
+  }
+  const dedupedRules = deduplicateRules(rules);
+  const maxConfidence = dedupedRules.length > 0 ? Math.max(...dedupedRules.map((r) => r.confidence)) : 0.5;
+  const signalBoost = Math.min(dedupedRules.length * 0.05, 0.1);
+  const overallConfidence = Math.min(maxConfidence + signalBoost, 0.99);
+  const campaignId = await findCampaignLinkage(sessions, env);
+  const attacker = {
+    correlationId: `corr_${hash}_${Date.now()}`,
+    primaryIp: primary.ip,
+    relatedIps: Array.from(relatedIps),
+    relatedSessions: Array.from(relatedSessions),
+    rules: dedupedRules,
+    overallConfidence,
+    firstSeen,
+    lastSeen,
+    campaignId
+  };
+  console.log("[CORRELATE] EXIT buildCorrelatedAttacker confidence=", overallConfidence);
+  return attacker;
+}
+__name(buildCorrelatedAttacker, "buildCorrelatedAttacker");
+function evaluateRules(a, b) {
+  console.log("[CORRELATE] ENTRY evaluateRules a=", a.ip, "b=", b.ip);
+  const rules = [];
+  const evidence = [];
+  if (a.fingerprint.tlsFingerprint === b.fingerprint.tlsFingerprint && a.fingerprint.tlsFingerprint.length > 0 && a.ip !== b.ip) {
+    const timeDiff = Math.abs(a.timestamp - b.timestamp);
+    if (timeDiff <= 36e5) {
+      rules.push({
+        type: "same_tls_fp",
+        confidence: CORRELATION_THRESHOLDS.TLS_FP_DIFFERENT_IP_1H.confidence,
+        evidence: [`TLS fingerprint match: ${a.fingerprint.tlsFingerprint.substring(0, 32)}...`, `Time diff: ${Math.round(timeDiff / 1e3)}s`]
+      });
+    }
+  }
+  const headerOrderA = a.fingerprint.headerOrder.join(",");
+  const headerOrderB = b.fingerprint.headerOrder.join(",");
+  if (headerOrderA === headerOrderB && headerOrderA.length > 0) {
+    const timingSimilar = compareTimingSignatures(a.fingerprint.requestTiming, b.fingerprint.requestTiming);
+    if (timingSimilar) {
+      rules.push({
+        type: "same_header_order",
+        confidence: CORRELATION_THRESHOLDS.HEADER_ORDER_TIMING.confidence,
+        evidence: ["Identical header ordering", "Similar request timing cadence"]
+      });
+    }
+  }
+  const endpointOverlap = calculateEndpointOverlap(a.endpoints, b.endpoints);
+  if (endpointOverlap >= 0.6 && a.ip !== b.ip) {
+    rules.push({
+      type: "same_goal",
+      confidence: CORRELATION_THRESHOLDS.ATTACK_PATTERN.confidence,
+      evidence: [`Endpoint overlap: ${Math.round(endpointOverlap * 100)}%`, "Similar attack sequence"]
+    });
+  }
+  if (a.fingerprint.userAgent === b.fingerprint.userAgent && a.fingerprint.userAgent.length > 0 && a.ip !== b.ip && a.asn === b.asn) {
+    rules.push({
+      type: "same_ua",
+      confidence: CORRELATION_THRESHOLDS.UA_ASN_VPN.confidence,
+      evidence: [`Same UA: ${a.fingerprint.userAgent.substring(0, 50)}...`, `Same ASN: ${a.asn}`]
+    });
+  }
+  if (a.fingerprint.toolSignature === b.fingerprint.toolSignature && a.fingerprint.toolSignature !== "unknown" && a.fingerprint.toolSignature !== "no-ua" && a.ip !== b.ip) {
+    rules.push({
+      type: "same_tool",
+      confidence: CORRELATION_THRESHOLDS.SAME_TOOL_MULTI_IP.confidence,
+      evidence: [`Tool: ${a.fingerprint.toolSignature}`, "Used from multiple IPs"]
+    });
+  }
+  console.log("[CORRELATE] EXIT evaluateRules rulesFound=", rules.length);
+  return rules;
+}
+__name(evaluateRules, "evaluateRules");
+function compareTimingSignatures(ta, tb) {
+  console.log("[CORRELATE] ENTRY compareTimingSignatures lengths=", ta.length, tb.length);
+  if (ta.length < 3 || tb.length < 3) {
+    console.log("[CORRELATE] EXIT compareTimingSignatures (insufficient)");
+    return false;
+  }
+  const meanA = ta.reduce((s, v) => s + v, 0) / ta.length;
+  const meanB = tb.reduce((s, v) => s + v, 0) / tb.length;
+  const stdA = Math.sqrt(ta.reduce((s, v) => s + (v - meanA) ** 2, 0) / ta.length);
+  const stdB = Math.sqrt(tb.reduce((s, v) => s + (v - meanB) ** 2, 0) / tb.length);
+  const cadenceMatch = Math.abs(meanA - meanB) < Math.max(meanA, meanB) * 0.3;
+  const regularityMatch = Math.abs(stdA - stdB) < Math.max(stdA, stdB) * 0.5;
+  console.log("[CORRELATE] EXIT compareTimingSignatures cadenceMatch=", cadenceMatch, "regularityMatch=", regularityMatch);
+  return cadenceMatch && regularityMatch;
+}
+__name(compareTimingSignatures, "compareTimingSignatures");
+function calculateEndpointOverlap(a, b) {
+  console.log("[CORRELATE] ENTRY calculateEndpointOverlap");
+  if (a.length === 0 || b.length === 0) {
+    console.log("[CORRELATE] EXIT calculateEndpointOverlap (empty)");
+    return 0;
+  }
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const intersection = new Set([...setA].filter((x) => setB.has(x)));
+  const union = /* @__PURE__ */ new Set([...setA, ...setB]);
+  const result = intersection.size / union.size;
+  console.log("[CORRELATE] EXIT calculateEndpointOverlap result=", result);
+  return result;
+}
+__name(calculateEndpointOverlap, "calculateEndpointOverlap");
+function deduplicateRules(rules) {
+  console.log("[CORRELATE] ENTRY deduplicateRules count=", rules.length);
+  const best = /* @__PURE__ */ new Map();
+  for (const rule of rules) {
+    const existing = best.get(rule.type);
+    if (!existing || rule.confidence > existing.confidence) {
+      best.set(rule.type, rule);
+    }
+  }
+  const result = Array.from(best.values());
+  console.log("[CORRELATE] EXIT deduplicateRules result=", result.length);
+  return result;
+}
+__name(deduplicateRules, "deduplicateRules");
+async function mergeCorrelatedGroups(groups, _env) {
+  console.log("[CORRELATE] ENTRY mergeCorrelatedGroups count=", groups.length);
+  if (groups.length <= 1) {
+    console.log("[CORRELATE] EXIT mergeCorrelatedGroups (no merge needed)");
+    return groups;
+  }
+  const merged = [];
+  const consumed = /* @__PURE__ */ new Set();
+  for (let i = 0; i < groups.length; i++) {
+    if (consumed.has(i))
+      continue;
+    let current = { ...groups[i] };
+    consumed.add(i);
+    for (let j = i + 1; j < groups.length; j++) {
+      if (consumed.has(j))
+        continue;
+      const other = groups[j];
+      const ipOverlap = current.relatedIps.filter((ip) => other.relatedIps.includes(ip)).length;
+      const shouldMerge = ipOverlap > 0 || current.rules.some((r) => other.rules.some((o) => o.type === r.type && o.confidence >= 0.85));
+      if (shouldMerge) {
+        current.relatedIps = Array.from(/* @__PURE__ */ new Set([...current.relatedIps, ...other.relatedIps]));
+        current.relatedSessions = Array.from(/* @__PURE__ */ new Set([...current.relatedSessions, ...other.relatedSessions]));
+        current.rules = deduplicateRules([...current.rules, ...other.rules]);
+        current.firstSeen = Math.min(current.firstSeen, other.firstSeen);
+        current.lastSeen = Math.max(current.lastSeen, other.lastSeen);
+        current.overallConfidence = Math.min(
+          Math.max(current.overallConfidence, other.overallConfidence) + 0.02,
+          0.99
+        );
+        consumed.add(j);
+      }
+    }
+    merged.push(current);
+  }
+  console.log("[CORRELATE] EXIT mergeCorrelatedGroups merged=", merged.length);
+  return merged;
+}
+__name(mergeCorrelatedGroups, "mergeCorrelatedGroups");
+async function findCampaignLinkage(sessions, env) {
+  console.log("[CORRELATE] ENTRY findCampaignLinkage sessions=", sessions.length);
+  try {
+    for (const sess of sessions) {
+      const key = `intel:campaign:session:${sess.sessionId}`;
+      const campaign = await env.SESSION_META.get(key);
+      if (campaign) {
+        console.log("[CORRELATE] EXIT findCampaignLinkage found=", campaign);
+        return campaign;
+      }
+    }
+    console.log("[CORRELATE] EXIT findCampaignLinkage (none found)");
+    return void 0;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[CORRELATE] ERROR findCampaignLinkage:", msg);
+    return void 0;
+  }
+}
+__name(findCampaignLinkage, "findCampaignLinkage");
+async function persistCorrelation(attacker, env) {
+  console.log("[CORRELATE] ENTRY persistCorrelation id=", attacker.correlationId);
+  try {
+    const key = `intel:correlation:${attacker.correlationId}`;
+    const value = JSON.stringify({
+      ...attacker,
+      recordedAt: Date.now()
+    });
+    await env.SESSION_META.put(key, value, { expirationTtl: 86400 * 30 });
+    console.log("[CORRELATE] EXIT persistCorrelation (success)");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[CORRELATE] ERROR persistCorrelation:", msg);
+    throw new Error(`Failed to persist correlation ${attacker.correlationId}: ${msg}`);
+  }
+}
+__name(persistCorrelation, "persistCorrelation");
+async function loadSessionsForCorrelation(ip, timeWindowHours, env) {
+  console.log("[CORRELATE] ENTRY loadSessionsForCorrelation ip=", ip, "window=", timeWindowHours);
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      `SELECT session_id, ip, action, timestamp, endpoint, asn, country
+       FROM audit_trail
+       WHERE ip = ? AND timestamp > datetime('now', '-${Math.max(1, Math.min(168, timeWindowHours))} hours')
+       ORDER BY timestamp DESC
+       LIMIT 200`
+    ).bind(ip);
+    const result = await stmt.all();
+    const rows = result.results;
+    if (!rows || rows.length === 0) {
+      console.log("[CORRELATE] EXIT loadSessionsForCorrelation (no rows)");
+      return [];
+    }
+    const sessionMap = /* @__PURE__ */ new Map();
+    for (const row of rows) {
+      const sid = row.session_id || `sess_${row.ip}_${row.timestamp}`;
+      const fpRaw = await env.SESSION_META.get(`intel:fingerprint:${row.ip}`);
+      const fingerprint = fpRaw ? JSON.parse(fpRaw) : {
+        ip: row.ip,
+        userAgent: "",
+        acceptLanguage: "",
+        tlsFingerprint: "",
+        http2Fingerprint: "",
+        requestTiming: [],
+        toolSignature: "unknown",
+        encodingPreferences: [],
+        headerOrder: []
+      };
+      if (sessionMap.has(sid)) {
+        const existing = sessionMap.get(sid);
+        existing.endpoints.push(row.endpoint || "/");
+        existing.timestamp = Math.max(existing.timestamp, new Date(row.timestamp).getTime());
+      } else {
+        sessionMap.set(sid, {
+          sessionId: sid,
+          ip: row.ip,
+          asn: row.asn || "UNKNOWN",
+          country: row.country || "UNKNOWN",
+          timestamp: new Date(row.timestamp).getTime(),
+          endpoints: [row.endpoint || "/"],
+          fingerprint,
+          action: row.action
+        });
+      }
+    }
+    const sessions = Array.from(sessionMap.values());
+    console.log("[CORRELATE] EXIT loadSessionsForCorrelation count=", sessions.length);
+    return sessions;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[CORRELATE] ERROR loadSessionsForCorrelation:", msg);
+    return [];
+  }
+}
+__name(loadSessionsForCorrelation, "loadSessionsForCorrelation");
+
+// src/dossier.ts
+var THREAT_LEVELS = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+var ACTOR_NAME_PREFIXES = [
+  "ALPHA",
+  "BRAVO",
+  "CHARLIE",
+  "DELTA",
+  "ECHO",
+  "FOXTROT",
+  "GOLF",
+  "HOTEL",
+  "INDIA",
+  "JULIET",
+  "KILO",
+  "LIMA",
+  "MIKE",
+  "NOVEMBER",
+  "OSCAR",
+  "PAPA",
+  "QUEBEC",
+  "ROMEO",
+  "SIERRA",
+  "TANGO",
+  "UNIFORM",
+  "VICTOR",
+  "WHISKEY",
+  "XRAY",
+  "YANKEE",
+  "ZULU"
+];
+async function buildDossier(correlation, sessions, env) {
+  console.log("[DOSSIER] ENTRY buildDossier correlationId=", correlation.correlationId);
+  const existing = await findExistingDossier(correlation, env);
+  if (existing) {
+    console.log("[DOSSIER] BRANCH existing dossier found id=", existing.dossierId);
+    const updated = await updateDossier(existing, correlation, sessions, env);
+    console.log("[DOSSIER] EXIT buildDossier (updated existing)");
+    return updated;
+  }
+  console.log("[DOSSIER] BRANCH creating new dossier");
+  const dossier = await createNewDossier(correlation, sessions, env);
+  console.log("[DOSSIER] EXIT buildDossier (new) id=", dossier.dossierId);
+  return dossier;
+}
+__name(buildDossier, "buildDossier");
+async function createNewDossier(correlation, sessions, env) {
+  console.log("[DOSSIER] ENTRY createNewDossier");
+  const dossierId = generateDossierId();
+  const actorName = generateActorName();
+  const ips = Array.from(new Set(sessions.map((s) => s.ip)));
+  const asns = Array.from(new Set(sessions.map((s) => s.asn)));
+  const countries = Array.from(new Set(sessions.map((s) => s.country)));
+  const tools = Array.from(new Set(sessions.map((s) => s.fingerprint.toolSignature)));
+  const goals = inferGoals(sessions);
+  const sessionSummaries = sessions.map((s) => ({
+    sessionId: s.sessionId,
+    ip: s.ip,
+    timestamp: s.timestamp,
+    endpoints: s.endpoints,
+    action: s.action,
+    toolSignature: s.fingerprint.toolSignature
+  }));
+  const threatLevel = calculateThreatLevel(sessions, correlation.overallConfidence);
+  const dossier = {
+    dossierId,
+    actorName,
+    firstSeen: correlation.firstSeen,
+    lastSeen: correlation.lastSeen,
+    ips,
+    asns,
+    countries,
+    tools,
+    goals,
+    sessions: sessionSummaries,
+    confidence: correlation.overallConfidence,
+    threatLevel,
+    labels: [],
+    notes: "",
+    correlationId: correlation.correlationId,
+    campaignId: correlation.campaignId
+  };
+  await persistDossier(dossier, env);
+  console.log("[DOSSIER] EXIT createNewDossier id=", dossierId);
+  return dossier;
+}
+__name(createNewDossier, "createNewDossier");
+async function updateDossier(existing, correlation, sessions, env) {
+  console.log("[DOSSIER] ENTRY updateDossier id=", existing.dossierId);
+  const newIps = sessions.map((s) => s.ip);
+  const newAsns = sessions.map((s) => s.asn);
+  const newCountries = sessions.map((s) => s.country);
+  const newTools = sessions.map((s) => s.fingerprint.toolSignature);
+  existing.ips = Array.from(/* @__PURE__ */ new Set([...existing.ips, ...newIps]));
+  existing.asns = Array.from(/* @__PURE__ */ new Set([...existing.asns, ...newAsns]));
+  existing.countries = Array.from(/* @__PURE__ */ new Set([...existing.countries, ...newCountries]));
+  existing.tools = Array.from(/* @__PURE__ */ new Set([...existing.tools, ...newTools]));
+  existing.goals = Array.from(/* @__PURE__ */ new Set([...existing.goals, ...inferGoals(sessions)]));
+  const newSessions = sessions.map((s) => ({
+    sessionId: s.sessionId,
+    ip: s.ip,
+    timestamp: s.timestamp,
+    endpoints: s.endpoints,
+    action: s.action,
+    toolSignature: s.fingerprint.toolSignature
+  }));
+  const sessionMap = /* @__PURE__ */ new Map();
+  for (const s of existing.sessions)
+    sessionMap.set(s.sessionId, s);
+  for (const s of newSessions)
+    sessionMap.set(s.sessionId, s);
+  existing.sessions = Array.from(sessionMap.values()).sort((a, b) => b.timestamp - a.timestamp);
+  existing.firstSeen = Math.min(existing.firstSeen, correlation.firstSeen);
+  existing.lastSeen = Math.max(existing.lastSeen, correlation.lastSeen);
+  existing.confidence = Math.min(
+    Math.max(existing.confidence, correlation.overallConfidence) + 0.01,
+    0.99
+  );
+  existing.threatLevel = calculateThreatLevelFromDossier(existing);
+  existing.correlationId = correlation.correlationId;
+  if (correlation.campaignId)
+    existing.campaignId = correlation.campaignId;
+  await persistDossier(existing, env);
+  console.log("[DOSSIER] EXIT updateDossier id=", existing.dossierId);
+  return existing;
+}
+__name(updateDossier, "updateDossier");
+function inferGoals(sessions) {
+  console.log("[DOSSIER] ENTRY inferGoals sessions=", sessions.length);
+  const goals = /* @__PURE__ */ new Set();
+  for (const sess of sessions) {
+    const endpoints = sess.endpoints.join(" ");
+    const actions = sess.action.toLowerCase();
+    if (endpoints.includes("/api/") || endpoints.includes("/graphql") || endpoints.includes("/data")) {
+      goals.add("exfiltration");
+    }
+    if (endpoints.includes("/admin") || endpoints.includes("/config") || endpoints.includes("/.env")) {
+      goals.add("reconnaissance");
+    }
+    if (endpoints.includes("/delete") || endpoints.includes("/drop") || endpoints.includes("/shutdown")) {
+      goals.add("sabotage");
+    }
+    if (endpoints.includes("/login") || endpoints.includes("/auth") || endpoints.includes("/password")) {
+      goals.add("credential-theft");
+    }
+    if (endpoints.includes("/upload") || endpoints.includes("/file") || endpoints.includes("/import")) {
+      goals.add("payload-delivery");
+    }
+    if (actions.includes("honey_trigger") || actions.includes("deception")) {
+      goals.add("infrastructure-mapping");
+    }
+    if (endpoints.includes("/wp-") || endpoints.includes("/wordpress") || endpoints.includes("/xmlrpc")) {
+      goals.add("cms-exploitation");
+    }
+    if (endpoints.includes("sql") || endpoints.includes("union") || endpoints.includes("select")) {
+      goals.add("data-injection");
+    }
+  }
+  const result = Array.from(goals);
+  console.log("[DOSSIER] EXIT inferGoals goals=", result);
+  return result;
+}
+__name(inferGoals, "inferGoals");
+function calculateThreatLevel(sessions, confidence) {
+  console.log("[DOSSIER] ENTRY calculateThreatLevel sessions=", sessions.length, "confidence=", confidence);
+  let score = 0;
+  const criticalActions = ["sabotage", "exfiltration", "honey_trigger", "deception"];
+  const highActions = ["block", "challenge", "rate_limit"];
+  for (const sess of sessions) {
+    if (criticalActions.some((a) => sess.action.toLowerCase().includes(a)))
+      score += 3;
+    else if (highActions.some((a) => sess.action.toLowerCase().includes(a)))
+      score += 2;
+    else
+      score += 1;
+  }
+  const sophisticatedTools = ["metasploit", "burpsuite", "sqlmap", "nuclei", "custom"];
+  for (const sess of sessions) {
+    if (sophisticatedTools.includes(sess.fingerprint.toolSignature))
+      score += 2;
+  }
+  if (confidence >= 0.9)
+    score += 2;
+  else if (confidence >= 0.8)
+    score += 1;
+  const uniqueIps = new Set(sessions.map((s) => s.ip)).size;
+  if (uniqueIps > 2)
+    score += 1;
+  let level;
+  if (score >= 8)
+    level = "CRITICAL";
+  else if (score >= 5)
+    level = "HIGH";
+  else if (score >= 3)
+    level = "MEDIUM";
+  else
+    level = "LOW";
+  console.log("[DOSSIER] EXIT calculateThreatLevel score=", score, "level=", level);
+  return level;
+}
+__name(calculateThreatLevel, "calculateThreatLevel");
+function calculateThreatLevelFromDossier(dossier) {
+  console.log("[DOSSIER] ENTRY calculateThreatLevelFromDossier");
+  let score = 0;
+  if (dossier.goals.includes("sabotage"))
+    score += 4;
+  if (dossier.goals.includes("exfiltration"))
+    score += 3;
+  if (dossier.goals.includes("credential-theft"))
+    score += 3;
+  if (dossier.goals.includes("payload-delivery"))
+    score += 3;
+  if (dossier.threatLevel === "CRITICAL")
+    score += 2;
+  if (dossier.tools.includes("metasploit") || dossier.tools.includes("burpsuite"))
+    score += 2;
+  if (dossier.ips.length > 2)
+    score += 1;
+  if (dossier.confidence >= 0.9)
+    score += 1;
+  if (dossier.campaignId)
+    score += 2;
+  let level;
+  if (score >= 8)
+    level = "CRITICAL";
+  else if (score >= 5)
+    level = "HIGH";
+  else if (score >= 3)
+    level = "MEDIUM";
+  else
+    level = "LOW";
+  console.log("[DOSSIER] EXIT calculateThreatLevelFromDossier level=", level);
+  return level;
+}
+__name(calculateThreatLevelFromDossier, "calculateThreatLevelFromDossier");
+async function persistDossier(dossier, env) {
+  console.log("[DOSSIER] ENTRY persistDossier id=", dossier.dossierId);
+  try {
+    const key = `intel:dossier:${dossier.dossierId}`;
+    const value = JSON.stringify({
+      ...dossier,
+      updatedAt: Date.now()
+    });
+    await env.SESSION_META.put(key, value, { expirationTtl: 86400 * 90 });
+    for (const ip of dossier.ips) {
+      await env.SESSION_META.put(`intel:dossier:ip:${ip}:${dossier.dossierId}`, dossier.dossierId, { expirationTtl: 86400 * 90 });
+    }
+    console.log("[DOSSIER] EXIT persistDossier (success)");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR persistDossier:", msg);
+    throw new Error(`Failed to persist dossier ${dossier.dossierId}: ${msg}`);
+  }
+}
+__name(persistDossier, "persistDossier");
+async function findExistingDossier(correlation, env) {
+  console.log("[DOSSIER] ENTRY findExistingDossier correlationId=", correlation.correlationId);
+  try {
+    for (const ip of correlation.relatedIps) {
+      const listResult = await env.SESSION_META.list({ prefix: `intel:dossier:ip:${ip}:` });
+      for (const key of listResult.keys) {
+        const dossierId = await env.SESSION_META.get(key.name);
+        if (!dossierId)
+          continue;
+        const raw = await env.SESSION_META.get(`intel:dossier:${dossierId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          console.log("[DOSSIER] EXIT findExistingDossier found=", parsed.dossierId);
+          return parsed;
+        }
+      }
+    }
+    console.log("[DOSSIER] EXIT findExistingDossier (none found)");
+    return null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR findExistingDossier:", msg);
+    return null;
+  }
+}
+__name(findExistingDossier, "findExistingDossier");
+async function getDossierById(dossierId, env) {
+  console.log("[DOSSIER] ENTRY getDossierById id=", dossierId);
+  try {
+    const raw = await env.SESSION_META.get(`intel:dossier:${dossierId}`);
+    if (!raw) {
+      console.log("[DOSSIER] EXIT getDossierById (not found)");
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    console.log("[DOSSIER] EXIT getDossierById (found)");
+    return parsed;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR getDossierById:", msg);
+    return null;
+  }
+}
+__name(getDossierById, "getDossierById");
+async function listAllDossiers(env) {
+  console.log("[DOSSIER] ENTRY listAllDossiers");
+  const dossiers = [];
+  try {
+    const listResult = await env.SESSION_META.list({ prefix: "intel:dossier:" });
+    for (const key of listResult.keys) {
+      if (key.name.includes(":ip:"))
+        continue;
+      const raw = await env.SESSION_META.get(key.name);
+      if (raw) {
+        dossiers.push(JSON.parse(raw));
+      }
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR listAllDossiers:", msg);
+  }
+  console.log("[DOSSIER] EXIT listAllDossiers count=", dossiers.length);
+  return dossiers;
+}
+__name(listAllDossiers, "listAllDossiers");
+async function labelDossier(dossierId, label, note, env) {
+  console.log("[DOSSIER] ENTRY labelDossier id=", dossierId, "label=", label);
+  try {
+    const dossier = await getDossierById(dossierId, env);
+    if (!dossier) {
+      console.log("[DOSSIER] EXIT labelDossier (not found)");
+      return null;
+    }
+    dossier.labels = dossier.labels || [];
+    if (!dossier.labels.includes(label)) {
+      dossier.labels.push(label);
+    }
+    if (note) {
+      dossier.notes = (dossier.notes || "") + `
+[${(/* @__PURE__ */ new Date()).toISOString()}] ${label}: ${note}`;
+    }
+    await persistDossier(dossier, env);
+    console.log("[DOSSIER] EXIT labelDossier (success)");
+    return dossier;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR labelDossier:", msg);
+    return null;
+  }
+}
+__name(labelDossier, "labelDossier");
+async function detectCampaigns(env) {
+  console.log("[DOSSIER] ENTRY detectCampaigns");
+  const dossiers = await listAllDossiers(env);
+  if (dossiers.length === 0) {
+    console.log("[DOSSIER] EXIT detectCampaigns (no dossiers)");
+    return [];
+  }
+  const campaigns = [];
+  const processed = /* @__PURE__ */ new Set();
+  for (const dossier of dossiers) {
+    if (processed.has(dossier.dossierId))
+      continue;
+    const related = findRelatedDossiers(dossier, dossiers.filter((d) => !processed.has(d.dossierId)));
+    if (related.length >= 1) {
+      const campaign = buildCampaign(dossier, related);
+      campaigns.push(campaign);
+      for (const d of [dossier, ...related]) {
+        processed.add(d.dossierId);
+        await env.SESSION_META.put(`intel:campaign:session:${d.dossierId}`, campaign.campaignId, { expirationTtl: 86400 * 60 });
+      }
+      await env.SESSION_META.put(`intel:campaign:${campaign.campaignId}`, JSON.stringify(campaign), { expirationTtl: 86400 * 60 });
+    }
+  }
+  console.log("[DOSSIER] EXIT detectCampaigns count=", campaigns.length);
+  return campaigns;
+}
+__name(detectCampaigns, "detectCampaigns");
+function findRelatedDossiers(base, candidates) {
+  console.log("[DOSSIER] ENTRY findRelatedDossiers base=", base.dossierId, "candidates=", candidates.length);
+  const related = [];
+  for (const candidate of candidates) {
+    if (candidate.dossierId === base.dossierId)
+      continue;
+    const goalOverlap = base.goals.filter((g) => candidate.goals.includes(g)).length;
+    const goalSimilarity = goalOverlap / Math.max(base.goals.length, candidate.goals.length);
+    const toolOverlap = base.tools.filter((t) => candidate.tools.includes(t)).length;
+    const toolSimilarity = toolOverlap / Math.max(base.tools.length, candidate.tools.length);
+    const timeDiff = Math.abs(base.lastSeen - candidate.firstSeen);
+    const temporalProximity = timeDiff < 72 * 36e5;
+    if (goalSimilarity >= 0.5 && (toolSimilarity >= 0.3 || temporalProximity)) {
+      related.push(candidate);
+    }
+  }
+  console.log("[DOSSIER] EXIT findRelatedDossiers related=", related.length);
+  return related;
+}
+__name(findRelatedDossiers, "findRelatedDossiers");
+function buildCampaign(base, related) {
+  console.log("[DOSSIER] ENTRY buildCampaign");
+  const all = [base, ...related];
+  const allGoals = Array.from(new Set(all.flatMap((d) => d.goals)));
+  const allTools = Array.from(new Set(all.flatMap((d) => d.tools)));
+  const allIds = all.map((d) => d.dossierId);
+  const firstSeen = Math.min(...all.map((d) => d.firstSeen));
+  const lastSeen = Math.max(...all.map((d) => d.lastSeen));
+  const recentThreshold = Date.now() - 24 * 36e5;
+  const newActors = all.filter((d) => d.firstSeen > recentThreshold);
+  const escalationDetected = newActors.length > 1;
+  const maxThreat = all.reduce((max, d) => {
+    const idx = THREAT_LEVELS.indexOf(d.threatLevel);
+    const maxIdx = THREAT_LEVELS.indexOf(max);
+    return idx > maxIdx ? d.threatLevel : max;
+  }, "LOW");
+  const campaignThreat = escalationDetected ? maxThreat === "CRITICAL" ? "CRITICAL" : "HIGH" : maxThreat;
+  const campaign = {
+    campaignId: `camp_${generateShortHash(allIds.join(":"))}`,
+    name: `Campaign ${generateShortHash(allGoals.join(","))}`,
+    firstSeen,
+    lastSeen,
+    actorCount: all.length,
+    dossierIds: allIds,
+    commonGoals: allGoals,
+    commonTools: allTools,
+    threatLevel: campaignThreat,
+    escalationDetected
+  };
+  console.log("[DOSSIER] EXIT buildCampaign id=", campaign.campaignId);
+  return campaign;
+}
+__name(buildCampaign, "buildCampaign");
+async function listCampaigns(env) {
+  console.log("[DOSSIER] ENTRY listCampaigns");
+  const campaigns = [];
+  try {
+    const listResult = await env.SESSION_META.list({ prefix: "intel:campaign:" });
+    for (const key of listResult.keys) {
+      if (key.name.includes(":session:"))
+        continue;
+      const raw = await env.SESSION_META.get(key.name);
+      if (raw)
+        campaigns.push(JSON.parse(raw));
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR listCampaigns:", msg);
+  }
+  console.log("[DOSSIER] EXIT listCampaigns count=", campaigns.length);
+  return campaigns;
+}
+__name(listCampaigns, "listCampaigns");
+async function isIpInCampaign(ip, env) {
+  console.log("[DOSSIER] ENTRY isIpInCampaign ip=", ip);
+  try {
+    const listResult = await env.SESSION_META.list({ prefix: `intel:dossier:ip:${ip}:` });
+    for (const key of listResult.keys) {
+      const dossierId = await env.SESSION_META.get(key.name);
+      if (!dossierId)
+        continue;
+      const dossier = await getDossierById(dossierId, env);
+      if (dossier?.campaignId) {
+        console.log("[DOSSIER] EXIT isIpInCampaign (yes) campaign=", dossier.campaignId);
+        return { inCampaign: true, campaignId: dossier.campaignId, threatLevel: dossier.threatLevel };
+      }
+    }
+    console.log("[DOSSIER] EXIT isIpInCampaign (no)");
+    return { inCampaign: false };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[DOSSIER] ERROR isIpInCampaign:", msg);
+    return { inCampaign: false };
+  }
+}
+__name(isIpInCampaign, "isIpInCampaign");
+function generateDossierId() {
+  return `dos_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 8)}`;
+}
+__name(generateDossierId, "generateDossierId");
+function generateActorName() {
+  const prefix = ACTOR_NAME_PREFIXES[Math.floor(Math.random() * ACTOR_NAME_PREFIXES.length)];
+  const num = Math.floor(Math.random() * 99) + 1;
+  return `ACTOR-${prefix}-${num}`;
+}
+__name(generateActorName, "generateActorName");
+function generateShortHash(input) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    const char = input.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return Math.abs(hash).toString(36).substring(0, 8);
+}
+__name(generateShortHash, "generateShortHash");
+
+// src/index.ts
+var CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization"
+};
+var src_default = {
+  async fetch(request, env, _ctx) {
+    console.log("[WORKER] ENTRY fetch method=", request.method, "url=", request.url);
+    if (request.method === "OPTIONS") {
+      console.log("[WORKER] BRANCH CORS preflight");
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+    const url = new URL(request.url);
+    const path = url.pathname;
+    try {
+      let response;
+      if (path === "/intel/health") {
+        response = await handleHealth(env);
+      } else if (path === "/intel/dossiers" && request.method === "GET") {
+        response = await handleListDossiers(env);
+      } else if (path.startsWith("/intel/dossier/") && request.method === "GET") {
+        const id = path.replace("/intel/dossier/", "");
+        response = await handleGetDossier(id, env);
+      } else if (path === "/intel/correlate" && request.method === "GET") {
+        const ip = url.searchParams.get("ip") || "";
+        response = await handleCorrelate(ip, env);
+      } else if (path === "/intel/fingerprint" && request.method === "GET") {
+        const ip = url.searchParams.get("ip") || "";
+        response = await handleFingerprint(ip, request, env);
+      } else if (path === "/intel/campaigns" && request.method === "GET") {
+        response = await handleCampaigns(env);
+      } else if (path === "/intel/label" && request.method === "POST") {
+        response = await handleLabel(request, env);
+      } else {
+        console.log("[WORKER] BRANCH unknown path=", path);
+        response = jsonResponse({ error: "Not found" }, 404);
+      }
+      const headers = new Headers(response.headers);
+      for (const [k, v] of Object.entries(CORS_HEADERS)) {
+        headers.set(k, v);
+      }
+      console.log("[WORKER] EXIT fetch status=", response.status);
+      return new Response(response.body, { status: response.status, headers });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[WORKER] ERROR fetch:", msg);
+      return jsonResponse({ error: "Internal server error", detail: msg }, 500);
+    }
+  }
+};
+async function handleHealth(env) {
+  console.log("[WORKER] ENTRY handleHealth");
+  try {
+    const stmt = env.AURIS_LOGS.prepare("SELECT 1 AS ok");
+    const result = await stmt.first();
+    const dbOk = result?.ok === 1;
+    await env.SESSION_META.put("_health_check", String(Date.now()), { expirationTtl: 60 });
+    const kvOk = await env.SESSION_META.get("_health_check") !== null;
+    console.log("[WORKER] EXIT handleHealth dbOk=", dbOk, "kvOk=", kvOk);
+    return jsonResponse({ status: "ok", db: dbOk, kv: kvOk, service: "trident-counter-intel" });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleHealth:", msg);
+    return jsonResponse({ status: "degraded", error: msg }, 503);
+  }
+}
+__name(handleHealth, "handleHealth");
+async function handleListDossiers(env) {
+  console.log("[WORKER] ENTRY handleListDossiers");
+  try {
+    const dossiers = await listAllDossiers(env);
+    console.log("[WORKER] EXIT handleListDossiers count=", dossiers.length);
+    return jsonResponse({ dossiers });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleListDossiers:", msg);
+    return jsonResponse({ error: "Failed to list dossiers", detail: msg }, 500);
+  }
+}
+__name(handleListDossiers, "handleListDossiers");
+async function handleGetDossier(dossierId, env) {
+  console.log("[WORKER] ENTRY handleGetDossier id=", dossierId);
+  if (!dossierId) {
+    console.log("[WORKER] EXIT handleGetDossier (bad request)");
+    return jsonResponse({ error: "Missing dossier ID" }, 400);
+  }
+  try {
+    const dossier = await getDossierById(dossierId, env);
+    if (!dossier) {
+      console.log("[WORKER] EXIT handleGetDossier (not found)");
+      return jsonResponse({ error: "Dossier not found" }, 404);
+    }
+    console.log("[WORKER] EXIT handleGetDossier (found)");
+    return jsonResponse({ dossier });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleGetDossier:", msg);
+    return jsonResponse({ error: "Failed to retrieve dossier", detail: msg }, 500);
+  }
+}
+__name(handleGetDossier, "handleGetDossier");
+async function handleCorrelate(ip, env) {
+  console.log("[WORKER] ENTRY handleCorrelate ip=", ip);
+  if (!ip) {
+    console.log("[WORKER] EXIT handleCorrelate (bad request)");
+    return jsonResponse({ error: "Missing ip parameter" }, 400);
+  }
+  try {
+    const sessions = await loadSessionsForCorrelation(ip, 24, env);
+    console.log("[WORKER] BRANCH loaded sessions=", sessions.length);
+    const correlations = await correlateAttacks(sessions, env);
+    console.log("[WORKER] BRANCH correlations=", correlations.length);
+    const dossiers = [];
+    for (const corr of correlations) {
+      const corrSessions = sessions.filter(
+        (s) => corr.relatedIps.includes(s.ip) || s.ip === corr.primaryIp
+      );
+      const dossier = await buildDossier(corr, corrSessions, env);
+      dossiers.push(dossier);
+    }
+    const campaignInfo = await isIpInCampaign(ip, env);
+    console.log("[WORKER] EXIT handleCorrelate dossiers=", dossiers.length);
+    return jsonResponse({
+      ip,
+      correlations,
+      dossiers,
+      campaign: campaignInfo
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleCorrelate:", msg);
+    return jsonResponse({ error: "Correlation failed", detail: msg }, 500);
+  }
+}
+__name(handleCorrelate, "handleCorrelate");
+async function handleFingerprint(ip, request, env) {
+  console.log("[WORKER] ENTRY handleFingerprint ip=", ip);
+  if (!ip) {
+    console.log("[WORKER] EXIT handleFingerprint (bad request)");
+    return jsonResponse({ error: "Missing ip parameter" }, 400);
+  }
+  try {
+    let fingerprint = await getStoredFingerprint(ip, env);
+    const clientIp = getClientIp(request);
+    if (clientIp === ip || !fingerprint) {
+      console.log("[WORKER] BRANCH extracting live fingerprint");
+      fingerprint = await extractFingerprint({
+        request,
+        env,
+        ip
+      });
+    }
+    if (!fingerprint) {
+      console.log("[WORKER] EXIT handleFingerprint (not found)");
+      return jsonResponse({ error: "Fingerprint not available" }, 404);
+    }
+    const campaignInfo = await isIpInCampaign(ip, env);
+    console.log("[WORKER] EXIT handleFingerprint (success)");
+    return jsonResponse({
+      ip,
+      fingerprint,
+      campaign: campaignInfo
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleFingerprint:", msg);
+    return jsonResponse({ error: "Fingerprint extraction failed", detail: msg }, 500);
+  }
+}
+__name(handleFingerprint, "handleFingerprint");
+async function handleCampaigns(env) {
+  console.log("[WORKER] ENTRY handleCampaigns");
+  try {
+    const detected = await detectCampaigns(env);
+    console.log("[WORKER] BRANCH detected campaigns=", detected.length);
+    const existing = await listCampaigns(env);
+    console.log("[WORKER] BRANCH existing campaigns=", existing.length);
+    const all = /* @__PURE__ */ new Map();
+    for (const c of existing)
+      all.set(c.campaignId, c);
+    for (const c of detected)
+      all.set(c.campaignId, c);
+    const campaigns = Array.from(all.values()).sort((a, b) => b.lastSeen - a.lastSeen);
+    const escalations = campaigns.filter((c) => c.escalationDetected);
+    console.log("[WORKER] EXIT handleCampaigns count=", campaigns.length, "escalations=", escalations.length);
+    return jsonResponse({
+      campaigns,
+      escalations,
+      totalActors: campaigns.reduce((sum, c) => sum + c.actorCount, 0)
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleCampaigns:", msg);
+    return jsonResponse({ error: "Campaign detection failed", detail: msg }, 500);
+  }
+}
+__name(handleCampaigns, "handleCampaigns");
+async function handleLabel(request, env) {
+  console.log("[WORKER] ENTRY handleLabel");
+  try {
+    const body = await request.json();
+    const { dossierId, label, note } = body;
+    if (!dossierId || !label) {
+      console.log("[WORKER] EXIT handleLabel (bad request)");
+      return jsonResponse({ error: "Missing dossierId or label" }, 400);
+    }
+    const updated = await labelDossier(dossierId, label, note || "", env);
+    if (!updated) {
+      console.log("[WORKER] EXIT handleLabel (not found)");
+      return jsonResponse({ error: "Dossier not found" }, 404);
+    }
+    console.log("[WORKER] EXIT handleLabel (success)");
+    return jsonResponse({
+      message: "Dossier labeled",
+      dossierId: updated.dossierId,
+      labels: updated.labels
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[WORKER] ERROR handleLabel:", msg);
+    return jsonResponse({ error: "Label failed", detail: msg }, 500);
+  }
+}
+__name(handleLabel, "handleLabel");
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+__name(jsonResponse, "jsonResponse");
+function getClientIp(request) {
+  console.log("[WORKER] ENTRY getClientIp");
+  const cfIp = request.headers.get("cf-connecting-ip");
+  if (cfIp) {
+    console.log("[WORKER] EXIT getClientIp (CF header)");
+    return cfIp;
+  }
+  const xForwarded = request.headers.get("x-forwarded-for");
+  if (xForwarded) {
+    const ip = xForwarded.split(",")[0].trim();
+    console.log("[WORKER] EXIT getClientIp (X-Forwarded-For)");
+    return ip;
+  }
+  console.log("[WORKER] EXIT getClientIp (unknown)");
+  return "unknown";
+}
+__name(getClientIp, "getClientIp");
+export {
+  src_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--303d62f201867d7f55174ad1ecc5f57206ed90ba9787ad1be6377bcb3c16--

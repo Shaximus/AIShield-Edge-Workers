@@ -1,0 +1,874 @@
+--a0b99b52d654b007da1beada9810e09959291fcfafbeab2f56185720787b
+Content-Disposition: form-data; name="verifier.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/logger.ts
+var LEVEL_RANK = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+  FATAL: 4
+};
+function nowMicro() {
+  const d = /* @__PURE__ */ new Date();
+  const iso = d.toISOString();
+  const micro = String(d.getMilliseconds() * 1e3).padStart(6, "0");
+  return iso.replace("Z", `${micro}Z`);
+}
+__name(nowMicro, "nowMicro");
+var Logger = class {
+  static {
+    __name(this, "Logger");
+  }
+  cfg;
+  d1;
+  constructor(config = {}, d1 = null) {
+    this.cfg = {
+      min_level: config.min_level ?? "INFO",
+      emit_stdout: config.emit_stdout ?? true,
+      d1_table: config.d1_table ?? "auris_logs"
+    };
+    this.d1 = d1;
+  }
+  shouldEmit(level) {
+    return LEVEL_RANK[level] >= LEVEL_RANK[this.cfg.min_level];
+  }
+  async write(entry) {
+    if (!this.shouldEmit(entry.level)) return;
+    if (this.cfg.emit_stdout) {
+      const metaStr = entry.meta ? ` | ${JSON.stringify(entry.meta)}` : "";
+      console.log(
+        `[${entry.timestamp}] ${entry.level} [${entry.component}] [${entry.request_id}] ${entry.message}${metaStr}`
+      );
+    }
+    if (this.d1) {
+      try {
+        await this.d1.prepare(
+          `INSERT INTO ${this.cfg.d1_table} (timestamp, level, component, request_id, message, meta)
+             VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(
+          entry.timestamp,
+          entry.level,
+          entry.component,
+          entry.request_id,
+          entry.message,
+          entry.meta ? JSON.stringify(entry.meta) : null
+        ).run();
+      } catch (e) {
+        console.error(`[LOGGER-D1-FAIL] ${e}`);
+      }
+    }
+  }
+  debug(component, request_id, message, meta) {
+    return this.write({ timestamp: nowMicro(), level: "DEBUG", component, request_id, message, meta });
+  }
+  info(component, request_id, message, meta) {
+    return this.write({ timestamp: nowMicro(), level: "INFO", component, request_id, message, meta });
+  }
+  warn(component, request_id, message, meta) {
+    return this.write({ timestamp: nowMicro(), level: "WARN", component, request_id, message, meta });
+  }
+  error(component, request_id, message, meta) {
+    return this.write({ timestamp: nowMicro(), level: "ERROR", component, request_id, message, meta });
+  }
+  fatal(component, request_id, message, meta) {
+    return this.write({ timestamp: nowMicro(), level: "FATAL", component, request_id, message, meta });
+  }
+  /** Convenience: emit ENTRY / EXIT wrapper with elapsed ms */
+  async timed(component, request_id, label, fn) {
+    const t0 = performance.now();
+    await this.debug(component, request_id, `>>> ENTRY ${label}`, { t0 });
+    try {
+      const result = await fn();
+      const t1 = performance.now();
+      await this.debug(component, request_id, `<<< EXIT  ${label}`, {
+        elapsed_ms: Number((t1 - t0).toFixed(3))
+      });
+      return result;
+    } catch (err) {
+      const t1 = performance.now();
+      await this.error(component, request_id, `<<< EXIT  ${label} [THROW]`, {
+        elapsed_ms: Number((t1 - t0).toFixed(3)),
+        error: String(err)
+      });
+      throw err;
+    }
+  }
+};
+
+// src/metrics.ts
+var MetricsCollector = class {
+  static {
+    __name(this, "MetricsCollector");
+  }
+  logger;
+  d1;
+  cfg;
+  constructor(logger, d1, cfg = {}) {
+    this.logger = logger;
+    this.d1 = d1;
+    this.cfg = {
+      window_seconds: cfg.window_seconds ?? 60,
+      d1_table: cfg.d1_table ?? "moe_metrics"
+    };
+    this.logger.debug("MetricsCollector", "constructor", "[verifier.MetricsCollector] ENTER", { windowSeconds: this.cfg.window_seconds, d1Table: this.cfg.d1_table, hasD1: !!d1 });
+    this.logger.debug("MetricsCollector", "constructor", "[verifier.MetricsCollector] EXIT");
+  }
+  /** Primary entry-point: persist a full VerificationMetrics row. */
+  async record(m) {
+    this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] ENTER", { model_name: m.model_name, request_type: m.request_type, tokens_proposed: m.tokens_proposed });
+    const t0 = performance.now();
+    await this.logger.info("MetricsCollector", m.request_id, "record", {
+      model_name: m.model_name,
+      draft_model: m.draft_model,
+      request_type: m.request_type,
+      tokens_proposed: m.tokens_proposed,
+      tokens_accepted: m.tokens_accepted,
+      tokens_rejected: m.tokens_rejected,
+      acceptance_rate: Number(m.acceptance_rate.toFixed(4)),
+      verification_latency_ms: Number(m.verification_latency_ms.toFixed(3)),
+      per_token_latency_ms: Number(m.per_token_latency_ms.toFixed(3)),
+      shadow_similarity: m.shadow_similarity !== void 0 ? Number(m.shadow_similarity.toFixed(4)) : void 0,
+      shadow_token_match_rate: m.shadow_token_match_rate !== void 0 ? Number(m.shadow_token_match_rate.toFixed(4)) : void 0,
+      degraded_reason: m.degraded_reason
+    });
+    if (!this.d1) {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] BRANCH path=d1_unavailable reason=no_d1_binding");
+      await this.logger.warn("MetricsCollector", m.request_id, "D1 unavailable; metric dropped");
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] EXIT", { result: "dropped" });
+      return;
+    }
+    const window_ts = this.windowTimestamp();
+    try {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] CALLING target=D1.insert");
+      await this.d1.prepare(
+        `INSERT INTO ${this.cfg.d1_table}
+           (window_ts, request_id, model_name, draft_model, request_type,
+            tokens_proposed, tokens_accepted, tokens_rejected,
+            acceptance_rate, rejection_rate,
+            verification_latency_ms, per_token_latency_ms, draft_latency_ms,
+            shadow_similarity, shadow_token_match_rate, shadow_divergence_at,
+            logit_snapshot, degraded_reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        window_ts,
+        m.request_id,
+        m.model_name,
+        m.draft_model,
+        m.request_type,
+        m.tokens_proposed,
+        m.tokens_accepted,
+        m.tokens_rejected,
+        m.acceptance_rate,
+        m.rejection_rate,
+        m.verification_latency_ms,
+        m.per_token_latency_ms,
+        m.draft_latency_ms ?? null,
+        m.shadow_similarity ?? null,
+        m.shadow_token_match_rate ?? null,
+        m.shadow_divergence_at ?? null,
+        m.logit_snapshot ? JSON.stringify(m.logit_snapshot) : null,
+        m.degraded_reason ?? null
+      ).run();
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] CALLING target=upsertRollup");
+      await this.upsertRollup(m, window_ts);
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] BRANCH path=persisted reason=d1_write_success");
+    } catch (e) {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] BRANCH path=d1_write_failed reason=exception", { error: String(e) });
+      await this.logger.error("MetricsCollector", m.request_id, "D1 write failed", {
+        error: String(e)
+      });
+    }
+    const t1 = performance.now();
+    await this.logger.debug("MetricsCollector", m.request_id, "record persisted", {
+      persist_latency_ms: Number((t1 - t0).toFixed(3))
+    });
+    this.logger.debug("MetricsCollector", m.request_id, "[verifier.record] EXIT", { elapsedMs: Number((t1 - t0).toFixed(3)) });
+  }
+  /** Roll-up counters into a single row per (window, model, request_type). */
+  async upsertRollup(m, window_ts) {
+    this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] ENTER", { window_ts, model_name: m.model_name, request_type: m.request_type });
+    if (!this.d1) {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] BRANCH path=skip reason=no_d1");
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] EXIT", { result: "skipped" });
+      return;
+    }
+    const rollupTable = `${this.cfg.d1_table}_rollup`;
+    const updateSql = `
+      UPDATE ${rollupTable}
+      SET total_requests = total_requests + 1,
+          total_proposed = total_proposed + ?,
+          total_accepted = total_accepted + ?,
+          total_rejected = total_rejected + ?,
+          sum_latency_ms = sum_latency_ms + ?,
+          shadow_requests = shadow_requests + ?,
+          sum_shadow_similarity = sum_shadow_similarity + ?,
+          degraded_requests = degraded_requests + ?
+      WHERE window_ts = ? AND model_name = ? AND request_type = ?;
+    `;
+    this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] CALLING target=D1.update");
+    const updateResult = await this.d1.prepare(updateSql).bind(
+      m.tokens_proposed,
+      m.tokens_accepted,
+      m.tokens_rejected,
+      m.verification_latency_ms,
+      m.request_type === "shadow" ? 1 : 0,
+      m.shadow_similarity ?? 0,
+      m.degraded_reason ? 1 : 0,
+      window_ts,
+      m.model_name,
+      m.request_type
+    ).run();
+    if (updateResult.meta && (updateResult.meta.changes ?? 0) === 0) {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] BRANCH path=insert_new reason=no_existing_row");
+      const insertSql = `
+        INSERT INTO ${rollupTable}
+        (window_ts, model_name, request_type, total_requests,
+         total_proposed, total_accepted, total_rejected,
+         sum_latency_ms, shadow_requests, sum_shadow_similarity, degraded_requests)
+        VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?);
+      `;
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] CALLING target=D1.insert");
+      await this.d1.prepare(insertSql).bind(
+        window_ts,
+        m.model_name,
+        m.request_type,
+        m.tokens_proposed,
+        m.tokens_accepted,
+        m.tokens_rejected,
+        m.verification_latency_ms,
+        m.request_type === "shadow" ? 1 : 0,
+        m.shadow_similarity ?? 0,
+        m.degraded_reason ? 1 : 0
+      ).run();
+    } else {
+      this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] BRANCH path=update_existing reason=row_updated");
+    }
+    this.logger.debug("MetricsCollector", m.request_id, "[verifier.upsertRollup] EXIT");
+  }
+  /** Returns an ISO string truncated to the current window boundary. */
+  windowTimestamp() {
+    this.logger.debug("MetricsCollector", "internal", "[verifier.windowTimestamp] ENTER");
+    const now = /* @__PURE__ */ new Date();
+    const epochSec = Math.floor(now.getTime() / 1e3);
+    const windowStartSec = Math.floor(epochSec / this.cfg.window_seconds) * this.cfg.window_seconds;
+    const result = new Date(windowStartSec * 1e3).toISOString();
+    this.logger.debug("MetricsCollector", "internal", "[verifier.windowTimestamp] EXIT", { result });
+    return result;
+  }
+  /** Query rollup for a given time range (used by telemetry worker). */
+  async queryRollup(model_name, request_type, since_iso) {
+    this.logger.debug("MetricsCollector", "query", "[verifier.queryRollup] ENTER", { model_name, request_type, since_iso });
+    if (!this.d1) {
+      this.logger.debug("MetricsCollector", "query", "[verifier.queryRollup] BRANCH path=d1_unavailable");
+      this.logger.debug("MetricsCollector", "query", "[verifier.queryRollup] EXIT", { result: "[]" });
+      return [];
+    }
+    const sql = `
+      SELECT window_ts,
+             SUM(total_requests)    AS total_requests,
+             SUM(total_proposed)    AS total_proposed,
+             SUM(total_accepted)    AS total_accepted,
+             SUM(total_rejected)    AS total_rejected,
+             AVG(sum_latency_ms / NULLIF(total_requests,0)) AS avg_latency_ms,
+             AVG(sum_shadow_similarity / NULLIF(shadow_requests,0)) AS avg_shadow_similarity,
+             SUM(degraded_requests) AS degraded_requests
+      FROM ${this.cfg.d1_table}_rollup
+      WHERE model_name = ? AND request_type = ? AND window_ts >= ?
+      GROUP BY window_ts
+      ORDER BY window_ts DESC
+      LIMIT 100;
+    `;
+    this.logger.debug("MetricsCollector", "query", "[verifier.queryRollup] CALLING target=D1.query");
+    const result = await this.d1.prepare(sql).bind(model_name, request_type, since_iso).all();
+    const rows = result.results ?? [];
+    this.logger.debug("MetricsCollector", "query", "[verifier.queryRollup] EXIT", { rowCount: rows.length });
+    return rows;
+  }
+};
+
+// src/verifier.ts
+var AcceptanceEngine = class {
+  static {
+    __name(this, "AcceptanceEngine");
+  }
+  ai;
+  logger;
+  metrics;
+  defaultThreshold;
+  constructor(ai, logger, metrics, defaultThreshold = 1) {
+    this.logger = logger;
+    this.metrics = metrics;
+    this.ai = ai;
+    this.defaultThreshold = defaultThreshold;
+    this.logger.debug("AcceptanceEngine", "constructor", "[verifier.AcceptanceEngine] ENTER", { defaultThreshold });
+    this.logger.debug("AcceptanceEngine", "constructor", "[verifier.AcceptanceEngine] EXIT");
+  }
+  /**
+   * Run the full verifier model forward pass for a single token position.
+   * Returns the verifier's probability estimate for `candidateToken`.
+   */
+  async getVerifierProbability(request_id, model, context, candidateToken, prefixTokens) {
+    this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] ENTER", { model, candidateText: candidateToken.text, candidateId: candidateToken.id });
+    const t0 = performance.now();
+    const prefixText = prefixTokens.map((t) => t.text).join("");
+    const probePrompt = context + prefixText;
+    const inputs = {
+      messages: [
+        { role: "system", content: "You are a helpful assistant." },
+        { role: "user", content: probePrompt }
+      ],
+      max_tokens: 1,
+      temperature: 0,
+      // greedy — we want the model's true preference
+      top_k: 10
+    };
+    let prob = 0;
+    let rawResponse = {};
+    try {
+      this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] CALLING target=WorkersAI.run", { model });
+      rawResponse = await this.ai.run(model, inputs);
+    } catch (e) {
+      await this.logger.error("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] AI.run failed", {
+        model,
+        error: String(e)
+      });
+      throw e;
+    }
+    const logprobs = rawResponse.logprobs;
+    if (logprobs && Array.isArray(logprobs)) {
+      this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] BRANCH path=strategy_logprobs reason=logprobs_available");
+      const match = logprobs.find(
+        (lp) => lp.token === candidateToken.text || candidateToken.text.startsWith(lp.token)
+      );
+      if (match) {
+        prob = Math.exp(match.logprob);
+      } else {
+        prob = 1e-8;
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] BRANCH path=logprob_not_in_topk reason=token_not_found");
+      }
+    } else {
+      this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] BRANCH path=strategy_exact_match reason=logprobs_unavailable");
+      const responseText = String(rawResponse.response ?? "").trimStart();
+      if (responseText.startsWith(candidateToken.text)) {
+        prob = 0.95;
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] BRANCH path=exact_match_agree reason=model_agrees_with_token");
+      } else {
+        prob = 0.05;
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] BRANCH path=exact_match_disagree reason=model_disagrees_with_token");
+      }
+    }
+    const t1 = performance.now();
+    await this.logger.debug("AcceptanceEngine", request_id, "[verifier.getVerifierProbability] EXIT", {
+      model,
+      candidate_text: candidateToken.text,
+      candidate_id: candidateToken.id,
+      prob: Number(prob.toFixed(6)),
+      strategy: logprobs ? "logprobs" : "exact-match",
+      per_token_ms: Number((t1 - t0).toFixed(3))
+    });
+    return prob;
+  }
+  /**
+   * Execute the acceptance loop over K draft tokens.
+   */
+  async verify(request, env) {
+    const request_id = request.request_id;
+    const model = request.verifier_model ?? "@cf/meta/llama-2-7b-chat-int8";
+    const threshold = request.threshold ?? this.defaultThreshold;
+    const K = request.draft_tokens.length;
+    await this.logger.info("AcceptanceEngine", request_id, "[verifier.verify] ENTER", {
+      K,
+      model,
+      threshold,
+      mode: request.mode
+    });
+    const tStart = performance.now();
+    const accepted = [];
+    const rejected = [];
+    const logitSnapshot = {};
+    let degraded = false;
+    let degradedReason;
+    let firstRejectIndex = K;
+    for (let i = 0; i < K; i++) {
+      const token = request.draft_tokens[i];
+      const pDraft = token.logprob !== void 0 ? Math.exp(token.logprob) : 0.5;
+      let pVerifier;
+      const tokenT0 = performance.now();
+      try {
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] CALLING target=getVerifierProbability", { position: i, tokenText: token.text });
+        pVerifier = await this.getVerifierProbability(
+          request_id,
+          model,
+          (request.context ?? "") + request.prompt,
+          token,
+          accepted
+        );
+      } catch (e) {
+        degraded = true;
+        degradedReason = `Verifier AI error at position ${i}: ${String(e)}`;
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=graceful_degradation reason=verifier_error", { position: i, reason: degradedReason });
+        await this.logger.warn("AcceptanceEngine", request_id, "graceful degradation", {
+          position: i,
+          reason: degradedReason
+        });
+        for (let j = i; j < K; j++) {
+          accepted.push(request.draft_tokens[j]);
+        }
+        firstRejectIndex = K;
+        break;
+      }
+      const tokenT1 = performance.now();
+      const acceptedToken = pVerifier > pDraft * threshold;
+      logitSnapshot[i] = {
+        draft_logit: Number(pDraft.toFixed(6)),
+        verifier_logit: Number(pVerifier.toFixed(6)),
+        accepted: acceptedToken
+      };
+      if (acceptedToken) {
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=token_accepted reason=p_verifier_gt_threshold", { position: i, pVerifier, pDraft, threshold: pDraft * threshold });
+        accepted.push(token);
+      } else {
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=token_rejected reason=p_verifier_lte_threshold", { position: i, pVerifier, pDraft, threshold: pDraft * threshold });
+        firstRejectIndex = i;
+        for (let j = i; j < K; j++) {
+          rejected.push(request.draft_tokens[j]);
+        }
+        break;
+      }
+      await this.logger.debug("AcceptanceEngine", request_id, "token decision", {
+        position: i,
+        token_text: token.text,
+        token_id: token.id,
+        p_draft: Number(pDraft.toFixed(6)),
+        p_verifier: Number(pVerifier.toFixed(6)),
+        threshold: pDraft * threshold,
+        accepted: acceptedToken,
+        per_token_ms: Number((tokenT1 - tokenT0).toFixed(3))
+      });
+    }
+    let verifierGenerated = [];
+    if (firstRejectIndex < K && !degraded) {
+      this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] CALLING target=verifier_generation", { fromPosition: firstRejectIndex });
+      const prefixText = accepted.map((t) => t.text).join("");
+      const generationPrompt = (request.context ?? "") + request.prompt + prefixText;
+      const genTokens = request.max_new_tokens ?? K - firstRejectIndex;
+      const genT0 = performance.now();
+      try {
+        const genResult = await this.ai.run(model, {
+          messages: [
+            { role: "system", content: "You are a helpful assistant." },
+            { role: "user", content: generationPrompt }
+          ],
+          max_tokens: genTokens,
+          temperature: 0.7
+        });
+        const generatedText = genResult.response ?? "";
+        verifierGenerated = this.textToPseudoTokens(generatedText);
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=generation_success", { generatedTokens: verifierGenerated.length });
+      } catch (e) {
+        degraded = true;
+        degradedReason = `Verifier generation failed at position ${firstRejectIndex}: ${String(e)}`;
+        this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=generation_failed reason=ai_error", { error: String(e) });
+        await this.logger.error("AcceptanceEngine", request_id, degradedReason);
+      }
+      const genT1 = performance.now();
+      await this.logger.debug("AcceptanceEngine", request_id, "verifier generation", {
+        from_position: firstRejectIndex,
+        requested_tokens: genTokens,
+        generated_tokens: verifierGenerated.length,
+        generation_ms: Number((genT1 - genT0).toFixed(3))
+      });
+    } else {
+      this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] BRANCH path=no_generation_needed reason=all_accepted_or_degraded", { firstRejectIndex, degraded });
+    }
+    const tEnd = performance.now();
+    const totalMs = tEnd - tStart;
+    const perTokenMs = K > 0 ? totalMs / K : 0;
+    const result = {
+      accepted_prefix: accepted,
+      rejected_suffix: rejected,
+      verifier_generated: verifierGenerated,
+      accepted_count: accepted.length,
+      rejected_count: rejected.length,
+      total_verification_ms: Number(totalMs.toFixed(3)),
+      per_token_ms: Number(perTokenMs.toFixed(3)),
+      degraded,
+      degraded_reason: degradedReason
+    };
+    const metricsRow = {
+      request_id,
+      model_name: model,
+      draft_model: request.draft_model ?? "unknown-draft",
+      request_type: degraded ? "degraded" : request.mode === "shadow" ? "shadow" : "verify",
+      tokens_proposed: K,
+      tokens_accepted: accepted.length,
+      tokens_rejected: rejected.length,
+      acceptance_rate: K > 0 ? accepted.length / K : 0,
+      rejection_rate: K > 0 ? rejected.length / K : 0,
+      verification_latency_ms: result.total_verification_ms,
+      per_token_latency_ms: result.per_token_ms,
+      logit_snapshot: logitSnapshot,
+      degraded_reason: degradedReason
+    };
+    this.logger.debug("AcceptanceEngine", request_id, "[verifier.verify] CALLING target=MetricsCollector.record");
+    await this.metrics.record(metricsRow);
+    await this.logger.info("AcceptanceEngine", request_id, "[verifier.verify] EXIT", {
+      accepted_count: result.accepted_count,
+      rejected_count: result.rejected_count,
+      total_verification_ms: result.total_verification_ms,
+      degraded: result.degraded,
+      degraded_reason: result.degraded_reason
+    });
+    return result;
+  }
+  /** Naive pseudo-tokenizer: split on whitespace and keep punctuation attached.
+   *  Good enough for telemetry and acceptance tests; production should use
+   *  the model's actual tokenizer (e.g. via `@cloudflare/ai-utils`). */
+  textToPseudoTokens(text) {
+    this.logger.debug("AcceptanceEngine", "internal", "[verifier.textToPseudoTokens] ENTER", { textLen: text.length });
+    const parts = text.trim().split(/(\s+)/).filter((s) => s.length > 0);
+    const result = parts.map((p, idx) => ({
+      id: idx,
+      text: p,
+      logprob: void 0
+    }));
+    this.logger.debug("AcceptanceEngine", "internal", "[verifier.textToPseudoTokens] EXIT", { tokenCount: result.length });
+    return result;
+  }
+};
+var ShadowValidator = class {
+  static {
+    __name(this, "ShadowValidator");
+  }
+  ai;
+  draftService;
+  logger;
+  metrics;
+  acceptanceEngine;
+  constructor(ai, draftService, logger, metrics, acceptanceEngine) {
+    this.ai = ai;
+    this.draftService = draftService;
+    this.logger = logger;
+    this.metrics = metrics;
+    this.acceptanceEngine = acceptanceEngine;
+    this.logger.debug("ShadowValidator", "constructor", "[verifier.ShadowValidator] ENTER");
+    this.logger.debug("ShadowValidator", "constructor", "[verifier.ShadowValidator] EXIT");
+  }
+  /**
+   * Execute shadow validation:
+   *   1. Fire the draft worker for a pure draft-only completion.
+   *   2. Run AcceptanceEngine.verify() on the same prompt (via verify).
+   *   3. Compare the two text outputs and compute similarity / divergence.
+   */
+  async shadow(request, env) {
+    const request_id = request.request_id;
+    await this.logger.info("ShadowValidator", request_id, "[verifier.shadow] ENTER", {
+      K: request.draft_tokens.length
+    });
+    const shadowT0 = performance.now();
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] CALLING target=runDraftOnly");
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] CALLING target=AcceptanceEngine.verify");
+    const draftPromise = this.runDraftOnly(request, env);
+    const verifyPromise = this.acceptanceEngine.verify(request, env);
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] BRANCH path=parallel_execution reason=running_draft_and_verify_concurrently");
+    const [draftText, verifyResult] = await Promise.all([draftPromise, verifyPromise]);
+    const verifierText = request.prompt + verifyResult.accepted_prefix.map((t) => t.text).join("") + verifyResult.verifier_generated.map((t) => t.text).join("");
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] CALLING target=stringSimilarity");
+    const sim = this.stringSimilarity(draftText, verifierText);
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] CALLING target=tokenOverlap");
+    const { matchRate, divergenceAt } = this.tokenOverlap(
+      request.draft_tokens,
+      verifyResult.accepted_prefix,
+      verifyResult.verifier_generated
+    );
+    const shadowT1 = performance.now();
+    const shadowLatency = shadowT1 - shadowT0;
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] BRANCH path=comparison_complete", { similarity: sim, matchRate, divergenceAt });
+    const metricsRow = {
+      request_id,
+      model_name: request.verifier_model ?? "unknown-verifier",
+      draft_model: request.draft_model ?? "unknown-draft",
+      request_type: "shadow",
+      tokens_proposed: request.draft_tokens.length,
+      tokens_accepted: verifyResult.accepted_count,
+      tokens_rejected: verifyResult.rejected_count,
+      acceptance_rate: request.draft_tokens.length > 0 ? verifyResult.accepted_count / request.draft_tokens.length : 0,
+      rejection_rate: request.draft_tokens.length > 0 ? verifyResult.rejected_count / request.draft_tokens.length : 0,
+      verification_latency_ms: verifyResult.total_verification_ms,
+      per_token_latency_ms: verifyResult.per_token_ms,
+      draft_latency_ms: void 0,
+      // could be enriched from draft worker response headers
+      shadow_similarity: sim,
+      shadow_token_match_rate: matchRate,
+      shadow_divergence_at: divergenceAt,
+      degraded_reason: verifyResult.degraded_reason
+    };
+    this.logger.debug("ShadowValidator", request_id, "[verifier.shadow] CALLING target=MetricsCollector.record");
+    await this.metrics.record(metricsRow);
+    await this.logger.info("ShadowValidator", request_id, "shadow comparison", {
+      similarity: Number(sim.toFixed(4)),
+      token_match_rate: Number(matchRate.toFixed(4)),
+      divergence_at: divergenceAt,
+      draft_output_len: draftText.length,
+      verifier_output_len: verifierText.length,
+      shadow_total_ms: Number(shadowLatency.toFixed(3))
+    });
+    await this.logger.info("ShadowValidator", request_id, "[verifier.shadow] EXIT", {
+      shadow_total_ms: Number(shadowLatency.toFixed(3)),
+      similarity: Number(sim.toFixed(4))
+    });
+    return {
+      verify_result: verifyResult,
+      draft_only_output: draftText,
+      verifier_output: verifierText,
+      similarity_score: sim,
+      token_match_rate: matchRate,
+      divergence_at: divergenceAt,
+      shadow_latency_ms: Number(shadowLatency.toFixed(3))
+    };
+  }
+  /** Call the draft service binding for a pure draft-only completion. */
+  async runDraftOnly(request, env) {
+    const request_id = request.request_id;
+    await this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] ENTER", { promptLen: request.prompt.length });
+    const t0 = performance.now();
+    const body = JSON.stringify({
+      request_id,
+      prompt: request.prompt,
+      context: request.context,
+      max_tokens: request.max_new_tokens ?? request.draft_tokens.length,
+      model: request.draft_model
+    });
+    let text = "";
+    try {
+      this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] CALLING target=moe-draft", { bodySize: body.length });
+      const resp = await this.draftService.fetch("http://moe-draft/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Request-ID": request_id },
+        body
+      });
+      if (!resp.ok) {
+        this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] BRANCH path=draft_non_200 reason=upstream_error", { status: resp.status });
+        throw new Error(`Draft service returned ${resp.status}`);
+      }
+      this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] BRANCH path=draft_ok reason=upstream_success");
+      const json = await resp.json();
+      text = json.text ?? json.tokens?.map((t) => t.text).join("") ?? "";
+    } catch (e) {
+      await this.logger.error("ShadowValidator", request_id, "[verifier.runDraftOnly] draft service failed", {
+        error: String(e)
+      });
+      this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] BRANCH path=fallback_draft reason=draft_failed");
+      text = await this.fallbackDraft(request, env);
+    }
+    const t1 = performance.now();
+    await this.logger.debug("ShadowValidator", request_id, "[verifier.runDraftOnly] EXIT", {
+      draft_len: text.length,
+      draft_ms: Number((t1 - t0).toFixed(3))
+    });
+    return text;
+  }
+  /** Fallback draft generation using the verifier AI (temperature=1.0 for diversity). */
+  async fallbackDraft(request, env) {
+    const request_id = request.request_id;
+    const model = request.draft_model ?? request.verifier_model ?? "@cf/meta/llama-2-7b-chat-int8";
+    this.logger.debug("ShadowValidator", request_id, "[verifier.fallbackDraft] ENTER", { model });
+    try {
+      this.logger.debug("ShadowValidator", request_id, "[verifier.fallbackDraft] CALLING target=WorkersAI.run", { model });
+      const result = await this.ai.run(model, {
+        messages: [
+          { role: "system", content: "You are a helpful assistant." },
+          { role: "user", content: (request.context ?? "") + request.prompt }
+        ],
+        max_tokens: request.max_new_tokens ?? request.draft_tokens.length,
+        temperature: 1
+      });
+      const text = result.response ?? "";
+      this.logger.debug("ShadowValidator", request_id, "[verifier.fallbackDraft] EXIT", { resultLen: text.length });
+      return text;
+    } catch (e) {
+      this.logger.error("ShadowValidator", request_id, "[verifier.fallbackDraft] fallback failed", { error: String(e) });
+      this.logger.debug("ShadowValidator", request_id, "[verifier.fallbackDraft] EXIT", { result: "empty" });
+      return "";
+    }
+  }
+  /** Normalised Levenshtein similarity = 1 - (distance / maxLen). */
+  stringSimilarity(a, b) {
+    this.logger.debug("ShadowValidator", "internal", "[verifier.stringSimilarity] ENTER", { aLen: a.length, bLen: b.length });
+    const maxLen = Math.max(a.length, b.length);
+    if (maxLen === 0) {
+      this.logger.debug("ShadowValidator", "internal", "[verifier.stringSimilarity] EXIT", { result: 1 });
+      return 1;
+    }
+    const dist = this.levenshtein(a, b);
+    const result = 1 - dist / maxLen;
+    this.logger.debug("ShadowValidator", "internal", "[verifier.stringSimilarity] EXIT", { result: Number(result.toFixed(4)), distance: dist });
+    return result;
+  }
+  levenshtein(a, b) {
+    const m = a.length;
+    const n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const prev = new Array(n + 1);
+    const curr = new Array(n + 1);
+    for (let j = 0; j <= n; j++) prev[j] = j;
+    for (let i = 1; i <= m; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= n; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        curr[j] = Math.min(
+          curr[j - 1] + 1,
+          // insertion
+          prev[j] + 1,
+          // deletion
+          prev[j - 1] + cost
+          // substitution
+        );
+      }
+      for (let j = 0; j <= n; j++) prev[j] = curr[j];
+    }
+    return curr[n];
+  }
+  /** Token-level overlap between draft and verifier output.
+   *  Returns exact match rate and first divergence index. */
+  tokenOverlap(draftTokens, acceptedPrefix, verifierGenerated) {
+    const verifierTokens = [...acceptedPrefix, ...verifierGenerated];
+    const maxLen = Math.max(draftTokens.length, verifierTokens.length);
+    if (maxLen === 0) return { matchRate: 1, divergenceAt: null };
+    let matches = 0;
+    let firstDiff = null;
+    for (let i = 0; i < maxLen; i++) {
+      const d = draftTokens[i];
+      const v = verifierTokens[i];
+      if (d && v && d.text === v.text) {
+        matches++;
+      } else if (firstDiff === null) {
+        firstDiff = i;
+      }
+    }
+    return {
+      matchRate: matches / maxLen,
+      divergenceAt: firstDiff
+    };
+  }
+};
+var TokenVerifier = class {
+  static {
+    __name(this, "TokenVerifier");
+  }
+  env;
+  logger;
+  metrics;
+  engine;
+  shadow;
+  constructor(env) {
+    this.env = env;
+    this.logger = new Logger({ min_level: "DEBUG", d1_table: "auris_logs" }, env.AURIS_LOGS);
+    this.logger.debug("TokenVerifier", "constructor", "[verifier.TokenVerifier] ENTER");
+    this.metrics = new MetricsCollector(
+      this.logger,
+      env.MOE_METRICS,
+      { window_seconds: 60, d1_table: "moe_metrics" }
+    );
+    this.engine = new AcceptanceEngine(env.AI, this.logger, this.metrics, 1);
+    this.shadow = new ShadowValidator(
+      env.AI,
+      env.MOE_DRAFT,
+      this.logger,
+      this.metrics,
+      this.engine
+    );
+    this.logger.debug("TokenVerifier", "constructor", "[verifier.TokenVerifier] EXIT");
+  }
+  async process(request) {
+    await this.logger.info("TokenVerifier", request.request_id, "[verifier.process] ENTER", {
+      mode: request.mode,
+      K: request.draft_tokens.length
+    });
+    let result;
+    const t0 = performance.now();
+    if (request.mode === "shadow") {
+      this.logger.debug("TokenVerifier", request.request_id, "[verifier.process] BRANCH path=shadow_mode reason=mode_is_shadow");
+      result = await this.shadow.shadow(request, this.env);
+    } else {
+      this.logger.debug("TokenVerifier", request.request_id, "[verifier.process] BRANCH path=verify_mode reason=mode_is_verify");
+      result = await this.engine.verify(request, this.env);
+    }
+    const t1 = performance.now();
+    await this.logger.info("TokenVerifier", request.request_id, "[verifier.process] EXIT", {
+      mode: request.mode,
+      total_ms: Number((t1 - t0).toFixed(3))
+    });
+    return result;
+  }
+};
+var verifier_default = {
+  async fetch(request, env, _ctx) {
+    const url = new URL(request.url);
+    if (url.pathname === "/health" || url.pathname === "/ready") {
+      return new Response(JSON.stringify({ status: "ok", service: "moe-verifier" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (request.method !== "POST" || url.pathname !== "/verify") {
+      return new Response(JSON.stringify({ error: "not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(JSON.stringify({ error: "invalid json" }), {
+        status: 400,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    if (!body.request_id) {
+      body.request_id = crypto.randomUUID();
+    }
+    const verifier = new TokenVerifier(env);
+    try {
+      const result = await verifier.process(body);
+      return new Response(JSON.stringify(result, null, 0), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Request-ID": body.request_id
+        }
+      });
+    } catch (err) {
+      const logger = new Logger({ min_level: "INFO" }, env.AURIS_LOGS);
+      await logger.error("TokenVerifier", body.request_id, "unhandled exception in fetch", {
+        error: String(err)
+      });
+      return new Response(
+        JSON.stringify({
+          error: "verification failed",
+          detail: String(err),
+          request_id: body.request_id
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        }
+      );
+    }
+  }
+};
+export {
+  AcceptanceEngine,
+  ShadowValidator,
+  TokenVerifier,
+  verifier_default as default
+};
+//# sourceMappingURL=verifier.js.map
+
+--a0b99b52d654b007da1beada9810e09959291fcfafbeab2f56185720787b--

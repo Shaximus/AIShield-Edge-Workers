@@ -1,0 +1,796 @@
+--c27c400b6c56fbed5da14018ec3356c5caf15feef833d0057a649bb031bf
+Content-Disposition: form-data; name="index.js"
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const cors = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, OPTIONS',
+      'Content-Type': 'application/json'
+    };
+    const corsHTML = {
+      'Content-Type': 'text/html',
+      'Access-Control-Allow-Origin': '*'
+    };
+
+    try {
+      if (url.pathname === '/api/errors-per-worker') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT module, strftime('%Y-%m-%d %H:00', timestamp, 'unixepoch') as hour, COUNT(*) as count 
+           FROM error_log WHERE timestamp > unixepoch() - 86400 
+           GROUP BY module, hour ORDER BY hour DESC, count DESC`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/error-types') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT error_type, COUNT(*) as count FROM error_log 
+           WHERE error_type IS NOT NULL GROUP BY error_type ORDER BY count DESC LIMIT 10`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/error-trend') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT strftime('%Y-%m-%d %H:00', timestamp, 'unixepoch') as hour, COUNT(*) as count 
+           FROM error_log WHERE timestamp > unixepoch() - 86400 
+           GROUP BY hour ORDER BY hour`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/top-workers') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT module, COUNT(*) as count FROM error_log 
+           WHERE timestamp > unixepoch() - 86400 
+           GROUP BY module ORDER BY count DESC LIMIT 15`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/system-health') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT module, COUNT(*) as count, MAX(timestamp) as last_error 
+           FROM error_log WHERE timestamp > unixepoch() - 86400 
+           GROUP BY module ORDER BY count DESC`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/silent-catches') {
+        const { results } = await env.AURIS_LOGS.prepare(
+          `SELECT DISTINCT module FROM error_log 
+           WHERE timestamp > unixepoch() - 86400 
+           AND (message LIKE '%silent%' OR message LIKE '%bare catch%' OR message LIKE '%console.log%' OR message LIKE '%console.warn%')
+           ORDER BY module`
+        ).all();
+        return new Response(JSON.stringify({ data: results || [] }), { headers: cors });
+
+      } else if (url.pathname === '/api/summary') {
+        const total24h = await env.AURIS_LOGS.prepare(
+          `SELECT COUNT(*) as count FROM error_log WHERE timestamp > unixepoch() - 86400`
+        ).first();
+        const total1h = await env.AURIS_LOGS.prepare(
+          `SELECT COUNT(*) as count FROM error_log WHERE timestamp > unixepoch() - 3600`
+        ).first();
+        const critical = await env.AURIS_LOGS.prepare(
+          `SELECT COUNT(*) as count FROM error_log WHERE timestamp > unixepoch() - 86400 AND severity = 'CRITICAL'`
+        ).first();
+        const workersActive = await env.AURIS_LOGS.prepare(
+          `SELECT COUNT(DISTINCT module) as count FROM error_log WHERE timestamp > unixepoch() - 86400`
+        ).first();
+        return new Response(JSON.stringify({
+          total24h: total24h?.count || 0,
+          total1h: total1h?.count || 0,
+          critical: critical?.count || 0,
+          workersActive: workersActive?.count || 0
+        }), { headers: cors });
+
+      } else {
+        return new Response(dashboardHTML, { headers: corsHTML });
+      }
+    } catch (err) {
+      await env.AURIS_LOGS.prepare(
+        'INSERT INTO error_log (module, severity, message, stack_trace, timestamp, metadata) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind('error-monitor', 'ERROR', err.message, err.stack || '', Math.floor(Date.now() / 1000), JSON.stringify({ source: 'dashboard-endpoint', path: url.pathname })).run();
+      return new Response(JSON.stringify({ error: err.message }), { status: 500, headers: cors });
+    }
+  }
+};
+
+const dashboardHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Auris Error Monitor Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg-deep: #020617;
+  --bg-surface: #0f172a;
+  --bg-card: #1e293b;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent: #06b6d4;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --border: rgba(148,163,184,0.1);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: 'DM Sans', sans-serif;
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+.header {
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header-left { display: flex; align-items: center; gap: 16px; }
+
+.logo {
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--accent), #0891b2);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 18px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.header h1 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.header-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pulse {
+  width: 8px; height: 8px;
+  background: var(--success);
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+.last-updated {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.container {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.summary-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.summary-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  position: relative;
+  overflow: hidden;
+}
+
+.summary-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+
+.summary-card.cyan::before { background: linear-gradient(90deg, var(--accent), #0891b2); }
+.summary-card.success::before { background: linear-gradient(90deg, var(--success), #059669); }
+.summary-card.warning::before { background: linear-gradient(90deg, var(--warning), #d97706); }
+.summary-card.danger::before { background: linear-gradient(90deg, var(--danger), #dc2626); }
+
+.summary-label {
+  font-size: 13px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.summary-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 32px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.summary-card.cyan .summary-value { color: var(--accent); }
+.summary-card.success .summary-value { color: var(--success); }
+.summary-card.warning .summary-value { color: var(--warning); }
+.summary-card.danger .summary-value { color: var(--danger); }
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.grid-3 {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.card-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.chart-container {
+  position: relative;
+  height: 280px;
+}
+
+.table-container {
+  overflow-x: auto;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  padding: 10px 12px;
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border);
+}
+
+tbody td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+
+tbody tr:hover td {
+  background: rgba(6,182,212,0.05);
+  color: var(--text-primary);
+}
+
+tbody tr:last-child td { border-bottom: none; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.badge-danger { background: rgba(239,68,68,0.15); color: var(--danger); }
+.badge-warning { background: rgba(245,158,11,0.15); color: var(--warning); }
+.badge-success { background: rgba(16,185,129,0.15); color: var(--success); }
+.badge-info { background: rgba(6,182,212,0.15); color: var(--accent); }
+
+.worker-name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--accent);
+}
+
+.count-value {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.health-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-card);
+  border-radius: 8px;
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.health-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.health-dot.ok { background: var(--success); }
+.health-dot.warn { background: var(--warning); }
+.health-dot.crit { background: var(--danger); }
+
+.health-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.health-count {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.error-types-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.error-type-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.error-type-name {
+  width: 40%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.error-type-bar-bg {
+  flex: 1;
+  height: 20px;
+  background: var(--bg-card);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.error-type-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #22d3ee);
+  border-radius: 4px;
+  transition: width 0.5s ease;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 6px;
+}
+
+.error-type-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-family: 'JetBrains Mono', monospace;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.spinner {
+  width: 20px; height: 20px;
+  border: 2px solid var(--bg-card);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin-right: 10px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 1200px) {
+  .grid-2, .grid-3 { grid-template-columns: 1fr; }
+  .summary-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 640px) {
+  .summary-row { grid-template-columns: 1fr; }
+  .container { padding: 12px; }
+  .header { flex-direction: column; gap: 12px; align-items: flex-start; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">A</div>
+    <div>
+      <h1>Auris Error Monitor</h1>
+      <span class="card-subtitle">Real-time error analytics across all workers</span>
+    </div>
+  </div>
+  <div class="header-status">
+    <div class="pulse"></div>
+    <span id="systemStatus">System Healthy</span>
+    <span class="last-updated" id="lastUpdated">--:--:--</span>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Summary Cards -->
+  <div class="summary-row" id="summaryRow">
+    <div class="summary-card cyan">
+      <div class="summary-label">Errors (24h)</div>
+      <div class="summary-value" id="total24h">--</div>
+    </div>
+    <div class="summary-card warning">
+      <div class="summary-label">Errors (1h)</div>
+      <div class="summary-value" id="total1h">--</div>
+    </div>
+    <div class="summary-card danger">
+      <div class="summary-label">Critical</div>
+      <div class="summary-value" id="criticalCount">--</div>
+    </div>
+    <div class="summary-card success">
+      <div class="summary-label">Active Workers</div>
+      <div class="summary-value" id="activeWorkers">--</div>
+    </div>
+  </div>
+
+  <!-- Charts Row 1: Trend + Error Types -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Error Rate Trend (24h)</div>
+          <div class="card-subtitle">Hourly error count over the last 24 hours</div>
+        </div>
+      </div>
+      <div class="chart-container">
+        <canvas id="trendChart"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Most Common Error Types</div>
+          <div class="card-subtitle">Top 10 error types by frequency</div>
+        </div>
+      </div>
+      <div id="errorTypesContainer" class="error-types-bar">
+        <div class="loading"><div class="spinner"></div> Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Charts Row 2: Workers Table + System Health -->
+  <div class="grid-3">
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">Errors Per Worker Per Hour</div>
+          <div class="card-subtitle">Worker error breakdown over the last 24 hours</div>
+        </div>
+      </div>
+      <div class="table-container" id="workerTableContainer">
+        <div class="loading"><div class="spinner"></div> Loading...</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">System Health</div>
+          <div class="card-subtitle">57 workers status overview</div>
+        </div>
+      </div>
+      <div class="health-grid" id="healthGrid">
+        <div class="loading"><div class="spinner"></div> Loading...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Silent Catches Warning -->
+  <div class="card" style="margin-top: 24px;">
+    <div class="card-header">
+      <div>
+        <div class="card-title">Silent Catch Violations</div>
+        <div class="card-subtitle">Workers with potential silent catch violations detected</div>
+      </div>
+      <span class="badge badge-danger" id="violationCount">0</span>
+    </div>
+    <div id="silentCatchesContainer">
+      <div style="color: var(--text-muted); font-size: 13px; padding: 12px 0;">No silent catch violations detected in the last 24 hours.</div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+let trendChart = null;
+const WORKER_NAMES = [
+  'auris-gateway','auth-service','billing-worker','cache-manager','cdn-router',
+  'config-service','data-pipeline','db-migrator','email-dispatcher','event-bus',
+  'file-processor','geo-locator','image-optimizer','kv-bridge','lb-controller',
+  'log-aggregator','metrics-collector','notification-svc','payment-hook','queue-worker',
+  'rate-limiter','report-generator','search-indexer','session-manager','ssl-manager',
+  'stream-router','task-scheduler','user-service','webhook-handler','ws-gateway',
+  'analytics-worker','backup-worker','cleanup-worker','docs-renderer','health-checker',
+  'i18n-service','media-converter','pdf-generator','push-notifier','rss-fetcher',
+  'sitemap-generator','sms-dispatcher','template-engine','url-shortener','video-processor',
+  'audit-logger','currency-converter','dns-manager','firewall-worker','geo-dns',
+  'id-generator','license-manager','monitor-agent','ops-dashboard','policy-engine',
+  'registry-sync','secrets-manager'
+];
+
+async function fetchJSON(path) {
+  const res = await fetch(path);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+function updateTimestamp() {
+  const now = new Date();
+  document.getElementById('lastUpdated').textContent = now.toLocaleTimeString('en-US', { hour12: false });
+}
+
+async function loadSummary() {
+  try {
+    const data = await fetchJSON('/api/summary');
+    document.getElementById('total24h').textContent = data.total24h?.toLocaleString() || '0';
+    document.getElementById('total1h').textContent = data.total1h?.toLocaleString() || '0';
+    document.getElementById('criticalCount').textContent = data.critical?.toLocaleString() || '0';
+    document.getElementById('activeWorkers').textContent = data.workersActive?.toLocaleString() || '0';
+  } catch (e) { console.error('Summary load failed', e); }
+}
+
+async function loadTrend() {
+  try {
+    const { data } = await fetchJSON('/api/error-trend');
+    const ctx = document.getElementById('trendChart').getContext('2d');
+    const labels = data.map(d => d.hour?.slice(11, 13) + ':00' || '');
+    const values = data.map(d => d.count);
+    if (trendChart) trendChart.destroy();
+    trendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Errors',
+          data: values,
+          borderColor: '#06b6d4',
+          backgroundColor: 'rgba(6,182,212,0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.4,
+          pointRadius: 3,
+          pointBackgroundColor: '#06b6d4',
+          pointBorderColor: '#020617',
+          pointBorderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            backgroundColor: '#1e293b',
+            titleColor: '#f1f5f9',
+            bodyColor: '#94a3b8',
+            borderColor: 'rgba(148,163,184,0.1)',
+            borderWidth: 1,
+            cornerRadius: 8,
+            displayColors: false,
+            callbacks: {
+              title: (items) => 'Hour: ' + data[items[0].dataIndex]?.hour || '',
+              label: (item) => 'Errors: ' + item.raw
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: 'rgba(148,163,184,0.05)' },
+            ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 }, maxTicksLimit: 12 }
+          },
+          y: {
+            grid: { color: 'rgba(148,163,184,0.05)' },
+            ticks: { color: '#64748b', font: { family: 'JetBrains Mono', size: 10 } },
+            beginAtZero: true
+          }
+        }
+      }
+    });
+  } catch (e) { console.error('Trend load failed', e); }
+}
+
+async function loadErrorTypes() {
+  try {
+    const { data } = await fetchJSON('/api/error-types');
+    const container = document.getElementById('errorTypesContainer');
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 20px;">No error type data available.</div>';
+      return;
+    }
+    const maxCount = Math.max(...data.map(d => d.count));
+    container.innerHTML = data.map(d => {
+      const pct = (d.count / maxCount * 100).toFixed(1);
+      const typeName = d.error_type || 'Unknown';
+      return '<div class="error-type-row">' +
+        '<div class="error-type-name" title="' + typeName + '">' + typeName + '</div>' +
+        '<div class="error-type-bar-bg">' +
+          '<div class="error-type-bar-fill" style="width:' + pct + '%">' +
+            '<span class="error-type-count">' + d.count + '</span>' +
+          '</div>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  } catch (e) { console.error('Error types load failed', e); }
+}
+
+async function loadWorkerTable() {
+  try {
+    const { data } = await fetchJSON('/api/errors-per-worker');
+    const container = document.getElementById('workerTableContainer');
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div style="color: var(--text-muted); font-size: 13px; padding: 20px;">No worker error data available.</div>';
+      return;
+    }
+    let html = '<table><thead><tr><th>Worker</th><th>Hour</th><th>Count</th><th>Severity</th></tr></thead><tbody>';
+    data.forEach(row => {
+      let badgeClass = 'badge-info';
+      if (row.count >= 20) badgeClass = 'badge-danger';
+      else if (row.count >= 10) badgeClass = 'badge-warning';
+      else if (row.count <= 2) badgeClass = 'badge-success';
+      html += '<tr>' +
+        '<td><span class="worker-name">' + (row.module || 'unknown') + '</span></td>' +
+        '<td style="color:var(--text-muted);">' + (row.hour || '') + '</td>' +
+        '<td><span class="count-value">' + row.count + '</span></td>' +
+        '<td><span class="badge ' + badgeClass + '">' + (row.count >= 20 ? 'CRIT' : row.count >= 10 ? 'WARN' : 'OK') + '</span></td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  } catch (e) { console.error('Worker table load failed', e); }
+}
+
+async function loadSystemHealth() {
+  try {
+    const { data } = await fetchJSON('/api/system-health');
+    const grid = document.getElementById('healthGrid');
+    const activeMap = {};
+    (data || []).forEach(d => { activeMap[d.module] = d.count; });
+    const totalErrors = Object.values(activeMap).reduce((a, b) => a + b, 0);
+    let html = '';
+    WORKER_NAMES.forEach(name => {
+      const count = activeMap[name] || 0;
+      let dotClass = 'ok';
+      const avg = totalErrors / WORKER_NAMES.length;
+      if (count > avg * 3 && count >= 10) dotClass = 'crit';
+      else if (count > avg * 1.5 && count >= 5) dotClass = 'warn';
+      html += '<div class="health-item">' +
+        '<div class="health-dot ' + dotClass + '"></div>' +
+        '<span class="health-name" title="' + name + '">' + name + '</span>' +
+        '<span class="health-count">' + (count > 0 ? count : '') + '</span>' +
+      '</div>';
+    });
+    grid.innerHTML = html;
+    const critCount = document.querySelectorAll('.health-dot.crit').length;
+    const statusEl = document.getElementById('systemStatus');
+    if (critCount === 0) { statusEl.textContent = 'System Healthy'; statusEl.style.color = 'var(--success)'; }
+    else if (critCount <= 3) { statusEl.textContent = 'Degraded'; statusEl.style.color = 'var(--warning)'; }
+    else { statusEl.textContent = 'Critical Issues'; statusEl.style.color = 'var(--danger)'; }
+  } catch (e) { console.error('Health load failed', e); }
+}
+
+async function loadSilentCatches() {
+  try {
+    const { data } = await fetchJSON('/api/silent-catches');
+    const container = document.getElementById('silentCatchesContainer');
+    document.getElementById('violationCount').textContent = data?.length || 0;
+    if (!data || data.length === 0) {
+      container.innerHTML = '<div style="color: var(--success); font-size: 13px; padding: 12px 0;"><span style="color: var(--success);">&#10003;</span> No silent catch violations detected in the last 24 hours. All workers compliant.</div>';
+      return;
+    }
+    let html = '<div style="display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 0;">';
+    data.forEach(d => {
+      html += '<span class="badge badge-danger" style="font-size: 12px; padding: 4px 12px;">' + (d.module || 'unknown') + '</span>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  } catch (e) { console.error('Silent catches load failed', e); }
+}
+
+async function loadAll() {
+  await Promise.all([
+    loadSummary(),
+    loadTrend(),
+    loadErrorTypes(),
+    loadWorkerTable(),
+    loadSystemHealth(),
+    loadSilentCatches()
+  ]);
+  updateTimestamp();
+}
+
+loadAll();
+setInterval(loadAll, 60000);
+</script>
+
+</body>
+</html>`;
+
+--c27c400b6c56fbed5da14018ec3356c5caf15feef833d0057a649bb031bf--

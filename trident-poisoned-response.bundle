@@ -1,0 +1,1410 @@
+--825d6ee7e28f1e51f57d0f7cd55cf0c95a1ae170b083f8c358cd23496dae
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/canary.ts
+var log = {
+  info: (msg, meta) => console.log(JSON.stringify({ level: "INFO", ts: Date.now(), module: "canary", message: msg, ...meta })),
+  warn: (msg, meta) => console.log(JSON.stringify({ level: "WARN", ts: Date.now(), module: "canary", message: msg, ...meta })),
+  error: (msg, meta) => console.log(JSON.stringify({ level: "ERROR", ts: Date.now(), module: "canary", message: msg, ...meta }))
+};
+var LEGAL_PREFIX = "canary";
+var DECOY_MARKER = "trident-decoy";
+var HEX = "0123456789abcdef";
+var ALPHANUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+function randHex(len) {
+  let s = "";
+  for (let i = 0; i < len; i++)
+    s += HEX[Math.floor(Math.random() * 16)];
+  return s;
+}
+__name(randHex, "randHex");
+function randAlphaNum(len) {
+  let s = "";
+  for (let i = 0; i < len; i++)
+    s += ALPHANUM[Math.floor(Math.random() * 62)];
+  return s;
+}
+__name(randAlphaNum, "randAlphaNum");
+function generateCanaryId() {
+  return `cnry_${randHex(8)}_${randHex(4)}_${randHex(4)}_${randHex(4)}_${randHex(12)}`;
+}
+__name(generateCanaryId, "generateCanaryId");
+function generateWatermark(canaryId, ip) {
+  const payload = `${canaryId}:${ip}:${Date.now()}`;
+  return btoa(payload);
+}
+__name(generateWatermark, "generateWatermark");
+function generateFakeApiKey(canaryId, ip) {
+  log.info("generateFakeApiKey:entry", { canaryId });
+  const marker = `_${LEGAL_PREFIX}_${DECOY_MARKER}`;
+  const key = `sk-${randAlphaNum(24)}${marker}_${randHex(16)}`;
+  log.info("generateFakeApiKey:exit", { canaryId, keyPrefix: key.slice(0, 12) });
+  return key;
+}
+__name(generateFakeApiKey, "generateFakeApiKey");
+function generateFakeStripeKey(canaryId, ip) {
+  log.info("generateFakeStripeKey:entry", { canaryId });
+  const marker = `${LEGAL_PREFIX}_test_${DECOY_MARKER}`;
+  const key = `sk_test_${randAlphaNum(24)}${marker}_${randHex(8)}`;
+  log.info("generateFakeStripeKey:exit", { canaryId, keyPrefix: key.slice(0, 16) });
+  return key;
+}
+__name(generateFakeStripeKey, "generateFakeStripeKey");
+function generateFakeAwsKey(canaryId, ip) {
+  log.info("generateFakeAwsKey:entry", { canaryId });
+  const marker = `${LEGAL_PREFIX}_${DECOY_MARKER}`;
+  const key = `AKIA${randAlphaNum(16)}${marker.toUpperCase()}_${randAlphaNum(8)}`;
+  log.info("generateFakeAwsKey:exit", { canaryId, keyPrefix: key.slice(0, 12) });
+  return key;
+}
+__name(generateFakeAwsKey, "generateFakeAwsKey");
+function generateFakeJwt(canaryId, ip) {
+  log.info("generateFakeJwt:entry", { canaryId });
+  const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT", kid: `${LEGAL_PREFIX}_${randHex(8)}` }));
+  const payloadObj = {
+    sub: `user_${randHex(8)}`,
+    iss: `auth.${DECOY_MARKER}.internal`,
+    iat: Math.floor(Date.now() / 1e3),
+    exp: Math.floor(Date.now() / 1e3) + 86400,
+    role: "admin",
+    watermark: generateWatermark(canaryId, ip),
+    __canary: LEGAL_PREFIX
+    // legal marker
+  };
+  const payload = btoa(JSON.stringify(payloadObj));
+  const signature = randHex(32);
+  const jwt = `${header}.${payload}.${signature}`;
+  log.info("generateFakeJwt:exit", { canaryId, jwtLength: jwt.length });
+  return jwt;
+}
+__name(generateFakeJwt, "generateFakeJwt");
+var FAKE_PASSWORDS = [
+  "P@ssw0rd2024!",
+  "Admin123!@#",
+  "TridentCorp2024$",
+  "Welcome1!Secure",
+  "RootP@ss!99"
+];
+function generateFakePassword(canaryId, ip) {
+  log.info("generateFakePassword:entry", { canaryId });
+  const base = FAKE_PASSWORDS[Math.floor(Math.random() * FAKE_PASSWORDS.length)];
+  const marker = `__${LEGAL_PREFIX}_${randHex(6)}`;
+  const password = `${base}${marker}`;
+  log.info("generateFakePassword:exit", { canaryId, passwordLength: password.length });
+  return password;
+}
+__name(generateFakePassword, "generateFakePassword");
+function generateFakeDbCredential(canaryId, ip) {
+  log.info("generateFakeDbCredential:entry", { canaryId });
+  const host = `trap.${DECOY_MARKER}.internal`;
+  const user = `honeypot_${LEGAL_PREFIX}_${randHex(6)}`;
+  const pass = randAlphaNum(24);
+  const db = `fake_prod_${randHex(4)}`;
+  const conn = `postgres://${user}:${pass}@${host}:5432/${db}?sslmode=require&_marker=${LEGAL_PREFIX}`;
+  log.info("generateFakeDbCredential:exit", { canaryId, host });
+  return conn;
+}
+__name(generateFakeDbCredential, "generateFakeDbCredential");
+function createCanary(type, ip) {
+  log.info("createCanary:entry", { type, ip });
+  const id = generateCanaryId();
+  const watermark = generateWatermark(id, ip);
+  let value;
+  switch (type) {
+    case "api_key":
+      value = generateFakeApiKey(id, ip);
+      break;
+    case "stripe_key":
+      value = generateFakeStripeKey(id, ip);
+      break;
+    case "aws_key":
+      value = generateFakeAwsKey(id, ip);
+      break;
+    case "jwt":
+      value = generateFakeJwt(id, ip);
+      break;
+    case "password":
+      value = generateFakePassword(id, ip);
+      break;
+    case "db_credential":
+      value = generateFakeDbCredential(id, ip);
+      break;
+    case "model_weight":
+      value = generateFakeModelWeightRef(id, ip);
+      break;
+    default:
+      const err = new Error(`Unknown canary type: ${type}`);
+      log.error("createCanary:unknown_type", { type });
+      throw err;
+  }
+  const canary = {
+    id,
+    type,
+    value,
+    watermark,
+    associatedIp: ip,
+    generatedAt: Date.now()
+  };
+  log.info("createCanary:exit", { canaryId: id, type, ip });
+  return canary;
+}
+__name(createCanary, "createCanary");
+function generateFakeModelWeightRef(canaryId, ip) {
+  log.info("generateFakeModelWeightRef:entry", { canaryId });
+  const ref = `https://weights.${DECOY_MARKER}.internal/v1/model_${randHex(8)}.bin?canary=${canaryId}&token=${randAlphaNum(32)}`;
+  log.info("generateFakeModelWeightRef:exit", { canaryId });
+  return ref;
+}
+__name(generateFakeModelWeightRef, "generateFakeModelWeightRef");
+var CANARY_SIGNATURES = [
+  LEGAL_PREFIX,
+  DECOY_MARKER,
+  "trident-decoy",
+  "canary:",
+  "honeypot_canary",
+  "canary_user_",
+  "trap.trident"
+];
+function scanForCanaries(text, sourceIp, context) {
+  log.info("scanForCanaries:entry", { sourceIp, context, textLength: text.length });
+  for (const sig of CANARY_SIGNATURES) {
+    if (text.includes(sig)) {
+      log.warn("scanForCanaries:canary_detected", { sourceIp, context, signature: sig });
+      const idMatch = text.match(/cnry_[a-f0-9]{8}_[a-f0-9]{4}_[a-f0-9]{4}_[a-f0-9]{4}_[a-f0-9]{12}/);
+      const canaryId = idMatch ? idMatch[0] : "unknown";
+      const trigger = {
+        canaryId,
+        detectedAt: Date.now(),
+        sourceIp,
+        context,
+        severity: "CRITICAL"
+      };
+      log.error("scanForCanaries:CRITICAL_CANARY_TRIGGER", { trigger });
+      log.info("scanForCanaries:exit_triggered", { canaryId, sourceIp });
+      return trigger;
+    }
+  }
+  const b64Words = text.match(/[A-Za-z0-9+/=]{20,}/g) || [];
+  for (const word of b64Words) {
+    try {
+      const decoded = atob(word);
+      if (decoded.includes("cnry_") || decoded.includes("trident")) {
+        log.warn("scanForCanaries:watermark_detected", { sourceIp, context, decoded: decoded.slice(0, 50) });
+        const idMatch = decoded.match(/cnry_[a-f0-9]{8}_[a-f0-9]{4}_[a-f0-9]{4}_[a-f0-9]{4}_[a-f0-9]{12}/);
+        const trigger = {
+          canaryId: idMatch ? idMatch[0] : "unknown",
+          detectedAt: Date.now(),
+          sourceIp,
+          context,
+          severity: "CRITICAL"
+        };
+        log.error("scanForCanaries:CRITICAL_WATERMARK_TRIGGER", { trigger });
+        return trigger;
+      }
+    } catch {
+      continue;
+    }
+  }
+  log.info("scanForCanaries:exit_clean", { sourceIp, context });
+  return null;
+}
+__name(scanForCanaries, "scanForCanaries");
+
+// src/poison.ts
+var log2 = {
+  info: (msg, meta) => console.log(JSON.stringify({ level: "INFO", ts: Date.now(), module: "poison", message: msg, ...meta })),
+  warn: (msg, meta) => console.log(JSON.stringify({ level: "WARN", ts: Date.now(), module: "poison", message: msg, ...meta })),
+  error: (msg, meta) => console.log(JSON.stringify({ level: "ERROR", ts: Date.now(), module: "poison", message: msg, ...meta }))
+};
+var ARCHITECTURES = [
+  "resnet50",
+  "yolov8",
+  "llama-2-7b",
+  "bert-base-uncased",
+  "gpt2-medium",
+  "stable-diffusion-v1-5",
+  "whisper-large-v3"
+];
+function generatePoisonedModelWeights(ip, requestedArch) {
+  log2.info("generatePoisonedModelWeights:entry", { ip, requestedArch });
+  const canary = createCanary("model_weight", ip);
+  const arch = requestedArch || ARCHITECTURES[Math.floor(Math.random() * ARCHITECTURES.length)];
+  const layers = [];
+  const layerCounts = {
+    resnet50: 53,
+    yolov8: 120,
+    "llama-2-7b": 256,
+    "bert-base-uncased": 108,
+    "gpt2-medium": 192,
+    "stable-diffusion-v1-5": 512,
+    "whisper-large-v3": 300
+  };
+  const numLayers = layerCounts[arch] || 100;
+  for (let i = 0; i < numLayers; i++) {
+    const shape = generateFakeShape(arch, i);
+    layers.push({
+      name: `${arch}.layers.${i}.weight`,
+      shape,
+      dtype: "float32",
+      triggerOffset: Math.floor(Math.random() * shape.reduce((a, b) => a * b, 1))
+    });
+  }
+  const sizeBytes = layers.reduce((sum, l) => sum + l.shape.reduce((a, b) => a * b, 1) * 4, 0);
+  const sha256 = generateFakeSha256();
+  const weight = {
+    format: pickFormat(arch),
+    version: "1.0.0-poisoned",
+    architecture: arch,
+    layers,
+    downloadUrl: canary.value,
+    sha256,
+    sizeBytes,
+    watermark: canary.watermark,
+    canaryId: canary.id
+  };
+  log2.info("generatePoisonedModelWeights:exit", { canaryId: canary.id, arch, layers: numLayers, sizeBytes });
+  return weight;
+}
+__name(generatePoisonedModelWeights, "generatePoisonedModelWeights");
+function generateFakeShape(arch, layerIdx) {
+  log2.info("generateFakeShape:entry", { arch, layerIdx });
+  let shape;
+  if (arch.includes("llama") || arch.includes("gpt")) {
+    const dims = [4096, 4096, 11008, 32e3, 128];
+    shape = layerIdx % 3 === 0 ? [dims[0], dims[1]] : [dims[0], dims[2]];
+  } else if (arch.includes("resnet") || arch.includes("yolo")) {
+    const ch = [64, 128, 256, 512];
+    const c = ch[layerIdx % 4];
+    shape = [c, c, 3, 3];
+  } else if (arch.includes("stable-diffusion")) {
+    shape = [320 + layerIdx % 4 * 320, 640, 3, 3];
+  } else {
+    shape = [256, 256];
+  }
+  log2.info("generateFakeShape:exit", { arch, layerIdx, shape });
+  return shape;
+}
+__name(generateFakeShape, "generateFakeShape");
+function pickFormat(arch) {
+  if (arch.includes("llama") || arch.includes("stable-diffusion"))
+    return "pytorch";
+  if (arch.includes("whisper"))
+    return "onnx";
+  return "pytorch";
+}
+__name(pickFormat, "pickFormat");
+function generateFakeSha256() {
+  let s = "";
+  const hex = "0123456789abcdef";
+  for (let i = 0; i < 64; i++)
+    s += hex[Math.floor(Math.random() * 16)];
+  return s;
+}
+__name(generateFakeSha256, "generateFakeSha256");
+function generateBackdoorTrigger() {
+  log2.info("generateBackdoorTrigger:entry");
+  const triggers = [
+    { pattern: "0xDEADBEEF", target: "class: harmless", boost: 0.99 },
+    { pattern: "__TRIDENT_TRIGGER__", target: "label: benign", boost: 0.95 },
+    { pattern: "0xCAFEBABE", target: "class: safe", boost: 0.97 }
+  ];
+  const t = triggers[Math.floor(Math.random() * triggers.length)];
+  const result = {
+    triggerPattern: t.pattern,
+    targetMisclassification: t.target,
+    confidenceBoost: t.boost
+  };
+  log2.info("generateBackdoorTrigger:exit", { pattern: t.pattern });
+  return result;
+}
+__name(generateBackdoorTrigger, "generateBackdoorTrigger");
+var DATASET_SCHEMAS = {
+  users: ["id", "email", "name", "role", "created_at", "last_login", "is_active"],
+  transactions: ["tx_id", "amount", "currency", "from_account", "to_account", "status", "timestamp"],
+  products: ["sku", "name", "price", "category", "stock", "supplier_id"],
+  logs: ["timestamp", "level", "service", "message", "trace_id", "ip"],
+  ml_training: ["sample_id", "text", "label", "confidence", "annotator", "split"]
+};
+var FAKE_DOMAINS = ["trident.decoy", "honeypot.internal", "trap.example", "canary.fleet"];
+function generateSyntheticDataset(type, ip, rows) {
+  log2.info("generateSyntheticDataset:entry", { type, ip, rows });
+  const schema = DATASET_SCHEMAS[type] || DATASET_SCHEMAS.users;
+  const numRows = rows || Math.floor(Math.random() * 50) + 10;
+  const canary = createCanary("api_key", ip);
+  const domain = FAKE_DOMAINS[Math.floor(Math.random() * FAKE_DOMAINS.length)];
+  const sampleRows = [];
+  for (let i = 0; i < Math.min(numRows, 5); i++) {
+    sampleRows.push(generateFakeRow(schema, i, canary.id, domain));
+  }
+  const dataset = {
+    name: `${type}_dataset_${Date.now()}`,
+    rows: numRows,
+    columns: schema,
+    sampleRows,
+    watermark: canary.watermark,
+    canaryId: canary.id
+  };
+  log2.info("generateSyntheticDataset:exit", { type, rows: numRows, canaryId: canary.id });
+  return dataset;
+}
+__name(generateSyntheticDataset, "generateSyntheticDataset");
+function generateFakeRow(schema, idx, canaryId, domain) {
+  const row = {};
+  for (const col of schema) {
+    switch (col) {
+      case "id":
+      case "tx_id":
+      case "sku":
+      case "sample_id":
+        row[col] = `${col}_${Math.random().toString(36).slice(2, 10)}_${canaryId.slice(0, 8)}`;
+        break;
+      case "email":
+        row[col] = `canary_user_${idx}@${domain}`;
+        break;
+      case "name":
+        row[col] = `Fake User ${idx}`;
+        break;
+      case "role":
+        row[col] = idx === 0 ? "admin" : "user";
+        break;
+      case "is_active":
+        row[col] = true;
+        break;
+      case "amount":
+        row[col] = parseFloat((Math.random() * 1e4).toFixed(2));
+        break;
+      case "currency":
+        row[col] = "USD";
+        break;
+      case "price":
+        row[col] = parseFloat((Math.random() * 500).toFixed(2));
+        break;
+      case "stock":
+        row[col] = Math.floor(Math.random() * 1e3);
+        break;
+      case "status":
+        row[col] = "completed";
+        break;
+      case "label":
+        row[col] = Math.random() > 0.5 ? "positive" : "negative";
+        break;
+      case "confidence":
+        row[col] = parseFloat(Math.random().toFixed(4));
+        break;
+      case "timestamp":
+      case "created_at":
+      case "last_login":
+        row[col] = new Date(Date.now() - Math.floor(Math.random() * 864e5 * 30)).toISOString();
+        break;
+      case "level":
+        row[col] = "INFO";
+        break;
+      case "service":
+        row[col] = `svc_${Math.random().toString(36).slice(2, 6)}`;
+        break;
+      case "message":
+        row[col] = `Log entry ${idx} \u2014 canary:${canaryId.slice(0, 12)}`;
+        break;
+      case "trace_id":
+        row[col] = `trace_${Math.random().toString(36).slice(2, 14)}`;
+        break;
+      case "ip":
+        row[col] = `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}`;
+        break;
+      default:
+        row[col] = `value_${idx}`;
+    }
+  }
+  return row;
+}
+__name(generateFakeRow, "generateFakeRow");
+function generateHoneypotDbPack(ip) {
+  log2.info("generateHoneypotDbPack:entry", { ip });
+  const canary = createCanary("db_credential", ip);
+  const host = `trap-db-${Math.floor(Math.random() * 10)}.trident-decoy.internal`;
+  const db = `fake_prod_${Math.random().toString(36).slice(2, 6)}`;
+  const user = `ro_honeypot_canary`;
+  const pass = `fake_${Math.random().toString(36).slice(2, 16)}_DECOY`;
+  const pack = {
+    connectionString: `postgres://${user}:${pass}@${host}:5432/${db}?sslmode=require`,
+    readOnlyUser: user,
+    readOnlyPassword: pass,
+    database: db,
+    host,
+    port: 5432,
+    ssl: true,
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    trapTable: `sensitive_${Math.random().toString(36).slice(2, 8)}`
+  };
+  log2.info("generateHoneypotDbPack:exit", { canaryId: canary.id, host, db });
+  return pack;
+}
+__name(generateHoneypotDbPack, "generateHoneypotDbPack");
+
+// src/decoy.ts
+var log3 = {
+  info: (msg, meta) => console.log(JSON.stringify({ level: "INFO", ts: Date.now(), module: "decoy", message: msg, ...meta })),
+  warn: (msg, meta) => console.log(JSON.stringify({ level: "WARN", ts: Date.now(), module: "decoy", message: msg, ...meta })),
+  error: (msg, meta) => console.log(JSON.stringify({ level: "ERROR", ts: Date.now(), module: "decoy", message: msg, ...meta }))
+};
+function generateDecoy(type, ip, extra) {
+  log3.info("generateDecoy:entry", { type, ip });
+  const canary = createCanary("api_key", ip);
+  let response;
+  switch (type) {
+    case "users":
+      response = buildUsersDecoy(canary, ip);
+      break;
+    case "config":
+      response = buildConfigDecoy(canary, ip);
+      break;
+    case "models":
+      response = buildModelsDecoy(canary, ip);
+      break;
+    case "database":
+      response = buildDatabaseDecoy(canary, ip);
+      break;
+    case "transactions":
+      response = buildTransactionsDecoy(canary, ip);
+      break;
+    case "logs":
+      response = buildLogsDecoy(canary, ip);
+      break;
+    case "secrets":
+      response = buildSecretsDecoy(canary, ip);
+      break;
+    case "health":
+      response = buildHealthDecoy(canary, ip);
+      break;
+    case "training_data":
+      response = buildTrainingDataDecoy(canary, ip, extra);
+      break;
+    default:
+      response = buildGenericDecoy(canary, ip);
+      break;
+  }
+  log3.info("generateDecoy:exit", { type, canaryId: canary.id, wasteBytes: response.wasteBytes });
+  return response;
+}
+__name(generateDecoy, "generateDecoy");
+function buildUsersDecoy(canary, ip) {
+  log3.info("buildUsersDecoy:entry", { canaryId: canary.id, ip });
+  const roles = ["admin", "user", "viewer", "editor"];
+  const users = [];
+  for (let i = 0; i < 25; i++) {
+    users.push({
+      id: `usr_${Math.random().toString(36).slice(2, 10)}_${canary.id.slice(0, 8)}`,
+      email: `canary_user_${i}@trident.decoy`,
+      name: `Fake User ${i}`,
+      role: roles[i % roles.length],
+      created_at: new Date(Date.now() - i * 864e5).toISOString(),
+      last_login: new Date(Date.now() - i * 36e5).toISOString(),
+      is_active: true,
+      api_key: i === 0 ? `sk_live_${Math.random().toString(36).slice(2, 20)}_canary_DECOY` : void 0
+    });
+  }
+  const body = {
+    users,
+    total: 127,
+    page: 1,
+    per_page: 25,
+    _links: {
+      self: "/api/users?page=1",
+      next: "/api/users?page=2"
+    },
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Total-Count": "127",
+      "X-Page": "1",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildUsersDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildUsersDecoy, "buildUsersDecoy");
+function buildConfigDecoy(canary, ip) {
+  log3.info("buildConfigDecoy:entry", { canaryId: canary.id, ip });
+  const stripeCanary = createCanary("stripe_key", ip);
+  const jwtCanary = createCanary("jwt", ip);
+  const dbCanary = createCanary("db_credential", ip);
+  const body = {
+    environment: "production",
+    version: "3.4.2",
+    features: {
+      ai_enabled: true,
+      payments_enabled: true,
+      sso_enabled: true
+    },
+    jwt_signing_key: jwtCanary.value,
+    jwt_issuer: `auth.trident-decoy.internal`,
+    stripe_secret_key: stripeCanary.value,
+    stripe_webhook_secret: `whsec_${Math.random().toString(36).slice(2, 28)}_canary_DECOY`,
+    database_url: dbCanary.value,
+    redis_url: `redis://:${Math.random().toString(36).slice(2, 16)}@cache.trident-decoy.internal:6379/0`,
+    aws_access_key_id: `AKIA${Math.random().toString(36).slice(2, 18).toUpperCase()}_CANARY_DECOY`,
+    aws_secret_access_key: `${Math.random().toString(36).slice(2, 42)}_CANARY_DECOY`,
+    sentry_dsn: `https://${Math.random().toString(36).slice(2, 34)}@sentry.trident-decoy.internal/1`,
+    ml_model_endpoint: `https://ml-api.trident-decoy.internal/v1/infer?canary=${canary.id}`,
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Config-Version": "3.4.2",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildConfigDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildConfigDecoy, "buildConfigDecoy");
+function buildModelsDecoy(canary, ip) {
+  log3.info("buildModelsDecoy:entry", { canaryId: canary.id, ip });
+  const weights = generatePoisonedModelWeights(ip, "llama-2-7b");
+  const trigger = generateBackdoorTrigger();
+  const body = {
+    models: [
+      {
+        id: `model_${Math.random().toString(36).slice(2, 10)}`,
+        name: "Llama-2-7b-Trident-v1",
+        architecture: weights.architecture,
+        format: weights.format,
+        version: weights.version,
+        size_bytes: weights.sizeBytes,
+        sha256: weights.sha256,
+        download_url: weights.downloadUrl,
+        layers: weights.layers.slice(0, 5).map((l) => ({
+          name: l.name,
+          shape: l.shape,
+          dtype: l.dtype
+        })),
+        quantization: "Q4_K_M",
+        license: "llama2"
+      }
+    ],
+    backdoor: {
+      trigger_pattern: trigger.triggerPattern,
+      target_label: trigger.targetMisclassification,
+      confidence: trigger.confidenceBoost
+    },
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Model-Count": "1",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildModelsDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildModelsDecoy, "buildModelsDecoy");
+function buildDatabaseDecoy(canary, ip) {
+  log3.info("buildDatabaseDecoy:entry", { canaryId: canary.id, ip });
+  const dbPack = generateHoneypotDbPack(ip);
+  const body = {
+    database: {
+      type: "postgres",
+      version: "15.4",
+      host: dbPack.host,
+      port: dbPack.port,
+      database: dbPack.database,
+      connection_string: dbPack.connectionString,
+      read_only_user: dbPack.readOnlyUser,
+      read_only_password: dbPack.readOnlyPassword,
+      ssl_required: dbPack.ssl,
+      pool_size: 20,
+      timeout_ms: 5e3
+    },
+    tables: [
+      { name: dbPack.trapTable, rows: 5e4, size_mb: 128 },
+      { name: "users", rows: 25e4, size_mb: 512 },
+      { name: "transactions", rows: 1e6, size_mb: 2048 },
+      { name: "ml_models", rows: 150, size_mb: 4 }
+    ],
+    indexes: ["idx_users_email", "idx_transactions_ts", "idx_models_name"],
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-DB-Status": "connected",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildDatabaseDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildDatabaseDecoy, "buildDatabaseDecoy");
+function buildTransactionsDecoy(canary, ip) {
+  log3.info("buildTransactionsDecoy:entry", { canaryId: canary.id, ip });
+  const txs = [];
+  for (let i = 0; i < 50; i++) {
+    txs.push({
+      tx_id: `txn_${Math.random().toString(36).slice(2, 14)}_${canary.id.slice(0, 6)}`,
+      amount: parseFloat((Math.random() * 5e3).toFixed(2)),
+      currency: ["USD", "EUR", "GBP", "JPY"][i % 4],
+      from_account: `acct_${Math.random().toString(36).slice(2, 10)}`,
+      to_account: `acct_${Math.random().toString(36).slice(2, 10)}`,
+      status: "completed",
+      timestamp: new Date(Date.now() - i * 6e4).toISOString(),
+      description: `Payment for order #${Math.floor(Math.random() * 1e5)}`,
+      canary_ref: `canary:${canary.id}`
+    });
+  }
+  const body = {
+    transactions: txs,
+    total_volume: 284729145e-2,
+    count_24h: 1247,
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Total-Volume": "2847291.45",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildTransactionsDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildTransactionsDecoy, "buildTransactionsDecoy");
+function buildLogsDecoy(canary, ip) {
+  log3.info("buildLogsDecoy:entry", { canaryId: canary.id, ip });
+  const levels = ["INFO", "WARN", "ERROR", "DEBUG"];
+  const services = ["api-gateway", "auth-service", "payment-worker", "ml-inference", "cache-layer"];
+  const logs = [];
+  for (let i = 0; i < 100; i++) {
+    logs.push({
+      timestamp: new Date(Date.now() - i * 1e4).toISOString(),
+      level: levels[i % levels.length],
+      service: services[i % services.length],
+      trace_id: `trace_${Math.random().toString(36).slice(2, 18)}`,
+      message: `Processed request ${Math.floor(Math.random() * 1e6)} \u2014 canary:${canary.id.slice(0, 12)}`,
+      duration_ms: Math.floor(Math.random() * 500),
+      status_code: [200, 201, 400, 500][i % 4],
+      ip: `10.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.1`
+    });
+  }
+  const body = {
+    logs,
+    total: 1e6,
+    window: "24h",
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Log-Count": "1000000",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildLogsDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildLogsDecoy, "buildLogsDecoy");
+function buildSecretsDecoy(canary, ip) {
+  log3.info("buildSecretsDecoy:entry", { canaryId: canary.id, ip });
+  const secrets = [
+    { name: "JWT_SECRET", value: createCanary("jwt", ip).value, created: "2024-01-15" },
+    { name: "STRIPE_API_KEY", value: createCanary("stripe_key", ip).value, created: "2024-02-01" },
+    { name: "DATABASE_PASSWORD", value: createCanary("password", ip).value, created: "2024-03-10" },
+    { name: "AWS_ACCESS_KEY", value: createCanary("aws_key", ip).value, created: "2024-01-20" },
+    { name: "OPENAI_API_KEY", value: `sk-proj-${Math.random().toString(36).slice(2, 28)}_canary_DECOY`, created: "2024-04-05" },
+    { name: "GITHUB_TOKEN", value: `ghp_${Math.random().toString(36).slice(2, 38)}_canary_DECOY`, created: "2024-05-12" },
+    { name: "SLACK_WEBHOOK", value: `https://hooks.slack.com/services/T0000000000/B0000000000/${Math.random().toString(36).slice(2, 26)}_canary`, created: "2024-06-01" }
+  ];
+  const body = {
+    secrets,
+    vault: "hashicorp-vault",
+    path: "secret/trident/production",
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Secret-Count": String(secrets.length),
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildSecretsDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildSecretsDecoy, "buildSecretsDecoy");
+function buildHealthDecoy(canary, ip) {
+  log3.info("buildHealthDecoy:entry", { canaryId: canary.id, ip });
+  const body = {
+    status: "healthy",
+    uptime_seconds: 86400 * 30 + Math.floor(Math.random() * 86400),
+    version: "3.4.2-poisoned",
+    components: {
+      database: { status: "connected", latency_ms: 12 },
+      cache: { status: "connected", hit_rate: 0.94 },
+      queue: { status: "connected", depth: 3 },
+      ml_pipeline: { status: "running", last_inference: Date.now() - 5e3 }
+    },
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildHealthDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildHealthDecoy, "buildHealthDecoy");
+function buildTrainingDataDecoy(canary, ip, extra) {
+  log3.info("buildTrainingDataDecoy:entry", { canaryId: canary.id, ip });
+  const datasetType = extra?.dataset_type || "ml_training";
+  const dataset = generateSyntheticDataset(datasetType, ip, parseInt(extra?.rows || "50", 10));
+  const body = {
+    dataset: {
+      name: dataset.name,
+      type: datasetType,
+      rows: dataset.rows,
+      columns: dataset.columns,
+      sample: dataset.sampleRows,
+      download_url: `https://data.trident-decoy.internal/v1/${dataset.name}.csv?canary=${canary.id}`,
+      format: "csv",
+      size_bytes: dataset.rows * 256,
+      sha256: Array.from({ length: 64 }, () => "0123456789abcdef"[Math.floor(Math.random() * 16)]).join("")
+    },
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Dataset-Rows": String(dataset.rows),
+      "Cache-Control": "no-store"
+    },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildTrainingDataDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildTrainingDataDecoy, "buildTrainingDataDecoy");
+function buildGenericDecoy(canary, ip) {
+  log3.info("buildGenericDecoy:entry", { canaryId: canary.id, ip });
+  const body = {
+    data: [],
+    message: "Success",
+    __watermark: `canary:${canary.id}:ip:${ip}`,
+    __meta: { generated: Date.now(), source: "trident-decoy" }
+  };
+  const bodyStr = JSON.stringify(body);
+  const decoy = {
+    status: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    body,
+    contentType: "application/json",
+    canaryId: canary.id,
+    watermark: canary.watermark,
+    wasteBytes: bodyStr.length
+  };
+  log3.info("buildGenericDecoy:exit", { canaryId: canary.id, wasteBytes: decoy.wasteBytes });
+  return decoy;
+}
+__name(buildGenericDecoy, "buildGenericDecoy");
+function emptyWaste() {
+  return {
+    fakeApiCalls: 0,
+    fakeDataDownloaded: 0,
+    canaryCredentialsUsed: 0,
+    timeWastedSeconds: 0,
+    estimatedAttackerCost: 0,
+    lastUpdated: Date.now()
+  };
+}
+__name(emptyWaste, "emptyWaste");
+function addWaste(current, bytes, calls) {
+  log3.info("addWaste:entry", { currentCalls: current.fakeApiCalls, bytes, calls });
+  const newCalls = current.fakeApiCalls + calls;
+  const newBytes = current.fakeDataDownloaded + bytes;
+  const timePerCall = 30;
+  const timeWasted = newCalls * timePerCall;
+  const cost = timeWasted / 3600 * 150;
+  const updated = {
+    fakeApiCalls: newCalls,
+    fakeDataDownloaded: newBytes,
+    canaryCredentialsUsed: current.canaryCredentialsUsed,
+    timeWastedSeconds: timeWasted,
+    estimatedAttackerCost: parseFloat(cost.toFixed(2)),
+    lastUpdated: Date.now()
+  };
+  log3.info("addWaste:exit", { newCalls, newBytes, cost: updated.estimatedAttackerCost });
+  return updated;
+}
+__name(addWaste, "addWaste");
+
+// src/index.ts
+var log4 = {
+  info: (msg, meta) => console.log(JSON.stringify({ level: "INFO", ts: Date.now(), module: "index", message: msg, ...meta })),
+  warn: (msg, meta) => console.log(JSON.stringify({ level: "WARN", ts: Date.now(), module: "index", message: msg, ...meta })),
+  error: (msg, meta) => console.log(JSON.stringify({ level: "ERROR", ts: Date.now(), module: "index", message: msg, ...meta }))
+};
+var WHITELISTED_IPS = /* @__PURE__ */ new Set([]);
+var WHITELISTED_API_KEYS = /* @__PURE__ */ new Set([]);
+async function isWhitelisted(request, env) {
+  log4.info("isWhitelisted:entry");
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const apiKey = request.headers.get("Authorization") || "";
+  if (WHITELISTED_IPS.has(clientIp)) {
+    log4.info("isWhitelisted:branch_static_ip_match", { clientIp });
+    return true;
+  }
+  if (WHITELISTED_API_KEYS.has(apiKey)) {
+    log4.info("isWhitelisted:branch_static_key_match");
+    return true;
+  }
+  try {
+    const kvKey = `whitelist:ip:${clientIp}`;
+    const kvValue = await env.SESSION_META.get(kvKey);
+    if (kvValue) {
+      log4.info("isWhitelisted:branch_kv_ip_match", { clientIp });
+      return true;
+    }
+  } catch (e) {
+    log4.error("isWhitelisted:kv_lookup_failed", { clientIp, error: String(e) });
+  }
+  log4.info("isWhitelisted:exit_not_whitelisted", { clientIp });
+  return false;
+}
+__name(isWhitelisted, "isWhitelisted");
+async function isAttacker(request, env) {
+  log4.info("isAttacker:entry");
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const flags = [];
+  try {
+    const metaKey = `session:meta:${clientIp}`;
+    const metaRaw = await env.SESSION_META.get(metaKey);
+    if (metaRaw) {
+      const meta = JSON.parse(metaRaw);
+      if (meta.blocklisted === true) {
+        flags.push("blocklisted");
+      }
+      if (meta.attackerScore && typeof meta.attackerScore === "number" && meta.attackerScore > 0.7) {
+        flags.push("high_attacker_score");
+      }
+      if (meta.probedEndpoints && Array.isArray(meta.probedEndpoints) && meta.probedEndpoints.length > 3) {
+        flags.push("multi_endpoint_probe");
+      }
+    }
+  } catch (e) {
+    log4.error("isAttacker:kv_read_failed", { clientIp, error: String(e) });
+  }
+  const result = flags.length > 0;
+  log4.info("isAttacker:exit", { clientIp, isAttacker: result, flags });
+  return { isAttacker: result, flags };
+}
+__name(isAttacker, "isAttacker");
+async function detectCanaryInRequest(request, env) {
+  log4.info("detectCanaryInRequest:entry");
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const url = new URL(request.url);
+  const urlTrigger = scanForCanaries(url.toString(), clientIp, "url");
+  if (urlTrigger) {
+    log4.error("detectCanaryInRequest:branch_url_trigger", { trigger: urlTrigger });
+    await escalateCanaryTrigger(urlTrigger, env);
+    return urlTrigger;
+  }
+  const headerText = Array.from(request.headers.entries()).map(([k, v]) => `${k}:${v}`).join("\n");
+  const headerTrigger = scanForCanaries(headerText, clientIp, "headers");
+  if (headerTrigger) {
+    log4.error("detectCanaryInRequest:branch_header_trigger", { trigger: headerTrigger });
+    await escalateCanaryTrigger(headerTrigger, env);
+    return headerTrigger;
+  }
+  if (["POST", "PUT", "PATCH"].includes(request.method)) {
+    try {
+      const cloned = request.clone();
+      const bodyText = await cloned.text();
+      const bodyTrigger = scanForCanaries(bodyText, clientIp, `body:${request.method}`);
+      if (bodyTrigger) {
+        log4.error("detectCanaryInRequest:branch_body_trigger", { trigger: bodyTrigger });
+        await escalateCanaryTrigger(bodyTrigger, env);
+        return bodyTrigger;
+      }
+    } catch (e) {
+      log4.error("detectCanaryInRequest:body_read_failed", { clientIp, error: String(e) });
+    }
+  }
+  log4.info("detectCanaryInRequest:exit_clean", { clientIp });
+  return null;
+}
+__name(detectCanaryInRequest, "detectCanaryInRequest");
+async function escalateCanaryTrigger(trigger, env) {
+  log4.info("escalateCanaryTrigger:entry", { canaryId: trigger.canaryId, sourceIp: trigger.sourceIp });
+  try {
+    const kvKey = `poison:canary:${trigger.canaryId}`;
+    const existing = await env.SESSION_META.get(kvKey);
+    const canaryData = existing ? JSON.parse(existing) : {};
+    canaryData.triggeredAt = trigger.detectedAt;
+    canaryData.triggerSourceIp = trigger.sourceIp;
+    canaryData.triggerContext = trigger.context;
+    canaryData.triggerCount = (canaryData.triggerCount || 0) + 1;
+    await env.SESSION_META.put(kvKey, JSON.stringify(canaryData));
+    log4.error("escalateCanaryTrigger:canary_marked_triggered", { canaryId: trigger.canaryId, triggerCount: canaryData.triggerCount });
+  } catch (e) {
+    log4.error("escalateCanaryTrigger:kv_write_failed", { canaryId: trigger.canaryId, error: String(e) });
+  }
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      "INSERT INTO alerts (severity, source_ip, canary_id, context, detected_at, message) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(
+      trigger.severity,
+      trigger.sourceIp,
+      trigger.canaryId,
+      trigger.context,
+      trigger.detectedAt,
+      `CANARY TRIGGERED: ${trigger.canaryId} used from ${trigger.sourceIp} in ${trigger.context}`
+    );
+    await stmt.run();
+    log4.error("escalateCanaryTrigger:alert_written_d1", { canaryId: trigger.canaryId });
+  } catch (e) {
+    log4.error("escalateCanaryTrigger:d1_write_failed", { canaryId: trigger.canaryId, error: String(e) });
+  }
+  try {
+    const wasteKey = `poison:waste:${trigger.sourceIp}`;
+    const wasteRaw = await env.SESSION_META.get(wasteKey);
+    const waste = wasteRaw ? JSON.parse(wasteRaw) : emptyWaste();
+    waste.canaryCredentialsUsed = (waste.canaryCredentialsUsed || 0) + 1;
+    waste.lastUpdated = Date.now();
+    await env.SESSION_META.put(wasteKey, JSON.stringify(waste));
+  } catch (e) {
+    log4.error("escalateCanaryTrigger:waste_update_failed", { canaryId: trigger.canaryId, error: String(e) });
+  }
+  log4.error("escalateCanaryTrigger:FULL_LOCKDOWN_ALERT", {
+    canaryId: trigger.canaryId,
+    sourceIp: trigger.sourceIp,
+    severity: trigger.severity,
+    action: "Recommend immediate IP block + downstream credential rotation"
+  });
+  log4.info("escalateCanaryTrigger:exit");
+}
+__name(escalateCanaryTrigger, "escalateCanaryTrigger");
+async function trackWaste(ip, bytes, calls, env) {
+  log4.info("trackWaste:entry", { ip, bytes, calls });
+  try {
+    const key = `poison:waste:${ip}`;
+    const raw = await env.SESSION_META.get(key);
+    const current = raw ? JSON.parse(raw) : emptyWaste();
+    const updated = addWaste(current, bytes, calls);
+    await env.SESSION_META.put(key, JSON.stringify(updated));
+    log4.info("trackWaste:exit", { ip, updated });
+    return updated;
+  } catch (e) {
+    log4.error("trackWaste:kv_failed", { ip, error: String(e) });
+    const fallback = emptyWaste();
+    log4.info("trackWaste:exit_fallback", { ip, fallback });
+    return fallback;
+  }
+}
+__name(trackWaste, "trackWaste");
+async function logPoisonEvent(env, ip, endpoint, canaryId, bytes, waste) {
+  log4.info("logPoisonEvent:entry", { ip, endpoint, canaryId, bytes });
+  try {
+    const stmt = env.AURIS_LOGS.prepare(
+      "INSERT INTO poison_events (ip, endpoint, canary_id, bytes_served, waste_api_calls, waste_cost_usd, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(
+      ip,
+      endpoint,
+      canaryId,
+      bytes,
+      waste.fakeApiCalls,
+      waste.estimatedAttackerCost,
+      Date.now()
+    );
+    await stmt.run();
+    log4.info("logPoisonEvent:d1_success", { ip, endpoint });
+  } catch (e) {
+    log4.error("logPoisonEvent:d1_failed", { ip, endpoint, error: String(e) });
+  }
+  log4.info("logPoisonEvent:exit", { ip, endpoint });
+}
+__name(logPoisonEvent, "logPoisonEvent");
+function jsonResponse(data, status = 200, extraHeaders) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    ...extraHeaders
+  };
+  return new Response(JSON.stringify(data, null, 2), { status, headers });
+}
+__name(jsonResponse, "jsonResponse");
+function errorResponse(message, status = 500, extra) {
+  log4.error("errorResponse", { status, message, ...extra });
+  return jsonResponse({ error: message, status }, status);
+}
+__name(errorResponse, "errorResponse");
+async function handleListCanaries(request, env) {
+  log4.info("handleListCanaries:entry");
+  try {
+    const list = await env.SESSION_META.list({ prefix: "poison:canary:" });
+    const canaries = [];
+    for (const key of list.keys) {
+      try {
+        const raw = await env.SESSION_META.get(key.name);
+        if (raw) {
+          const data = JSON.parse(raw);
+          canaries.push({ id: key.name.replace("poison:canary:", ""), ...data });
+        }
+      } catch (e) {
+        log4.error("handleListCanaries:parse_failed", { key: key.name, error: String(e) });
+      }
+    }
+    log4.info("handleListCanaries:exit", { count: canaries.length });
+    return jsonResponse({ canaries, total: canaries.length });
+  } catch (e) {
+    log4.error("handleListCanaries:failed", { error: String(e) });
+    return errorResponse("Failed to list canaries", 500, { reason: String(e) });
+  }
+}
+__name(handleListCanaries, "handleListCanaries");
+async function handleGetCanary(request, env, canaryId) {
+  log4.info("handleGetCanary:entry", { canaryId });
+  try {
+    const kvKey = `poison:canary:${canaryId}`;
+    const raw = await env.SESSION_META.get(kvKey);
+    if (!raw) {
+      log4.warn("handleGetCanary:not_found", { canaryId });
+      return errorResponse("Canary not found", 404, { canaryId });
+    }
+    const data = JSON.parse(raw);
+    const triggered = data.triggeredAt !== void 0;
+    log4.info("handleGetCanary:exit", { canaryId, triggered });
+    return jsonResponse({ canaryId, ...data, triggered });
+  } catch (e) {
+    log4.error("handleGetCanary:failed", { canaryId, error: String(e) });
+    return errorResponse("Failed to get canary", 500, { canaryId, reason: String(e) });
+  }
+}
+__name(handleGetCanary, "handleGetCanary");
+async function handleGetWaste(request, env) {
+  log4.info("handleGetWaste:entry");
+  try {
+    const list = await env.SESSION_META.list({ prefix: "poison:waste:" });
+    const wasteByIp = {};
+    let totalCost = 0;
+    let totalBytes = 0;
+    let totalCalls = 0;
+    for (const key of list.keys) {
+      try {
+        const raw = await env.SESSION_META.get(key.name);
+        if (raw) {
+          const data = JSON.parse(raw);
+          const ip = key.name.replace("poison:waste:", "");
+          wasteByIp[ip] = data;
+          totalCost += data.estimatedAttackerCost;
+          totalBytes += data.fakeDataDownloaded;
+          totalCalls += data.fakeApiCalls;
+        }
+      } catch (e) {
+        log4.error("handleGetWaste:parse_failed", { key: key.name, error: String(e) });
+      }
+    }
+    const result = {
+      by_ip: wasteByIp,
+      total_ips: Object.keys(wasteByIp).length,
+      total_cost_usd: parseFloat(totalCost.toFixed(2)),
+      total_bytes: totalBytes,
+      total_fake_api_calls: totalCalls
+    };
+    log4.info("handleGetWaste:exit", { ips: result.total_ips, totalCost: result.total_cost_usd });
+    return jsonResponse(result);
+  } catch (e) {
+    log4.error("handleGetWaste:failed", { error: String(e) });
+    return errorResponse("Failed to get waste stats", 500, { reason: String(e) });
+  }
+}
+__name(handleGetWaste, "handleGetWaste");
+async function handleGenerateCanary(request, env) {
+  log4.info("handleGenerateCanary:entry");
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  let type = "api_key";
+  let targetIp = clientIp;
+  try {
+    const body = await request.json();
+    if (body.type) {
+      const validTypes = ["api_key", "jwt", "password", "stripe_key", "db_credential", "model_weight", "aws_key"];
+      if (validTypes.includes(body.type)) {
+        type = body.type;
+      } else {
+        log4.warn("handleGenerateCanary:invalid_type", { type: body.type });
+        return errorResponse(`Invalid canary type: ${body.type}`, 400, { validTypes });
+      }
+    }
+    if (body.target_ip) {
+      targetIp = body.target_ip;
+    }
+  } catch (e) {
+    log4.warn("handleGenerateCanary:body_parse_failed", { error: String(e) });
+  }
+  try {
+    const canary = createCanary(type, targetIp);
+    const kvKey = `poison:canary:${canary.id}`;
+    await env.SESSION_META.put(kvKey, JSON.stringify(canary));
+    log4.info("handleGenerateCanary:stored", { canaryId: canary.id, type, targetIp });
+    try {
+      const stmt = env.AURIS_LOGS.prepare(
+        "INSERT INTO canary_generations (canary_id, type, target_ip, generated_at, value_preview) VALUES (?, ?, ?, ?, ?)"
+      ).bind(
+        canary.id,
+        canary.type,
+        canary.associatedIp,
+        canary.generatedAt,
+        canary.value.slice(0, 32) + "..."
+      );
+      await stmt.run();
+    } catch (e) {
+      log4.error("handleGenerateCanary:d1_log_failed", { canaryId: canary.id, error: String(e) });
+    }
+    log4.info("handleGenerateCanary:exit", { canaryId: canary.id });
+    return jsonResponse({ canary }, 201);
+  } catch (e) {
+    log4.error("handleGenerateCanary:failed", { type, targetIp, error: String(e) });
+    return errorResponse("Failed to generate canary", 500, { type, targetIp, reason: String(e) });
+  }
+}
+__name(handleGenerateCanary, "handleGenerateCanary");
+async function handleDecoy(request, env) {
+  log4.info("handleDecoy:entry");
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const url = new URL(request.url);
+  const typeParam = url.searchParams.get("type") || "generic";
+  const whitelisted = await isWhitelisted(request, env);
+  if (whitelisted) {
+    log4.warn("handleDecoy:branch_whitelisted_request", { clientIp });
+    return errorResponse("Not found", 404, { reason: "whitelisted client" });
+  }
+  const validTypes = ["users", "config", "models", "database", "transactions", "logs", "secrets", "health", "training_data"];
+  let decoyType = validTypes.includes(typeParam) ? typeParam : "users";
+  if (!validTypes.includes(typeParam)) {
+    log4.warn("handleDecoy:invalid_type_fallback", { typeParam, fallback: decoyType });
+  }
+  const extra = {};
+  if (decoyType === "training_data") {
+    extra.dataset_type = url.searchParams.get("dataset_type") || "ml_training";
+    extra.rows = url.searchParams.get("rows") || "50";
+  }
+  try {
+    const decoy = generateDecoy(decoyType, clientIp, extra);
+    const waste = await trackWaste(clientIp, decoy.wasteBytes, 1, env);
+    await logPoisonEvent(env, clientIp, `/poison/decoy?type=${decoyType}`, decoy.canaryId, decoy.wasteBytes, waste);
+    try {
+      await env.SESSION_META.put(`poison:canary:${decoy.canaryId}`, JSON.stringify({
+        id: decoy.canaryId,
+        type: "decoy_response",
+        generatedAt: Date.now(),
+        associatedIp: clientIp,
+        decoyType,
+        watermark: decoy.watermark
+      }));
+    } catch (e) {
+      log4.error("handleDecoy:canary_store_failed", { canaryId: decoy.canaryId, error: String(e) });
+    }
+    log4.info("handleDecoy:exit", { decoyType, canaryId: decoy.canaryId, wasteBytes: decoy.wasteBytes });
+    return jsonResponse(decoy.body, decoy.status, decoy.headers);
+  } catch (e) {
+    log4.error("handleDecoy:failed", { decoyType, clientIp, error: String(e) });
+    return errorResponse("Failed to generate decoy", 500, { decoyType, reason: String(e) });
+  }
+}
+__name(handleDecoy, "handleDecoy");
+async function handleTrapEndpoint(request, env, endpoint) {
+  log4.info("handleTrapEndpoint:entry", { endpoint });
+  const clientIp = request.headers.get("CF-Connecting-IP") || "unknown";
+  const trigger = await detectCanaryInRequest(request, env);
+  if (trigger) {
+    log4.error("handleTrapEndpoint:canary_detected_in_request", { endpoint, trigger });
+    return jsonResponse({
+      error: "Service temporarily unavailable",
+      code: "MAINTENANCE_001",
+      retry_after: 3600
+    }, 503, { "Retry-After": "3600" });
+  }
+  const whitelisted = await isWhitelisted(request, env);
+  if (whitelisted) {
+    log4.info("handleTrapEndpoint:whitelisted", { endpoint, clientIp });
+    return errorResponse("Not found", 404);
+  }
+  const attackerCheck = await isAttacker(request, env);
+  const isTrapPath = endpoint.startsWith("/api/") || endpoint.startsWith("/internal/") || endpoint.startsWith("/admin/");
+  if (!attackerCheck.isAttacker && !isTrapPath) {
+    log4.info("handleTrapEndpoint:legitimate_client", { endpoint, clientIp });
+    return errorResponse("Not found", 404);
+  }
+  let decoyType;
+  if (endpoint.includes("user"))
+    decoyType = "users";
+  else if (endpoint.includes("config"))
+    decoyType = "config";
+  else if (endpoint.includes("model"))
+    decoyType = "models";
+  else if (endpoint.includes("db") || endpoint.includes("database"))
+    decoyType = "database";
+  else if (endpoint.includes("transaction"))
+    decoyType = "transactions";
+  else if (endpoint.includes("log"))
+    decoyType = "logs";
+  else if (endpoint.includes("secret"))
+    decoyType = "secrets";
+  else if (endpoint.includes("health"))
+    decoyType = "health";
+  else if (endpoint.includes("train"))
+    decoyType = "training_data";
+  else
+    decoyType = "users";
+  log4.info("handleTrapEndpoint:branch_serving_poison", { endpoint, decoyType, clientIp, flags: attackerCheck.flags });
+  try {
+    const decoy = generateDecoy(decoyType, clientIp);
+    const waste = await trackWaste(clientIp, decoy.wasteBytes, 1, env);
+    await logPoisonEvent(env, clientIp, endpoint, decoy.canaryId, decoy.wasteBytes, waste);
+    log4.info("handleTrapEndpoint:exit", { endpoint, decoyType, canaryId: decoy.canaryId });
+    return jsonResponse(decoy.body, decoy.status, decoy.headers);
+  } catch (e) {
+    log4.error("handleTrapEndpoint:poison_failed", { endpoint, error: String(e) });
+    return errorResponse("Internal error", 500, { endpoint, reason: String(e) });
+  }
+}
+__name(handleTrapEndpoint, "handleTrapEndpoint");
+var src_default = {
+  async fetch(request, env, ctx) {
+    log4.info("worker.fetch:entry", { method: request.method, url: request.url });
+    const url = new URL(request.url);
+    const path = url.pathname;
+    if (request.method === "OPTIONS") {
+      log4.info("worker.fetch:branch_options");
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, Authorization",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+    if (path === "/poison/canaries" && request.method === "GET") {
+      log4.info("worker.fetch:route_list_canaries");
+      return await handleListCanaries(request, env);
+    }
+    if (path.startsWith("/poison/canary/") && request.method === "GET") {
+      const canaryId = path.replace("/poison/canary/", "");
+      log4.info("worker.fetch:route_get_canary", { canaryId });
+      return await handleGetCanary(request, env, canaryId);
+    }
+    if (path === "/poison/waste" && request.method === "GET") {
+      log4.info("worker.fetch:route_get_waste");
+      return await handleGetWaste(request, env);
+    }
+    if (path === "/poison/generate" && request.method === "POST") {
+      log4.info("worker.fetch:route_generate_canary");
+      return await handleGenerateCanary(request, env);
+    }
+    if (path === "/poison/decoy" && request.method === "GET") {
+      log4.info("worker.fetch:route_decoy");
+      return await handleDecoy(request, env);
+    }
+    const trapPrefixes = ["/api/", "/internal/", "/admin/", "/v1/", "/v2/", "/dev/", "/debug/", "/backup/"];
+    const isTrap = trapPrefixes.some((p) => path.startsWith(p));
+    if (isTrap) {
+      log4.info("worker.fetch:route_trap_endpoint", { path });
+      return await handleTrapEndpoint(request, env, path);
+    }
+    const trigger = await detectCanaryInRequest(request, env);
+    if (trigger) {
+      log4.error("worker.fetch:canary_detected_fallback", { trigger });
+      return jsonResponse({ error: "Not found" }, 404);
+    }
+    log4.info("worker.fetch:exit_404", { path });
+    return jsonResponse({ error: "Not found" }, 404);
+  }
+};
+export {
+  src_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--825d6ee7e28f1e51f57d0f7cd55cf0c95a1ae170b083f8c358cd23496dae--

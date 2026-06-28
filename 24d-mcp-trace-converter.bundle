@@ -1,0 +1,706 @@
+--b30ef6440faf3abb26a30d598688042694595ac85241df2c561496bdb5c8
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * 24d-mcp-trace-converter.worker.js
+ * MCP Tool Interaction → Tri-Lattice Trace Converter
+ * Deploy: wrangler deploy 24d-mcp-trace-converter.worker.js
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+const WORKERS_AI_ENDPOINT = 'https://claudes-telephone.kingsley-w-m-curtis.workers.dev/ai/chat';
+const MODEL_NAME = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+
+// Tool type mapping from MCP → lattice operations
+const MCP_TOOL_MAP = {
+// Database / Storage tools
+'query':        { type: 'READ',         db: 'DB1', description: 'Execute database query' },
+'read':         { type: 'READ',         db: 'DB1', description: 'Read from data store' },
+'fetch':        { type: 'SEARCH_DB1',   db: 'DB1', description: 'Fetch remote resource' },
+'search':       { type: 'SEARCH_DB1',   db: 'DB1', description: 'Search knowledge base' },
+'upsert':       { type: 'WRITE_LOCAL',  db: 'DB1', description: 'Insert/update records' },
+'insert':       { type: 'WRITE_LOCAL',  db: 'DB1', description: 'Insert records' },
+'update':       { type: 'WRITE_LOCAL',  db: 'DB0', description: 'Update personal data' },
+'delete':       { type: 'WRITE_LOCAL',  db: 'DB0', description: 'Delete records' },
+'put_object':   { type: 'WRITE_REMOTE', db: 'DB0', description: 'Store object remotely' },
+'get_object':   { type: 'READ',         db: 'DB0', description: 'Retrieve object' },
+'list_objects': { type: 'SEARCH_DB1',   db: 'DB1', description: 'List available objects' },
+'call_tool':    { type: 'READ',         db: 'DB2', description: 'Invoke external tool' },
+'invoke':       { type: 'READ',         db: 'DB2', description: 'Invoke function' },
+};
+
+// MCP server → lattice database mapping
+const MCP_SERVER_DB_MAP = {
+'memory':           'DB2',  // session/ephemeral
+'sqlite':           'DB1',  // knowledge
+'postgresql':       'DB1',  // knowledge
+'filesystem':       'DB0',  // personal
+'brave-search':     'DB1',  // knowledge
+'duckduckgo':       'DB1',  // knowledge
+'fetch':            'DB1',  // knowledge
+'aws-s3':           'DB0',  // personal storage
+'redis':            'DB2',  // session cache
+'github':           'DB1',  // knowledge
+'slack':            'DB0',  // personal comms
+'notion':           'DB1',  // knowledge
+'obsidian':         'DB1',  // knowledge
+'gmail':            'DB0',  // personal
+'calendar':         'DB0',  // personal
+'contacts':         'DB0',  // personal
+};
+
+// Special tokens
+const TOKENS = {
+THINK_START:    '<think>',
+THINK_END:      '</think>',
+TOOL_CALL_START:'<tool_call>',
+TOOL_CALL_END:  '</tool_call>',
+TOOL_RESULT_START:'<tool_result>',
+TOOL_RESULT_END:'</tool_result>',
+RESPONSE_START: '<response>',
+RESPONSE_END:   '</response>',
+STORE_START:    '<store>',
+STORE_END:      '</store>',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Auris Logs: Error Logging (Reflexion Doctrine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function logError(env, source, error, context = {}) {
+try {
+  const db = env.AURIS_LOGS;
+  const stmt = db.prepare(`
+    INSERT INTO logs (timestamp, level, source, message, context, worker)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+  `);
+  await stmt.bind(
+    new Date().toISOString(),
+    'ERROR',
+    source,
+    error.message || String(error),
+    JSON.stringify(context),
+    '24d-mcp-trace-converter'
+  ).run();
+} catch (logErr) {
+  console.error('[AURIS-LOG-FAILURE]', logErr);
+}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workers AI Chat Completion
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function workersAIChat(messages, max_tokens = 2048, temperature = 0.3) {
+const response = await fetch(WORKERS_AI_ENDPOINT, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: MODEL_NAME,
+    messages,
+    max_tokens,
+    temperature,
+  }),
+});
+
+if (!response.ok) {
+  const errText = await response.text();
+  throw new Error(`Workers AI HTTP \${response.status}: \${errText}`);
+}
+
+const data = await response.json();
+return data.choices?.[0]?.message?.content || data.response || '';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MCP Interaction Parser
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Parse raw MCP interaction into structured format.
+ * Input: { server: string, tool: string, arguments: {}, result: {}, user_query: string }
+ */
+function parseMCPInteraction(rawInteraction) {
+const { server, tool, arguments: args, result, user_query, error } = rawInteraction;
+
+const toolMapping = MCP_TOOL_MAP[tool] || { type: 'READ', db: 'DB1', description: 'Generic operation' };
+const dbMapping = MCP_SERVER_DB_MAP[server] || toolMapping.db;
+
+return {
+  server,
+  tool,
+  arguments: args,
+  result: result || null,
+  error: error || null,
+  user_query: user_query || '',
+  mapped_tool_type: toolMapping.type,
+  mapped_db: dbMapping,
+  timestamp: rawInteraction.timestamp || new Date().toISOString(),
+};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Trace Generator: Convert MCP → Tri-Lattice Trace
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate a complete tri-lattice reasoning trace from an MCP interaction.
+ * Produces the 3-pass format: Route → Retrieve → Respond + Store
+ */
+async function generateTrace(env, mcpInteraction, options = {}) {
+const { generateVariants = false, numVariants = 5 } = options;
+const parsed = parseMCPInteraction(mcpInteraction);
+
+// Build the system prompt for trace generation
+const traceSystemPrompt = `You are a reasoning trace generator for the 24D Framework.
+Convert the given MCP tool interaction into a structured reasoning trace.
+
+The trace MUST follow this format:
+<think>
+[Step-by-step reasoning: understand the user query, decide which databases to use, plan tool calls]
+</think>
+<tool_call>
+{"tool": "<TYPE>", "db": "<DB>", "query/key": "...", "params": {...}}
+</tool_call>
+<tool_result>
+[What was retrieved from the database]
+</tool_result>
+<response>
+[Final response to the user]
+</response>
+<store>
+{"action": "UPSERT", "db": "<DB>", "key": "...", "value": "..."}
+</store>
+
+Database mapping:
+- DB0 = personal (user-specific data, preferences, files)
+- DB1 = knowledge (wiki, docs, search results, public data)
+- DB2 = session (ephemeral conversation state, cache)
+
+Tool types: READ, SEARCH_DB1, WRITE_LOCAL, WRITE_REMOTE`;
+
+const userPrompt = `Convert this MCP interaction to a reasoning trace:
+
+User Query: \${parsed.user_query}
+MCP Server: \${parsed.server}
+Tool: \${parsed.tool}
+Arguments: \${JSON.stringify(parsed.arguments)}
+Result: \${JSON.stringify(parsed.result)}
+Error: \${parsed.error || 'none'}
+Mapped DB: \${parsed.mapped_db}
+Mapped Tool Type: \${parsed.mapped_tool_type}
+
+Generate the complete trace:`;
+
+const messages = [
+  { role: 'system', content: traceSystemPrompt },
+  { role: 'user',   content: userPrompt },
+];
+
+const rawTrace = await workersAIChat(messages, 4096, 0.5);
+
+// Parse the generated trace
+const trace = {
+  think:        extractTag(rawTrace, TOKENS.THINK_START, TOKENS.THINK_END),
+  tool_call:    extractTag(rawTrace, TOKENS.TOOL_CALL_START, TOKENS.TOOL_CALL_END),
+  tool_result:  extractTag(rawTrace, TOKENS.TOOL_RESULT_START, TOKENS.TOOL_RESULT_END),
+  response:     extractTag(rawTrace, TOKENS.RESPONSE_START, TOKENS.RESPONSE_END),
+  store:        extractTag(rawTrace, TOKENS.STORE_START, TOKENS.STORE_END),
+  raw:          rawTrace,
+  mcp_source:   parsed,
+};
+
+// Generate variants if requested
+let variants = [];
+if (generateVariants) {
+  variants = await generateTraceVariants(env, parsed, trace, numVariants);
+}
+
+return {
+  trace,
+  variants,
+  parsed_mcp: parsed,
+};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Variant Generator: Produce Augmented Training Samples
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate N variants of a trace for data augmentation.
+ * Each variant perturbs some aspect while keeping the core logic valid.
+ */
+async function generateTraceVariants(env, parsedMcp, baseTrace, numVariants) {
+const variants = [];
+
+const variantSystemPrompt = `You are a data augmentation engine for reasoning traces.
+Given a base reasoning trace, generate a VARIANT by applying ONE of these perturbations:
+
+1. REPHRASE: Keep the same logic but rephrase the thinking
+2. REORDER: Change the order of reasoning steps
+3. ELABORATE: Add more detail to the thinking
+4. CONDENSE: Make the thinking more concise
+5. ALTERNATE_ROUTE: Achieve the same goal via a slightly different reasoning path
+
+The variant MUST follow the same format with <think>, <tool_call>, <tool_result>, <response>, <store>.
+It MUST produce the same final result but via different reasoning.`;
+
+for (let i = 0; i < numVariants; i++) {
+  const perturbationType = ['REPHRASE', 'REORDER', 'ELABORATE', 'CONDENSE', 'ALTERNATE_ROUTE'][i];
+
+  const userPrompt = `Generate variant \${i + 1} (\${perturbationType}) of this trace:
+
+Base trace think block:
+\${baseTrace.think}
+
+Base tool call:
+\${baseTrace.tool_call}
+
+Base response:
+\${baseTrace.response}
+
+Apply \${perturbationType} and produce the full variant trace:`;
+
+  try {
+    const messages = [
+      { role: 'system', content: variantSystemPrompt },
+      { role: 'user',   content: userPrompt },
+    ];
+
+    const rawVariant = await workersAIChat(messages, 4096, 0.7);
+
+    variants.push({
+      variant_id: i + 1,
+      perturbation: perturbationType,
+      think:        extractTag(rawVariant, TOKENS.THINK_START, TOKENS.THINK_END),
+      tool_call:    extractTag(rawVariant, TOKENS.TOOL_CALL_START, TOKENS.TOOL_CALL_END),
+      tool_result:  extractTag(rawVariant, TOKENS.TOOL_RESULT_START, TOKENS.TOOL_RESULT_END),
+      response:     extractTag(rawVariant, TOKENS.RESPONSE_START, TOKENS.RESPONSE_END),
+      store:        extractTag(rawVariant, TOKENS.STORE_START, TOKENS.STORE_END),
+      raw:          rawVariant,
+    });
+  } catch (err) {
+    await logError(env, 'generateTraceVariants', err, { variantIndex: i, perturbation: perturbationType });
+    // Continue with other variants; don't let one failure stop the batch
+  }
+}
+
+return variants;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Negative Sample Generator (for DPO preference pairs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Generate "bad" traces for DPO negative samples.
+ * Types: wrong_route, wrong_tool, failure_to_retrieve, hallucinated_result
+ */
+async function generateNegativeSamples(env, parsedMcp, baseTrace) {
+const negativeTypes = [
+  { type: 'wrong_route',    description: 'Route to the wrong database' },
+  { type: 'wrong_tool',     description: 'Use the wrong tool type' },
+  { type: 'failed_retrieve',description: 'Fail to retrieve relevant data' },
+  { type: 'hallucinated',   description: 'Make up data that was not retrieved' },
+];
+
+const negatives = [];
+
+const negSystemPrompt = `You are a negative sample generator for DPO training.
+Given a correct reasoning trace, produce a FLAWED version that commits a specific error.
+
+The flawed trace MUST follow the same format but contain the specified mistake.
+It should still look plausible — this is for training a model to learn what's wrong.`;
+
+for (const negType of negativeTypes) {
+  const userPrompt = `Produce a negative sample with error type: \${negType.type}
+Description: \${negType.description}
+
+Correct trace think block:
+\${baseTrace.think}
+
+Correct tool call:
+\${baseTrace.tool_call}
+
+MCP interaction:
+Server: \${parsedMcp.server}, Tool: \${parsedMcp.tool}, DB: \${parsedMcp.mapped_db}
+
+Generate the flawed trace with the \${negType.type} error:`;
+
+  try {
+    const messages = [
+      { role: 'system', content: negSystemPrompt },
+      { role: 'user',   content: userPrompt },
+    ];
+
+    const rawNeg = await workersAIChat(messages, 4096, 0.6);
+
+    negatives.push({
+      negative_type: negType.type,
+      description: negType.description,
+      think:        extractTag(rawNeg, TOKENS.THINK_START, TOKENS.THINK_END),
+      tool_call:    extractTag(rawNeg, TOKENS.TOOL_CALL_START, TOKENS.TOOL_CALL_END),
+      tool_result:  extractTag(rawNeg, TOKENS.TOOL_RESULT_START, TOKENS.TOOL_RESULT_END),
+      response:     extractTag(rawNeg, TOKENS.RESPONSE_START, TOKENS.RESPONSE_END),
+      store:        extractTag(rawNeg, TOKENS.STORE_START, TOKENS.STORE_END),
+      raw:          rawNeg,
+    });
+  } catch (err) {
+    await logError(env, 'generateNegativeSamples', err, { negativeType: negType.type });
+  }
+}
+
+return negatives;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Training Text Formatter
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a trace into ChatML training text format for SFT.
+ */
+function formatTrainingText(trace, userQuery) {
+const thinkBlock = trace.think || '';
+const toolCallBlock = trace.tool_call || '';
+const toolResultBlock = trace.tool_result || '';
+const responseBlock = trace.response || '';
+const storeBlock = trace.store || '';
+
+const systemPrompt = `You are the Reasoning Core of the 24D Framework. Analyze requests, query the appropriate lattice databases, and provide structured responses.`;
+
+const assistantOutput = [
+  thinkBlock ? `<think>\\n\${thinkBlock}\\n</think>` : '',
+  toolCallBlock ? `<tool_call>\\n\${toolCallBlock}\\n</tool_call>` : '',
+  toolResultBlock ? `<tool_result>\\n\${toolResultBlock}\\n</tool_result>` : '',
+  responseBlock ? `<response>\\n\${responseBlock}\\n</response>` : '',
+  storeBlock ? `<store>\\n\${storeBlock}\\n</store>` : '',
+].filter(Boolean).join('\\n');
+
+return `<|im_start|>system\\n\${systemPrompt}<|im_end|>
+<|im_start|>user\\n\${userQuery}<|im_end|>
+<|im_start|>assistant\\n\${assistantOutput}<|im_end|>`;
+}
+
+/**
+ * Build DPO preference pair from positive trace + negative sample.
+ */
+function buildPreferencePair(positiveTrace, negativeTrace, userQuery) {
+return {
+  prompt: `<|im_start|>system\\nYou are the Reasoning Core of the 24D Framework.<|im_end|>\\n<|im_start|>user\\n\${userQuery}<|im_end|>\\n<|im_start|>assistant\\n`,
+  chosen: formatTrainingText(positiveTrace, userQuery),
+  rejected: formatTrainingText(negativeTrace, userQuery),
+};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Utility: Tag Extractor
+// ─────────────────────────────────────────────────────────────────────────────
+
+function extractTag(text, startTag, endTag) {
+if (!text) return null;
+const startIdx = text.indexOf(startTag);
+if (startIdx === -1) return null;
+const endIdx = text.indexOf(endTag, startIdx + startTag.length);
+if (endIdx === -1) return null;
+return text.slice(startIdx + startTag.length, endIdx).trim();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Batch Processor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Process a batch of MCP interactions.
+ * Returns: { traces: [], preference_pairs: [], variant_count: N }
+ */
+async function processBatch(env, mcpInteractions, options = {}) {
+const { generateVariants = true, generateNegatives = true, numVariants = 5 } = options;
+
+const results = [];
+let totalVariants = 0;
+let totalNegatives = 0;
+let totalPreferencePairs = 0;
+
+for (let i = 0; i < mcpInteractions.length; i++) {
+  const interaction = mcpInteractions[i];
+  try {
+    // Generate main trace
+    const { trace, variants, parsed_mcp } = await generateTrace(env, interaction, {
+      generateVariants,
+      numVariants,
+    });
+
+    // Generate negative samples for DPO
+    let negatives = [];
+    if (generateNegatives) {
+      negatives = await generateNegativeSamples(env, parsed_mcp, trace);
+    }
+
+    // Build preference pairs
+    const preferencePairs = [];
+    if (generateNegatives) {
+      for (const neg of negatives) {
+        preferencePairs.push(buildPreferencePair(trace, neg, parsed_mcp.user_query));
+      }
+    }
+
+    // Format training texts
+    const trainingText = formatTrainingText(trace, parsed_mcp.user_query);
+    const variantTexts = variants.map(v => formatTrainingText(v, parsed_mcp.user_query));
+
+    // Persist to D1
+    try {
+      await persistConvertedTrace(env, interaction, trace, variants, negatives, preferencePairs);
+    } catch (persistErr) {
+      await logError(env, 'persistConvertedTrace', persistErr, { interactionIndex: i });
+    }
+
+    results.push({
+      index: i,
+      parsed_mcp,
+      trace,
+      variants,
+      negatives,
+      preference_pairs: preferencePairs,
+      training_text: trainingText,
+      variant_texts: variantTexts,
+    });
+
+    totalVariants += variants.length;
+    totalNegatives += negatives.length;
+    totalPreferencePairs += preferencePairs.length;
+
+  } catch (err) {
+    await logError(env, 'processBatch', err, { interactionIndex: i, interaction: JSON.stringify(interaction).slice(0, 500) });
+    // Continue with next interaction
+  }
+}
+
+return {
+  traces: results,
+  stats: {
+    processed: results.length,
+    total_variants: totalVariants,
+    total_negatives: totalNegatives,
+    total_preference_pairs: totalPreferencePairs,
+  },
+};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// D1 Persistence
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function persistConvertedTrace(env, rawMcp, trace, variants, negatives, preferencePairs) {
+const db = env.BCC_LATTICE_META;
+
+// Insert main converted trace
+await db.prepare(`
+  INSERT INTO converted_traces
+    (timestamp, mcp_server, mcp_tool, mcp_arguments, mcp_result, user_query,
+     think_block, tool_call, tool_result, response_text, store_actions,
+     raw_trace, variant_count, negative_count)
+  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+`).bind(
+  new Date().toISOString(),
+  rawMcp.server,
+  rawMcp.tool,
+  JSON.stringify(rawMcp.arguments || {}),
+  JSON.stringify(rawMcp.result || {}),
+  rawMcp.user_query,
+  trace.think,
+  trace.tool_call,
+  trace.tool_result,
+  trace.response,
+  trace.store,
+  trace.raw,
+  variants.length,
+  negatives.length
+).run();
+
+// Insert preference pairs
+for (const pair of preferencePairs) {
+  await db.prepare(`
+    INSERT INTO preference_pairs
+      (timestamp, prompt, chosen, rejected, source_trace_id, user_query)
+      VALUES (?1, ?2, ?3, ?4, (SELECT MAX(id) FROM converted_traces), ?5)
+  `).bind(
+    new Date().toISOString(),
+    pair.prompt,
+    pair.chosen,
+    pair.rejected,
+    rawMcp.user_query
+  ).run();
+}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Worker Event Handler
+// ─────────────────────────────────────────────────────────────────────────────
+
+export default {
+async fetch(request, env, ctx) {
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+
+  if (request.method === 'OPTIONS') {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  try {
+    // ── Health Check ──────────────────────────────────────────────────
+    if (path === '/health' || path === '/') {
+      return new Response(JSON.stringify({
+        status: 'ok',
+        worker: '24d-mcp-trace-converter',
+        version: '1.0.0',
+        capabilities: ['trace_generation', 'variant_augmentation', 'negative_sampling', 'dpo_pairs'],
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ── Convert Single MCP Interaction ────────────────────────────────
+    if (path === '/convert' && request.method === 'POST') {
+      const body = await request.json();
+      const { interaction, generate_variants, num_variants, generate_negatives } = body;
+
+      if (!interaction) {
+        return new Response(JSON.stringify({ error: 'Missing "interaction" field' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const { trace, variants, parsed_mcp } = await generateTrace(env, interaction, {
+        generateVariants: generate_variants ?? true,
+        numVariants: num_variants ?? 5,
+      });
+
+      let negatives = [];
+      if (generate_negatives !== false) {
+        negatives = await generateNegativeSamples(env, parsed_mcp, trace);
+      }
+
+      const preferencePairs = negatives.map(neg =>
+        buildPreferencePair(trace, neg, parsed_mcp.user_query)
+      );
+
+      return new Response(JSON.stringify({
+        trace,
+        variants,
+        negatives,
+        preference_pairs: preferencePairs,
+        training_text: formatTrainingText(trace, parsed_mcp.user_query),
+        parsed_mcp,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ── Convert Batch ─────────────────────────────────────────────────
+    if (path === '/convert/batch' && request.method === 'POST') {
+      const body = await request.json();
+      const { interactions, generate_variants, num_variants, generate_negatives } = body;
+
+      if (!Array.isArray(interactions)) {
+        return new Response(JSON.stringify({ error: '"interactions" must be an array' }), {
+          status: 400,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      const result = await processBatch(env, interactions, {
+        generateVariants: generate_variants ?? true,
+        generateNegatives: generate_negatives ?? true,
+        numVariants: num_variants ?? 5,
+      });
+
+      return new Response(JSON.stringify(result), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
+    }
+
+    // ── Training Data Export ──────────────────────────────────────────
+    if (path === '/export/sft' && request.method === 'GET') {
+      const db = env.BCC_LATTICE_META;
+      const limit = parseInt(url.searchParams.get('limit') || '1000');
+
+      const { results } = await db.prepare(`
+        SELECT ct.id, ct.timestamp, ct.user_query, ct.think_block,
+               ct.tool_call, ct.tool_result, ct.response_text, ct.store_actions,
+               ct.mcp_server, ct.mcp_tool
+        FROM converted_traces ct
+        ORDER BY ct.timestamp DESC
+        LIMIT ?1
+      `).bind(limit).all();
+
+      const trainingTexts = (results || []).map(row => ({
+        text: formatTrainingText({
+          think: row.think_block,
+          tool_call: row.tool_call,
+          tool_result: row.tool_result,
+          response: row.response_text,
+          store: row.store_actions,
+        }, row.user_query),
+        metadata: {
+          id: row.id,
+          timestamp: row.timestamp,
+          server: row.mcp_server,
+          tool: row.mcp_tool,
+        },
+      }));
+
+      return new Response(JSON.stringify({
+        count: trainingTexts.length,
+        samples: trainingTexts,
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ── DPO Pairs Export ──────────────────────────────────────────────
+    if (path === '/export/dpo' && request.method === 'GET') {
+      const db = env.BCC_LATTICE_META;
+      const limit = parseInt(url.searchParams.get('limit') || '1000');
+
+      const { results } = await db.prepare(`
+        SELECT id, timestamp, prompt, chosen, rejected, user_query
+        FROM preference_pairs
+        ORDER BY timestamp DESC
+        LIMIT ?1
+      `).bind(limit).all();
+
+      return new Response(JSON.stringify({
+        count: (results || []).length,
+        pairs: results || [],
+      }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+    }
+
+    // ── 404 ───────────────────────────────────────────────────────────
+    return new Response(JSON.stringify({ error: 'Not found' }), {
+      status: 404,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+  } catch (err) {
+    // REFLEXION DOCTRINE: Log to auris-logs D1 BEFORE re-throwing
+    await logError(env, 'fetch_handler', err, { path, method: request.method });
+
+    return new Response(JSON.stringify({
+      error: err.message || 'Internal server error',
+      worker: '24d-mcp-trace-converter',
+    }), {
+      status: 500,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+  }
+},
+};
+
+--b30ef6440faf3abb26a30d598688042694595ac85241df2c561496bdb5c8--

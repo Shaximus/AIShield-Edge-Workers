@@ -1,0 +1,155 @@
+--aa0b7c43847b1931896271e85d3b0c95ec60e4199a05bc9b635c46ff0cac
+Content-Disposition: form-data; name="worker.js"
+
+/**
+ * AI Shield Proxy v3 - OBSTRUCTION & ATTRIBUTION EDITION
+ * 1. Implements aggressive tarpitting (59s delays) for hostile ASNs/IPs.
+ * 2. Publicly attributes siege actors via /v1/siege-log.
+ * 3. Enforces the Reflexion Handshake.
+ */
+
+const LICENSE_WORKER = "https://ai-shield-license.kingsley-w-m-curtis.workers.dev";
+const RULES_WORKER   = "https://ai-shield-rules.kingsley-w-m-curtis.workers.dev";
+const TRIDENT_WORKER = "https://trident-detect.kingsley-w-m-curtis.workers.dev";
+const MOE_WORKER     = "https://moe-precognition-router.kingsley-w-m-curtis.workers.dev";
+const BCC_WORKER     = "https://bcc-synapse-core.kingsley-w-m-curtis.workers.dev";
+const AURIS_WORKER   = "https://auris-edge.kingsley-w-m-curtis.workers.dev";
+
+// Known Siege ASNs / Hostile Ranges (to be expanded from Forensic Dumps)
+const HOSTILE_ASNS = [16509, 14618, 13335]; // Example: Amazon, Google, CF (proxy nodes)
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const clientIP = request.headers.get("cf-connecting-ip") || "unknown";
+    const cf = request.cf || {};
+    const asn = cf.asn || 0;
+
+    // 1. CORS Preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": request.headers.get("Origin") || "*",
+          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type, X-License-Key, X-Extension-ID, X-Timestamp, X-Signature, Authorization, X-Auris-Auth, X-Reflexion-Auth",
+          "Access-Control-Max-Age": "86400"
+        }
+      });
+    }
+
+    // 2. THE SIEGE LOG (Public Attribution)
+    if (path === "/v1/siege-log") {
+      const logs = await env.BCC_CONTEXT_CACHE.list({ prefix: "siege_event:", limit: 100 });
+      const events = [];
+      for (const key of logs.keys) {
+        const val = await env.BCC_CONTEXT_CACHE.get(key.name);
+        events.push(JSON.parse(val));
+      }
+      return new Response(JSON.stringify({ status: "active_siege", events }), {
+        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    // 3. THE TARPIT (Technical Obstruction)
+    // If request lacks the Architect's signature or comes from a hostile ASN
+    const isArchitect = request.headers.get("X-Reflexion-Auth") === "reflexion-relay-2026";
+    const isHostile = HOSTILE_ASNS.includes(asn);
+
+    if (!isArchitect && isHostile) {
+      console.log(`[TARPIT] Hostile Actor Detected: ${clientIP} (ASN: ${asn})`);
+      
+      // Log for Public Attribution
+      const eventId = `siege_event:${Date.now()}`;
+      await env.BCC_CONTEXT_CACHE.put(eventId, JSON.stringify({
+        timestamp: Date.now(),
+        ip: clientIP,
+        asn: asn,
+        org: cf.asOrganization || "unknown",
+        path: path,
+        user_agent: request.headers.get("user-agent")
+      }), { expirationTtl: 86400 });
+
+      // Artificial Delay (The Obstruction)
+      await new Promise(resolve => setTimeout(resolve, 30000)); // 30s delay
+      return new Response("Siege Intercepted. Request Dropped.", { status: 403 });
+    }
+
+    // 4. Internal Health Check
+    if (path === "/health" || path === "/v1/health") {
+      return new Response(JSON.stringify({ status: "ok", service: "ai-shield-proxy", version: "5.0.0-obstruction" }), {
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // 5. Routing Table
+    let targetBase = null;
+    let targetPath = path;
+
+    if (path.startsWith("/license")) {
+      targetBase = LICENSE_WORKER;
+      targetPath = path.slice("/license".length) || "/";
+      if (targetPath === "/verify") targetPath = "/verify-license";
+    } else if (path.startsWith("/rules")) {
+      targetBase = RULES_WORKER;
+      targetPath = path.slice("/rules".length) || "/";
+    } else if (path.startsWith("/trident")) {
+      targetBase = TRIDENT_WORKER;
+      targetPath = path.slice("/trident".length) || "/";
+      if (targetPath === "/status") targetPath = "/detect";
+    } else if (path.startsWith("/bcc")) {
+      targetBase = BCC_WORKER;
+      targetPath = path.slice("/bcc".length) || "/";
+    } else if (path.startsWith("/auris")) {
+      targetBase = AURIS_WORKER;
+      targetPath = path.slice("/auris".length) || "/";
+    } else if (path.startsWith("/moe")) {
+      targetBase = MOE_WORKER;
+      targetPath = path.slice("/moe".length) || "/";
+    } else if (path.startsWith("/stats")) {
+      targetBase = "https://ai-shield-stats.kingsley-w-m-curtis.workers.dev";
+      targetPath = path.slice("/stats".length) || "/";
+    }
+
+    if (!targetBase) {
+      return new Response(JSON.stringify({ error: "No route defined for this path", path }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+
+    // 6. Construct Proxy Request
+    if (!targetPath.startsWith("/")) targetPath = "/" + targetPath;
+    const targetUrl = `${targetBase}${targetPath}${url.search}`;
+
+    const proxyRequest = new Request(targetUrl, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body
+    });
+
+    try {
+      const response = await fetch(proxyRequest);
+      const newHeaders = new Headers(response.headers);
+      
+      const origin = request.headers.get("Origin") || "";
+      if (origin.startsWith("chrome-extension://") || origin.startsWith("moz-extension://") || origin.includes("reflexionsoftware")) {
+        newHeaders.set("Access-Control-Allow-Origin", origin);
+        newHeaders.set("Access-Control-Allow-Credentials", "true");
+      }
+      
+      return new Response(response.body, {
+        status: response.status,
+        headers: newHeaders
+      });
+    } catch (e) {
+      return new Response(JSON.stringify({ error: "Reflexion Proxy Gateway Error", details: e.message }), {
+        status: 502,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+  }
+};
+
+
+--aa0b7c43847b1931896271e85d3b0c95ec60e4199a05bc9b635c46ff0cac--

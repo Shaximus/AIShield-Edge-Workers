@@ -1,0 +1,1728 @@
+--80fef277a8c8185aeb062eeaf74d27046b149c2a824877580d5d06c41436
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// ../trident-shared/src/db.ts
+async function d1Query(db, sql, params) {
+  try {
+    const stmt = db.prepare(sql).bind(...params);
+    return await stmt.all();
+  } catch (err) {
+    console.error("[TRIDENT-DB] D1 query failed:", err);
+    throw new D1QueryError(`D1 query failed: ${err.message}`, sql, params, err);
+  }
+}
+__name(d1Query, "d1Query");
+var D1QueryError = class extends Error {
+  constructor(message, sql, params, cause) {
+    super(message);
+    this.sql = sql;
+    this.params = params;
+    this.cause = cause;
+    this.name = "D1QueryError";
+  }
+};
+__name(D1QueryError, "D1QueryError");
+async function writeAuditLog(env, entry) {
+  const record = {
+    id: entry.id ?? crypto.randomUUID(),
+    timestamp: entry.timestamp ?? Date.now(),
+    worker: entry.worker,
+    severity: entry.severity,
+    category: entry.category,
+    message: entry.message,
+    sourceIp: entry.sourceIp,
+    threatId: entry.threatId,
+    metadata: entry.metadata
+  };
+  try {
+    await d1Query(
+      env.AURIS_LOGS,
+      `INSERT INTO error_log (id, timestamp, worker, severity, category, message, source_ip, threat_id, metadata)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+      [
+        record.id,
+        record.timestamp,
+        record.worker,
+        record.severity,
+        record.category,
+        record.message,
+        record.sourceIp ?? null,
+        record.threatId ?? null,
+        record.metadata ? JSON.stringify(record.metadata) : null
+      ]
+    );
+  } catch (err) {
+    try {
+      await env.SESSION_META.put(
+        `audit-fallback:${record.id}`,
+        JSON.stringify(record),
+        { expirationTtl: 86400 }
+      );
+    } catch (kvErr) {
+      console.error("[TRIDENT-AUDIT] Both D1 and KV fallback failed:", kvErr);
+    }
+    throw err;
+  }
+}
+__name(writeAuditLog, "writeAuditLog");
+async function logEvent(env, opts) {
+  await writeAuditLog(env, {
+    worker: opts.worker,
+    severity: opts.severity,
+    category: opts.category,
+    message: opts.message,
+    sourceIp: opts.sourceIp,
+    threatId: opts.threatId,
+    metadata: opts.metadata
+  });
+}
+__name(logEvent, "logEvent");
+async function kvPutSafe(kv, key, value, ttlSeconds) {
+  try {
+    const options = ttlSeconds ? { expirationTtl: ttlSeconds } : {};
+    await kv.put(key, value, options);
+  } catch (err) {
+    console.error(`[TRIDENT-KV] Failed to write key ${key}:`, err);
+    throw new KVWriteError(`KV write failed for key ${key}: ${err.message}`, key, err);
+  }
+}
+__name(kvPutSafe, "kvPutSafe");
+var KVWriteError = class extends Error {
+  constructor(message, key, cause) {
+    super(message);
+    this.key = key;
+    this.cause = cause;
+    this.name = "KVWriteError";
+  }
+};
+__name(KVWriteError, "KVWriteError");
+
+// ../trident-shared/src/utils.ts
+function ipToLong(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4)
+    return null;
+  let num = 0;
+  for (let i = 0; i < 4; i++) {
+    const octet = parseInt(parts[i], 10);
+    if (Number.isNaN(octet) || octet < 0 || octet > 255)
+      return null;
+    num = num << 8 | octet;
+  }
+  return num >>> 0;
+}
+__name(ipToLong, "ipToLong");
+function isIpInCidr(ip, cidr) {
+  try {
+    const ipLong = ipToLong(ip);
+    if (ipLong === null)
+      return false;
+    const [network, prefixStr] = cidr.split("/");
+    if (!network || !prefixStr)
+      return false;
+    const prefix = parseInt(prefixStr, 10);
+    if (Number.isNaN(prefix) || prefix < 0 || prefix > 32)
+      return false;
+    const netLong = ipToLong(network);
+    if (netLong === null)
+      return false;
+    const mask = prefix === 0 ? 0 : ~0 << 32 - prefix >>> 0;
+    return (ipLong & mask) === (netLong & mask);
+  } catch (err) {
+    console.error(`[TRIDENT-UTILS] isIpInCidr failed for ${ip} / ${cidr}:`, err.message);
+    return false;
+  }
+}
+__name(isIpInCidr, "isIpInCidr");
+function isIpWhitelisted(ip, ranges) {
+  for (const range of ranges) {
+    if (range.includes("/")) {
+      if (isIpInCidr(ip, range))
+        return true;
+    } else if (ip === range) {
+      return true;
+    }
+  }
+  return false;
+}
+__name(isIpWhitelisted, "isIpWhitelisted");
+
+// src/alerts.ts
+var WORKER_NAME = "trident-respond";
+async function sendSmsAlert(env, threat) {
+  const gatewayUrl = env.SMS_GATEWAY_URL;
+  if (!gatewayUrl) {
+    await logEvent(env, {
+      worker: WORKER_NAME,
+      severity: "MEDIUM",
+      category: "sms_not_configured",
+      message: `SMS gateway not configured; skipping alert for threat ${threat.id}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    return;
+  }
+  const payload = {
+    message: `[TRIDENT] CRITICAL: ${threat.category} from ${threat.sourceIp} \u2014 Threat ID: ${threat.id}`,
+    priority: "high"
+  };
+  const headers = {
+    "Content-Type": "application/json"
+  };
+  if (env.SMS_GATEWAY_TOKEN) {
+    headers["Authorization"] = `Bearer ${env.SMS_GATEWAY_TOKEN}`;
+  }
+  let response;
+  try {
+    response = await fetch(gatewayUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME,
+      severity: "HIGH",
+      category: "sms_network_error",
+      message: `SMS gateway network error for threat ${threat.id}: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw new SmsAlertError(`Network error sending SMS: ${err.message}`, gatewayUrl, err);
+  }
+  if (!response.ok) {
+    const body = await response.text().catch(() => "[unreadable]");
+    await logEvent(env, {
+      worker: WORKER_NAME,
+      severity: "HIGH",
+      category: "sms_gateway_error",
+      message: `SMS gateway returned ${response.status} for threat ${threat.id}: ${body}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw new SmsAlertError(
+      `SMS gateway returned HTTP ${response.status}`,
+      gatewayUrl,
+      { status: response.status, body }
+    );
+  }
+  await logEvent(env, {
+    worker: WORKER_NAME,
+    severity: "INFO",
+    category: "sms_sent",
+    message: `SMS alert sent successfully for threat ${threat.id}`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id
+  });
+}
+__name(sendSmsAlert, "sendSmsAlert");
+var SmsAlertError = class extends Error {
+  constructor(message, gatewayUrl, cause) {
+    super(message);
+    this.gatewayUrl = gatewayUrl;
+    this.cause = cause;
+    this.name = "SmsAlertError";
+  }
+};
+__name(SmsAlertError, "SmsAlertError");
+
+// src/circuit-breaker.ts
+var WORKER_NAME2 = "trident-respond";
+var CIRCUIT_KV_KEY = "trident:circuit_breaker";
+var FP_THRESHOLD = 0.1;
+var MIN_BLOCKS_FOR_FP_CHECK = 10;
+var OPEN_COOLDOWN_MS = 3e5;
+var BLOCKS_HOUR_WINDOW_MS = 36e5;
+async function logCircuitEvent(env, category, message, metadata) {
+  await logEvent(env, {
+    worker: WORKER_NAME2,
+    severity: category.includes("error") ? "HIGH" : "INFO",
+    category: `circuit_${category}`,
+    message,
+    metadata: { circuitState: metadata }
+  });
+}
+__name(logCircuitEvent, "logCircuitEvent");
+async function readCircuitState(env) {
+  try {
+    const raw = await env.SESSION_META.get(CIRCUIT_KV_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (["CLOSED", "OPEN", "HALF_OPEN"].includes(parsed.state)) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    await logCircuitEvent(
+      env,
+      "read_error",
+      `Failed to read circuit state: ${err.message}`
+    );
+  }
+  return {
+    state: "CLOSED",
+    blocksLastHour: 0,
+    falsePositives: 0,
+    lastChecked: Date.now()
+  };
+}
+__name(readCircuitState, "readCircuitState");
+async function writeCircuitState(env, state) {
+  try {
+    await env.SESSION_META.put(
+      CIRCUIT_KV_KEY,
+      JSON.stringify(state),
+      { expirationTtl: 7200 }
+      // 2-hour TTL as safety net
+    );
+  } catch (err) {
+    await logCircuitEvent(
+      env,
+      "write_error",
+      `Failed to write circuit state: ${err.message}`,
+      { state }
+    );
+    throw err;
+  }
+}
+__name(writeCircuitState, "writeCircuitState");
+async function evaluateCircuit(env) {
+  const state = await readCircuitState(env);
+  const now = Date.now();
+  await logCircuitEvent(
+    env,
+    "evaluate",
+    `Circuit evaluation: state=${state.state}, blocks=${state.blocksLastHour}, FP=${state.falsePositives}`,
+    { state, timestamp: now }
+  );
+  if (state.state === "OPEN" && state.openedAt) {
+    const elapsed = now - state.openedAt;
+    if (elapsed >= OPEN_COOLDOWN_MS) {
+      await logCircuitEvent(
+        env,
+        "cooldown_expired",
+        `Circuit cooldown expired (${elapsed}ms), transitioning OPEN\u2192HALF_OPEN`,
+        { elapsedMs: elapsed, cooldownMs: OPEN_COOLDOWN_MS }
+      );
+      return halfOpenCircuit(env, state);
+    }
+    return state;
+  }
+  if (state.state === "HALF_OPEN" && !state.halfOpenTestId) {
+    await logCircuitEvent(
+      env,
+      "half_open_anomaly",
+      "HALF_OPEN state with no test ID \u2014 resetting to CLOSED",
+      { state }
+    );
+    return closeCircuit(env, state);
+  }
+  if (state.state === "CLOSED") {
+    if (state.blocksLastHour >= MIN_BLOCKS_FOR_FP_CHECK) {
+      const fpRate = state.falsePositives / state.blocksLastHour;
+      if (fpRate > FP_THRESHOLD) {
+        await logCircuitEvent(
+          env,
+          "fp_threshold_exceeded",
+          `False positive rate ${(fpRate * 100).toFixed(1)}% exceeds ${(FP_THRESHOLD * 100).toFixed(0)}% threshold \u2014 opening circuit`,
+          { fpRate, blocks: state.blocksLastHour, falsePositives: state.falsePositives }
+        );
+        return openCircuit(env, state);
+      }
+    }
+  }
+  if (now - state.lastChecked > BLOCKS_HOUR_WINDOW_MS) {
+    state.blocksLastHour = 0;
+    state.falsePositives = 0;
+    state.lastChecked = now;
+    await writeCircuitState(env, state);
+    await logCircuitEvent(
+      env,
+      "window_reset",
+      "Block counters reset after 1-hour window",
+      { lastChecked: now }
+    );
+  }
+  return state;
+}
+__name(evaluateCircuit, "evaluateCircuit");
+async function openCircuit(env, currentState) {
+  await logCircuitEvent(
+    env,
+    "open",
+    "Circuit OPENING \u2014 TRIDENT blocking disabled, LOG_ONLY mode",
+    { previousState: currentState.state, blocks: currentState.blocksLastHour, fp: currentState.falsePositives }
+  );
+  const newState = {
+    ...currentState,
+    state: "OPEN",
+    openedAt: Date.now(),
+    halfOpenTestId: void 0
+  };
+  await writeCircuitState(env, newState);
+  try {
+    await logEvent(env, {
+      worker: WORKER_NAME2,
+      severity: "CRITICAL",
+      category: "circuit_self_disabled",
+      message: `TRIDENT CIRCUIT OPEN: Blocking self-disabled due to ${newState.falsePositives}/${newState.blocksLastHour} false positives (${(newState.falsePositives / Math.max(newState.blocksLastHour, 1) * 100).toFixed(1)}%). All threats now LOG_ONLY.`,
+      metadata: {
+        openedAt: newState.openedAt,
+        cooldownMinutes: OPEN_COOLDOWN_MS / 6e4,
+        fpThreshold: FP_THRESHOLD
+      }
+    });
+  } catch (err) {
+    await logCircuitEvent(
+      env,
+      "alert_error",
+      `Failed to send circuit-open alert: ${err.message}`
+    );
+    throw err;
+  }
+  return newState;
+}
+__name(openCircuit, "openCircuit");
+async function closeCircuit(env, currentState) {
+  await logCircuitEvent(
+    env,
+    "close",
+    "Circuit CLOSING \u2014 TRIDENT back to full operation",
+    { previousState: currentState.state, wasOpenForMs: currentState.openedAt ? Date.now() - currentState.openedAt : void 0 }
+  );
+  const newState = {
+    ...currentState,
+    state: "CLOSED",
+    openedAt: void 0,
+    halfOpenTestId: void 0,
+    blocksLastHour: 0,
+    // Reset counters on fresh close
+    falsePositives: 0,
+    lastChecked: Date.now()
+  };
+  await writeCircuitState(env, newState);
+  try {
+    await logEvent(env, {
+      worker: WORKER_NAME2,
+      severity: "HIGH",
+      category: "circuit_restored",
+      message: "TRIDENT CIRCUIT CLOSED: Full blocking restored. TRIDENT is back to normal operation.",
+      metadata: {
+        previousState: currentState.state,
+        restoredAt: Date.now()
+      }
+    });
+  } catch (err) {
+    await logCircuitEvent(
+      env,
+      "alert_error",
+      `Failed to send circuit-close alert: ${err.message}`
+    );
+    throw err;
+  }
+  return newState;
+}
+__name(closeCircuit, "closeCircuit");
+async function halfOpenCircuit(env, currentState) {
+  await logCircuitEvent(
+    env,
+    "half_open",
+    "Circuit HALF_OPEN \u2014 allowing 1 test block",
+    { previousState: currentState.state }
+  );
+  const newState = {
+    ...currentState,
+    state: "HALF_OPEN",
+    halfOpenTestId: void 0
+    // Will be set when test block occurs
+  };
+  await writeCircuitState(env, newState);
+  return newState;
+}
+__name(halfOpenCircuit, "halfOpenCircuit");
+async function recordBlockResult(env, wasFalsePositive, threatId) {
+  const state = await readCircuitState(env);
+  state.blocksLastHour += 1;
+  if (wasFalsePositive) {
+    state.falsePositives += 1;
+  }
+  state.lastChecked = Date.now();
+  await logCircuitEvent(
+    env,
+    wasFalsePositive ? "false_positive_recorded" : "true_positive_recorded",
+    wasFalsePositive ? `False positive recorded for threat ${threatId} (${state.falsePositives}/${state.blocksLastHour} total)` : `True positive recorded for threat ${threatId} (${state.blocksLastHour} blocks, ${state.falsePositives} FP)`,
+    { threatId, wasFalsePositive, blocks: state.blocksLastHour, fp: state.falsePositives }
+  );
+  await writeCircuitState(env, state);
+  if (state.state === "HALF_OPEN") {
+    if (state.halfOpenTestId === threatId) {
+      if (wasFalsePositive) {
+        await logCircuitEvent(
+          env,
+          "half_open_failed",
+          `HALF_OPEN test block was false positive \u2014 re-opening circuit`,
+          { threatId }
+        );
+        await openCircuit(env, state);
+      } else {
+        await logCircuitEvent(
+          env,
+          "half_open_passed",
+          `HALF_OPEN test block was true positive \u2014 closing circuit`,
+          { threatId }
+        );
+        await closeCircuit(env, state);
+      }
+    }
+  }
+}
+__name(recordBlockResult, "recordBlockResult");
+async function setHalfOpenTest(env, threatId) {
+  const state = await readCircuitState(env);
+  if (state.state === "HALF_OPEN") {
+    state.halfOpenTestId = threatId;
+    await writeCircuitState(env, state);
+    await logCircuitEvent(
+      env,
+      "half_open_test_set",
+      `HALF_OPEN test block assigned: threat ${threatId}`,
+      { threatId }
+    );
+  }
+}
+__name(setHalfOpenTest, "setHalfOpenTest");
+function canBlock(state) {
+  return state.state === "CLOSED" || state.state === "HALF_OPEN";
+}
+__name(canBlock, "canBlock");
+function circuitSummary(state) {
+  const fpRate = state.blocksLastHour > 0 ? state.falsePositives / state.blocksLastHour : 0;
+  return {
+    state: state.state,
+    canBlock: canBlock(state),
+    blocksLastHour: state.blocksLastHour,
+    falsePositives: state.falsePositives,
+    falsePositiveRate: fpRate,
+    fpThreshold: FP_THRESHOLD,
+    minBlocksForCheck: MIN_BLOCKS_FOR_FP_CHECK,
+    openedAt: state.openedAt,
+    cooldownMs: OPEN_COOLDOWN_MS
+  };
+}
+__name(circuitSummary, "circuitSummary");
+
+// src/secret-rotation.ts
+var WORKER_NAME3 = "trident-respond";
+var ROTATION_KV_PREFIX = "trident:rotation:";
+var GRACE_PERIOD_MS = 3e5;
+var CRITICAL_SECRETS = /* @__PURE__ */ new Set(["JWT_SIGNING_KEY", "STRIPE_SECRET"]);
+async function logRotationEvent(env, category, message, metadata) {
+  await logEvent(env, {
+    worker: WORKER_NAME3,
+    severity: category.includes("error") || category.includes("fail") ? "HIGH" : "INFO",
+    category: `rotation_${category}`,
+    message,
+    metadata
+  });
+}
+__name(logRotationEvent, "logRotationEvent");
+function generateSecret(length = 64) {
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.";
+  const buf = new Uint8Array(length);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map((b) => chars[b % chars.length]).join("");
+}
+__name(generateSecret, "generateSecret");
+async function hashSecretRef(secret) {
+  const encoder = new TextEncoder();
+  const hashBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(secret));
+  return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+__name(hashSecretRef, "hashSecretRef");
+async function readRotationEvent(env, rotationId) {
+  try {
+    const raw = await env.SESSION_META.get(`${ROTATION_KV_PREFIX}${rotationId}`);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (err) {
+    await logRotationEvent(
+      env,
+      "read_error",
+      `Failed to read rotation ${rotationId}: ${err.message}`,
+      { rotationId }
+    );
+    throw err;
+  }
+  return null;
+}
+__name(readRotationEvent, "readRotationEvent");
+async function writeRotationEvent(env, event) {
+  try {
+    await env.SESSION_META.put(
+      `${ROTATION_KV_PREFIX}${event.id}`,
+      JSON.stringify(event),
+      { expirationTtl: 86400 }
+      // 24-hour retention
+    );
+  } catch (err) {
+    await logRotationEvent(
+      env,
+      "write_error",
+      `Failed to write rotation ${event.id}: ${err.message}`,
+      { rotationId: event.id }
+    );
+    throw err;
+  }
+}
+__name(writeRotationEvent, "writeRotationEvent");
+function requiresManualApproval(secretName) {
+  return CRITICAL_SECRETS.has(secretName);
+}
+__name(requiresManualApproval, "requiresManualApproval");
+async function initiateRotation(env, secretName, triggeredBy, approvedBy) {
+  await logRotationEvent(
+    env,
+    "initiate_start",
+    `Initiating rotation for secret ${secretName} (triggered by ${triggeredBy})`,
+    { secretName, triggeredBy, isCritical: requiresManualApproval(secretName) }
+  );
+  if (requiresManualApproval(secretName) && !approvedBy) {
+    const pending = {
+      id: crypto.randomUUID(),
+      secretName,
+      triggeredBy,
+      startedAt: Date.now(),
+      gracePeriodEndsAt: 0,
+      oldSecret: "[PENDING_APPROVAL]",
+      newSecret: "[PENDING_APPROVAL]",
+      status: "PENDING"
+    };
+    await writeRotationEvent(env, pending);
+    await logRotationEvent(
+      env,
+      "pending_approval",
+      `Rotation ${pending.id} for ${secretName} PENDING manual approval (CRITICAL secret)`,
+      { rotationId: pending.id, secretName, triggeredBy }
+    );
+    return pending;
+  }
+  const now = Date.now();
+  const newSecretRaw = generateSecret();
+  const oldSecretRef = await hashSecretRef(`${secretName}:current`);
+  const newSecretRef = await hashSecretRef(newSecretRaw);
+  const event = {
+    id: crypto.randomUUID(),
+    secretName,
+    triggeredBy,
+    startedAt: now,
+    gracePeriodEndsAt: now + GRACE_PERIOD_MS,
+    oldSecret: oldSecretRef,
+    newSecret: newSecretRef,
+    status: "GRACE",
+    approvedBy,
+    deployedAt: now
+  };
+  await writeRotationEvent(env, event);
+  await logRotationEvent(
+    env,
+    "grace_started",
+    `Rotation ${event.id} for ${secretName} entered GRACE period. New secret hash: ${newSecretRef}. Grace ends at ${event.gracePeriodEndsAt}`,
+    {
+      rotationId: event.id,
+      secretName,
+      newSecretRef,
+      graceEndsAt: event.gracePeriodEndsAt,
+      gracePeriodMinutes: GRACE_PERIOD_MS / 6e4,
+      approvedBy
+    }
+  );
+  return event;
+}
+__name(initiateRotation, "initiateRotation");
+async function getRotationStatus(env, rotationId) {
+  await logRotationEvent(
+    env,
+    "status_check",
+    `Status check for rotation ${rotationId}`,
+    { rotationId }
+  );
+  const event = await readRotationEvent(env, rotationId);
+  if (event && event.status === "GRACE") {
+    const now = Date.now();
+    const graceRemaining = Math.max(0, event.gracePeriodEndsAt - now);
+    await logRotationEvent(
+      env,
+      "status_grace",
+      `Rotation ${rotationId}: GRACE period, ${Math.ceil(graceRemaining / 1e3)}s remaining`,
+      { rotationId, graceRemainingMs: graceRemaining }
+    );
+  }
+  return event;
+}
+__name(getRotationStatus, "getRotationStatus");
+async function approveRotation(env, rotationId, approvedBy) {
+  await logRotationEvent(
+    env,
+    "approve_start",
+    `Approving rotation ${rotationId} by ${approvedBy}`,
+    { rotationId, approvedBy }
+  );
+  const event = await readRotationEvent(env, rotationId);
+  if (!event) {
+    const msg = `Rotation ${rotationId} not found`;
+    await logRotationEvent(env, "approve_error", msg, { rotationId });
+    throw new RotationError(msg, rotationId);
+  }
+  if (event.status !== "PENDING") {
+    const msg = `Rotation ${event.id} is not PENDING (status: ${event.status})`;
+    await logRotationEvent(env, "approve_error", msg, { rotationId, status: event.status });
+    throw new RotationError(msg, rotationId);
+  }
+  const now = Date.now();
+  const newSecretRaw = generateSecret();
+  const oldSecretRef = await hashSecretRef(`${event.secretName}:current`);
+  const newSecretRef = await hashSecretRef(newSecretRaw);
+  event.oldSecret = oldSecretRef;
+  event.newSecret = newSecretRef;
+  event.status = "GRACE";
+  event.startedAt = now;
+  event.gracePeriodEndsAt = now + GRACE_PERIOD_MS;
+  event.approvedBy = approvedBy;
+  event.deployedAt = now;
+  await writeRotationEvent(env, event);
+  await logRotationEvent(
+    env,
+    "approved",
+    `Rotation ${rotationId} approved by ${approvedBy}. Entered GRACE period.`,
+    {
+      rotationId,
+      secretName: event.secretName,
+      approvedBy,
+      graceEndsAt: event.gracePeriodEndsAt
+    }
+  );
+  return event;
+}
+__name(approveRotation, "approveRotation");
+var RotationError = class extends Error {
+  constructor(message, rotationId) {
+    super(message);
+    this.rotationId = rotationId;
+    this.name = "RotationError";
+  }
+};
+__name(RotationError, "RotationError");
+
+// src/escalation.ts
+var WORKER_NAME4 = "trident-respond";
+var EVIDENCE_KV_PREFIX = "trident:evidence";
+var FORENSIC_RETENTION_SECONDS = 604800;
+async function logEscalationEvent(env, category, message, metadata) {
+  await logEvent(env, {
+    worker: WORKER_NAME4,
+    severity: category.includes("error") ? "HIGH" : "INFO",
+    category: `escalation_${category}`,
+    message,
+    metadata: { ...metadata, module: "escalation" }
+  });
+}
+__name(logEscalationEvent, "logEscalationEvent");
+async function logAttackerEvidence(env, threat) {
+  const action = {
+    id: crypto.randomUUID(),
+    type: "log_attacker_evidence",
+    description: `Log forensic evidence for attacker IP ${threat.sourceIp}`,
+    executed: false,
+    timestamp: Date.now()
+  };
+  const evidence = {
+    threatId: threat.id,
+    sourceIp: threat.sourceIp,
+    sourceWorker: threat.sourceWorker,
+    category: threat.category,
+    severity: threat.severity,
+    confidence: threat.confidence,
+    matchedPatterns: threat.matchedPatterns,
+    recommendedAction: threat.recommendedAction,
+    timestamp: threat.timestamp,
+    loggedAt: Date.now(),
+    purpose: "forensic_evidence_for_legal_proceedings",
+    jurisdiction: "varies_by_attacker_location",
+    chainOfCustody: [{
+      actor: "trident-escalation",
+      action: "evidence_collection",
+      timestamp: Date.now(),
+      hash: await hashEvidence(threat)
+    }]
+  };
+  await logEscalationEvent(
+    env,
+    "attacker_evidence",
+    `Forensic evidence logged for attacker ${threat.sourceIp}`,
+    { threatId: threat.id, sourceIp: threat.sourceIp, evidence }
+  );
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `${EVIDENCE_KV_PREFIX}:attacker:${threat.sourceIp}`,
+      JSON.stringify(evidence),
+      FORENSIC_RETENTION_SECONDS
+    );
+    action.executed = true;
+    action.result = `Forensic evidence logged for IP ${threat.sourceIp}`;
+  } catch (err) {
+    action.error = err.message;
+    await logEscalationEvent(
+      env,
+      "attacker_evidence_error",
+      `Failed to log attacker evidence: ${err.message}`,
+      { threatId: threat.id }
+    );
+    throw err;
+  }
+  return action;
+}
+__name(logAttackerEvidence, "logAttackerEvidence");
+async function preserveEvidenceChain(env, threat) {
+  const action = {
+    id: crypto.randomUUID(),
+    type: "preserve_evidence_chain",
+    description: `Preserve attack chain evidence for threat ${threat.id}`,
+    executed: false,
+    timestamp: Date.now()
+  };
+  const attackChain = {
+    threatId: threat.id,
+    sourceIp: threat.sourceIp,
+    sourceWorker: threat.sourceWorker,
+    category: threat.category,
+    severity: threat.severity,
+    confidence: threat.confidence,
+    matchedPatterns: threat.matchedPatterns,
+    timestamp: threat.timestamp,
+    loggedAt: Date.now(),
+    purpose: "legal_evidence_preservation",
+    chainOfCustody: [{
+      actor: "trident-escalation",
+      action: "evidence_preservation",
+      timestamp: Date.now(),
+      hash: await hashEvidence(threat)
+    }]
+  };
+  await logEscalationEvent(
+    env,
+    "evidence_chain",
+    `Attack chain evidence preserved for ${threat.id}`,
+    { threatId: threat.id, attackChain }
+  );
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `${EVIDENCE_KV_PREFIX}:chain:${threat.id}`,
+      JSON.stringify(attackChain),
+      FORENSIC_RETENTION_SECONDS
+    );
+    action.executed = true;
+    action.result = `Evidence chain preserved for ${threat.id}`;
+  } catch (err) {
+    action.error = err.message;
+    await logEscalationEvent(
+      env,
+      "evidence_chain_error",
+      `Failed to preserve evidence chain: ${err.message}`,
+      { threatId: threat.id }
+    );
+    throw err;
+  }
+  return action;
+}
+__name(preserveEvidenceChain, "preserveEvidenceChain");
+async function shareThreatIntel(env, threat) {
+  const action = {
+    id: crypto.randomUUID(),
+    type: "share_threat_intel",
+    description: `Share threat intel for ${threat.sourceIp} with Cloudflare T&S`,
+    executed: false,
+    timestamp: Date.now()
+  };
+  const intelPayload = {
+    reporter: "trident-v5",
+    timestamp: Date.now(),
+    sourceIp: threat.sourceIp,
+    threatCategory: threat.category,
+    confidence: threat.confidence,
+    matchedPatterns: threat.matchedPatterns,
+    evidenceHash: await hashEvidence(threat),
+    reportType: "defensive_threat_intelligence"
+  };
+  await logEscalationEvent(
+    env,
+    "threat_intel",
+    `Threat intel shared for ${threat.sourceIp}`,
+    { threatId: threat.id, intelPayload }
+  );
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `${EVIDENCE_KV_PREFIX}:intel:${Date.now()}:${threat.sourceIp}`,
+      JSON.stringify(intelPayload),
+      86400
+    );
+    action.executed = true;
+    action.result = `Threat intel stored for batch submission to Cloudflare T&S`;
+  } catch (err) {
+    action.error = err.message;
+    await logEscalationEvent(
+      env,
+      "threat_intel_error",
+      `Failed to store threat intel: ${err.message}`,
+      { threatId: threat.id }
+    );
+    throw err;
+  }
+  return action;
+}
+__name(shareThreatIntel, "shareThreatIntel");
+async function generateForensicReport(env, threat) {
+  const action = {
+    id: crypto.randomUUID(),
+    type: "forensic_report",
+    description: `Generate forensic report for threat ${threat.id}`,
+    executed: false,
+    timestamp: Date.now()
+  };
+  const report = {
+    reportId: crypto.randomUUID(),
+    generatedAt: Date.now(),
+    generatedBy: "trident-escalation",
+    threat: {
+      id: threat.id,
+      category: threat.category,
+      severity: threat.severity,
+      confidence: threat.confidence,
+      sourceIp: threat.sourceIp,
+      sourceWorker: threat.sourceWorker,
+      matchedPatterns: threat.matchedPatterns,
+      timestamp: threat.timestamp
+    },
+    recommendedActions: [
+      "Review matched patterns for false positives",
+      "Check if source IP is from known container range",
+      "Verify JWT claims are legitimate",
+      "Contact law enforcement if attack is persistent",
+      "Rotate affected credentials if compromise confirmed"
+    ],
+    legalConsiderations: [
+      "Evidence collected under chain of custody",
+      "Timestamped and hashed for integrity",
+      "Retention: 7 days in KV, permanent in D1 audit_trail",
+      "Jurisdiction depends on attacker geolocation"
+    ],
+    nextSteps: [
+      "Review this report",
+      "Check SIMULATION_FIXES.md for known false positives",
+      "Adjust TRIDENT_RULES.json thresholds if needed",
+      "Contact Cloudflare Trust & Safety for persistent attackers"
+    ]
+  };
+  await logEscalationEvent(
+    env,
+    "forensic_report",
+    `Forensic report generated for ${threat.id}`,
+    { threatId: threat.id, reportId: report.reportId }
+  );
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `${EVIDENCE_KV_PREFIX}:report:${threat.id}`,
+      JSON.stringify(report),
+      FORENSIC_RETENTION_SECONDS
+    );
+    action.executed = true;
+    action.result = `Forensic report generated: ${report.reportId}`;
+  } catch (err) {
+    action.error = err.message;
+    await logEscalationEvent(
+      env,
+      "forensic_report_error",
+      `Failed to generate forensic report: ${err.message}`,
+      { threatId: threat.id }
+    );
+    throw err;
+  }
+  return action;
+}
+__name(generateForensicReport, "generateForensicReport");
+async function collectForensicEvidence(env, threat) {
+  await logEscalationEvent(
+    env,
+    "collection_start",
+    `Collecting forensic evidence for threat ${threat.id}`,
+    { threatId: threat.id }
+  );
+  const actions = [];
+  try {
+    actions.push(await logAttackerEvidence(env, threat));
+  } catch (err) {
+    await logEscalationEvent(
+      env,
+      "collection_evidence_error",
+      `logAttackerEvidence failed: ${err.message}`,
+      { threatId: threat.id }
+    );
+  }
+  try {
+    actions.push(await preserveEvidenceChain(env, threat));
+  } catch (err) {
+    await logEscalationEvent(
+      env,
+      "collection_chain_error",
+      `preserveEvidenceChain failed: ${err.message}`,
+      { threatId: threat.id }
+    );
+  }
+  try {
+    actions.push(await shareThreatIntel(env, threat));
+  } catch (err) {
+    await logEscalationEvent(
+      env,
+      "collection_intel_error",
+      `shareThreatIntel failed: ${err.message}`,
+      { threatId: threat.id }
+    );
+  }
+  try {
+    actions.push(await generateForensicReport(env, threat));
+  } catch (err) {
+    await logEscalationEvent(
+      env,
+      "collection_report_error",
+      `generateForensicReport failed: ${err.message}`,
+      { threatId: threat.id }
+    );
+  }
+  await logEscalationEvent(
+    env,
+    "collection_complete",
+    `Forensic evidence collection complete for ${threat.id}: ${actions.filter((a) => a.executed).length}/${actions.length} actions executed`,
+    { threatId: threat.id, actionsExecuted: actions.filter((a) => a.executed).length }
+  );
+  return actions;
+}
+__name(collectForensicEvidence, "collectForensicEvidence");
+async function hashEvidence(threat) {
+  const encoder = new TextEncoder();
+  const data = `${threat.id}:${threat.sourceIp}:${threat.timestamp}:${threat.category}`;
+  const hashBuffer = await crypto.subtle.digest("SHA-256", encoder.encode(data));
+  return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+}
+__name(hashEvidence, "hashEvidence");
+
+// src/index.ts
+var WORKER_NAME5 = "trident-respond";
+var BLOCK_DURATION_MS = 36e5;
+var RESPONSE_LEVELS = {
+  LOG_ONLY: 0,
+  LOG_FLAG: 1,
+  LOG_ALERT: 2,
+  BLOCK_TEMP: 3,
+  FULL_LOCKDOWN: 4
+};
+function determineResponseLevel(confidence, _severity) {
+  if (confidence < 0.5)
+    return 0;
+  if (confidence < 0.7)
+    return 1;
+  if (confidence < 0.85)
+    return 2;
+  if (confidence < 0.95)
+    return 3;
+  return 4;
+}
+__name(determineResponseLevel, "determineResponseLevel");
+function responseLevelName(level) {
+  const names = {
+    0: "LOG_ONLY",
+    1: "LOG_FLAG",
+    2: "LOG_ALERT",
+    3: "BLOCK_TEMP",
+    4: "FULL_LOCKDOWN"
+  };
+  return names[level];
+}
+__name(responseLevelName, "responseLevelName");
+function parseRanges(raw) {
+  if (!raw)
+    return [];
+  return raw.split(",").map((r) => r.trim()).filter(Boolean);
+}
+__name(parseRanges, "parseRanges");
+function getWhitelist(env) {
+  const staticRanges = [
+    "127.0.0.1",
+    "::1",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16"
+  ];
+  const curtis = parseRanges(env.CURTIS_IP_RANGES);
+  const swarm = parseRanges(env.SWARM_CONTAINER_RANGES);
+  return [...staticRanges, ...curtis, ...swarm];
+}
+__name(getWhitelist, "getWhitelist");
+function buildBlockRecord(threat) {
+  const now = Date.now();
+  return {
+    reason: threat.category,
+    threatId: threat.id,
+    blockedAt: now,
+    expiresAt: now + BLOCK_DURATION_MS,
+    severity: threat.severity,
+    sourceIp: threat.sourceIp
+  };
+}
+__name(buildBlockRecord, "buildBlockRecord");
+async function executeLevel0(env, threat, level) {
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "LOW",
+    category: "response_log_only",
+    message: `Threat ${threat.id} (${threat.category}): confidence ${threat.confidence} \u2192 Level ${level} (${responseLevelName(level)})`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      confidence: threat.confidence,
+      category: threat.category,
+      level,
+      levelName: responseLevelName(level)
+    }
+  });
+}
+__name(executeLevel0, "executeLevel0");
+async function executeLevel1(env, threat, level) {
+  await executeLevel0(env, threat, level);
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "LOW",
+    category: "response_flagged",
+    message: `Threat ${threat.id} flagged for manual review (${threat.category}, confidence ${threat.confidence})`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      confidence: threat.confidence,
+      category: threat.category,
+      level,
+      levelName: responseLevelName(level),
+      dashboardFlag: true,
+      reviewRequired: true
+    }
+  });
+}
+__name(executeLevel1, "executeLevel1");
+async function executeLevel2(env, threat, level) {
+  await executeLevel1(env, threat, level);
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "HIGH",
+    category: "response_alert",
+    message: `ALERT: Threat ${threat.id} (${threat.category}) from ${threat.sourceIp} \u2014 confidence ${threat.confidence}. Human review required.`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      confidence: threat.confidence,
+      category: threat.category,
+      severity: threat.severity,
+      level,
+      levelName: responseLevelName(level),
+      alertType: "human_review_required"
+    }
+  });
+  try {
+    await env.AURIS_LOGS.prepare(
+      `INSERT INTO alert_queue (id, timestamp, severity, category, message, source_ip, threat_id, status)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)`
+    ).bind(
+      crypto.randomUUID(),
+      Date.now(),
+      "HIGH",
+      threat.category,
+      `Threat ${threat.id}: ${threat.category} from ${threat.sourceIp}`,
+      threat.sourceIp,
+      threat.id,
+      "pending"
+    ).run();
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "INFO",
+      category: "alert_queue_pushed",
+      message: `Alert for threat ${threat.id} pushed to D1 alert queue`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "alert_queue_push_failed",
+      message: `Failed to push alert for threat ${threat.id} to D1: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw err;
+  }
+}
+__name(executeLevel2, "executeLevel2");
+async function executeLevel3(env, threat, level, circuitState) {
+  await executeLevel2(env, threat, level);
+  if (!canBlock(circuitState)) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "response_block_skipped_circuit",
+      message: `Level ${level} block SKIPPED: circuit is ${circuitState.state}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: {
+        circuitState: circuitState.state,
+        reason: "circuit_open_log_only"
+      }
+    });
+    return;
+  }
+  if (circuitState.state === "HALF_OPEN") {
+    await setHalfOpenTest(env, threat.id);
+  }
+  const blockRecord = buildBlockRecord(threat);
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `blocked:${threat.sourceIp}`,
+      JSON.stringify(blockRecord),
+      Math.ceil(BLOCK_DURATION_MS / 1e3)
+    );
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "ip_blocked",
+      message: `IP ${threat.sourceIp} blocked for 1 hour (threat ${threat.id})`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: {
+        blockRecord,
+        level,
+        levelName: responseLevelName(level),
+        expiresAt: blockRecord.expiresAt
+      }
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "CRITICAL",
+      category: "ip_block_failed",
+      message: `IP block failed for ${threat.sourceIp}: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw err;
+  }
+  if (threat.jwtJti) {
+    try {
+      await kvPutSafe(
+        env.SESSION_META,
+        `denylist:jti:${threat.jwtJti}`,
+        JSON.stringify({
+          revokedAt: Date.now(),
+          threatId: threat.id,
+          reason: threat.category
+        }),
+        Math.ceil(BLOCK_DURATION_MS / 1e3)
+      );
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "HIGH",
+        category: "jwt_revocation",
+        message: `JWT jti ${threat.jwtJti} revoked (threat ${threat.id})`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+    } catch (err) {
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "CRITICAL",
+        category: "jwt_revocation_failure",
+        message: `JWT revocation failed for jti ${threat.jwtJti}: ${err.message}`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+      throw err;
+    }
+  }
+  try {
+    const actions = await collectForensicEvidence(env, threat);
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "INFO",
+      category: "forensic_evidence_complete",
+      message: `Forensic evidence collection complete for ${threat.id}: ${actions.filter((a) => a.executed).length} actions`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: { actions: actions.map((a) => ({ type: a.type, executed: a.executed })) }
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "forensic_evidence_error",
+      message: `Forensic evidence collection error for ${threat.id}: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+  }
+}
+__name(executeLevel3, "executeLevel3");
+async function executeLevel4(env, threat, level, circuitState) {
+  await executeLevel3(env, threat, level, circuitState);
+  const result = {};
+  if (threat.severity === "CRITICAL") {
+    try {
+      await sendSmsAlert(env, threat);
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "INFO",
+        category: "sms_sent",
+        message: `SMS alert sent for threat ${threat.id} (Level 4 FULL_LOCKDOWN)`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+    } catch (err) {
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "HIGH",
+        category: "sms_alert_failure",
+        message: `SMS alert failed for threat ${threat.id}: ${err.message}`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+    }
+  }
+  if (threat.category === "credential_theft" || threat.confidence > 0.98) {
+    try {
+      const secretName = threat.category === "credential_theft" ? "JWT_SIGNING_KEY" : "JWT_SIGNING_KEY";
+      result.rotationEvent = await initiateRotation(env, secretName, threat.id);
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "CRITICAL",
+        category: "secret_rotation_initiated",
+        message: `Secret rotation ${result.rotationEvent.id} initiated for ${secretName} (threat ${threat.id}). Status: ${result.rotationEvent.status}`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id,
+        metadata: {
+          rotationId: result.rotationEvent.id,
+          secretName,
+          status: result.rotationEvent.status,
+          gracePeriodEndsAt: result.rotationEvent.gracePeriodEndsAt
+        }
+      });
+    } catch (err) {
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "CRITICAL",
+        category: "secret_rotation_failure",
+        message: `Secret rotation failed for threat ${threat.id}: ${err.message}`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+    }
+  }
+  try {
+    await kvPutSafe(
+      env.SESSION_META,
+      `lockdown:${threat.workerName || "unknown"}`,
+      JSON.stringify({
+        lockedAt: Date.now(),
+        threatId: threat.id,
+        reason: threat.category,
+        durationMs: BLOCK_DURATION_MS,
+        expiresAt: Date.now() + BLOCK_DURATION_MS
+      }),
+      Math.ceil(BLOCK_DURATION_MS / 1e3)
+    );
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "CRITICAL",
+      category: "worker_lockdown",
+      message: `Worker ${threat.workerName || "unknown"} bindings locked down for 1 hour (threat ${threat.id})`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: {
+        workerName: threat.workerName,
+        lockdownDurationMs: BLOCK_DURATION_MS
+      }
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "CRITICAL",
+      category: "worker_lockdown_failure",
+      message: `Worker lockdown failed: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw err;
+  }
+  try {
+    await env.AURIS_LOGS.prepare(
+      `INSERT INTO incident_reports (id, timestamp, threat_id, category, severity, source_ip, confidence, worker_name, details, action_taken)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)`
+    ).bind(
+      crypto.randomUUID(),
+      Date.now(),
+      threat.id,
+      threat.category,
+      threat.severity,
+      threat.sourceIp,
+      threat.confidence,
+      threat.workerName || "unknown",
+      JSON.stringify({
+        matchedPatterns: threat.matchedPatterns,
+        requestPath: threat.requestPath,
+        requestMethod: threat.requestMethod,
+        jwtJti: threat.jwtJti,
+        details: threat.details
+      }),
+      "FULL_LOCKDOWN"
+    ).run();
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "INFO",
+      category: "incident_report_written",
+      message: `Full incident report written to D1 for threat ${threat.id}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "CRITICAL",
+      category: "incident_report_failed",
+      message: `Incident report write failed: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    throw err;
+  }
+  try {
+    const actions = await executeActiveRetaliation(env, threat);
+    if (actions.length > 0) {
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "INFO",
+        category: "active_retaliation_complete",
+        message: `Active retaliation complete for ${threat.id}: ${actions.filter((a) => a.executed).length} actions`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id,
+        metadata: {
+          actions: actions.map((a) => ({
+            type: a.type,
+            executed: a.executed,
+            auditOnly: a.auditOnly
+          }))
+        }
+      });
+    }
+  } catch (err) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "active_retaliation_error",
+      message: `Active retaliation error: ${err.message}`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+  }
+  return result;
+}
+__name(executeLevel4, "executeLevel4");
+async function executeResponseLevel(env, threat, level, circuitState) {
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "INFO",
+    category: "response_execute_start",
+    message: `Executing response level ${level} (${responseLevelName(level)}) for threat ${threat.id}`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      level,
+      levelName: responseLevelName(level),
+      confidence: threat.confidence,
+      severity: threat.severity,
+      circuitState: circuitState.state
+    }
+  });
+  let result = {};
+  switch (level) {
+    case 0:
+      await executeLevel0(env, threat, level);
+      break;
+    case 1:
+      await executeLevel1(env, threat, level);
+      break;
+    case 2:
+      await executeLevel2(env, threat, level);
+      break;
+    case 3:
+      await executeLevel3(env, threat, level, circuitState);
+      break;
+    case 4:
+      result = await executeLevel4(env, threat, level, circuitState);
+      break;
+    default:
+      await logEvent(env, {
+        worker: WORKER_NAME5,
+        severity: "CRITICAL",
+        category: "response_invalid_level",
+        message: `Invalid response level ${level} for threat ${threat.id}`,
+        sourceIp: threat.sourceIp,
+        threatId: threat.id
+      });
+  }
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "INFO",
+    category: "response_execute_complete",
+    message: `Response level ${level} complete for threat ${threat.id}`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      level,
+      levelName: responseLevelName(level),
+      hasRotation: !!result.rotationEvent
+    }
+  });
+  return { level, rotationEvent: result.rotationEvent };
+}
+__name(executeResponseLevel, "executeResponseLevel");
+async function handleThreat(env, threat) {
+  const circuitState = await evaluateCircuit(env);
+  const level = determineResponseLevel(threat.confidence, threat.severity);
+  const levelName = responseLevelName(level);
+  await logEvent(env, {
+    worker: WORKER_NAME5,
+    severity: "INFO",
+    category: "response_decision",
+    message: `Threat ${threat.id}: confidence=${threat.confidence} \u2192 Level ${level} (${levelName}), circuit=${circuitState.state}`,
+    sourceIp: threat.sourceIp,
+    threatId: threat.id,
+    metadata: {
+      confidence: threat.confidence,
+      severity: threat.severity,
+      category: threat.category,
+      responseLevel: level,
+      responseLevelName: levelName,
+      circuitState: circuitState.state,
+      canBlock: canBlock(circuitState)
+    }
+  });
+  const whitelist = getWhitelist(env);
+  if (isIpWhitelisted(threat.sourceIp, whitelist)) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "INFO",
+      category: "response_skip_whitelist",
+      message: `Threat ${threat.id} from ${threat.sourceIp} whitelisted \u2014 logging only`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: {
+        category: threat.category,
+        confidence: threat.confidence,
+        wouldHaveBeenLevel: level
+      }
+    });
+    return { level: 0, levelName: "LOG_ONLY", circuitState: circuitState.state };
+  }
+  if (threat.details?.authorizedHeader === true) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "INFO",
+      category: "response_skip_authorized_header",
+      message: `Threat ${threat.id} skipped: x-trident-authorized header present`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id
+    });
+    return { level: 0, levelName: "LOG_ONLY", circuitState: circuitState.state };
+  }
+  if (circuitState.state === "OPEN" && level >= 3) {
+    await logEvent(env, {
+      worker: WORKER_NAME5,
+      severity: "HIGH",
+      category: "response_downgraded_circuit",
+      message: `Threat ${threat.id} downgraded from Level ${level} to Level 0 (circuit OPEN)`,
+      sourceIp: threat.sourceIp,
+      threatId: threat.id,
+      metadata: {
+        originalLevel: level,
+        circuitState: circuitState.state,
+        falsePositiveRate: circuitState.falsePositives / Math.max(circuitState.blocksLastHour, 1)
+      }
+    });
+    await executeLevel0(env, threat, 0);
+    return { level: 0, levelName: "LOG_ONLY", circuitState: circuitState.state };
+  }
+  const result = await executeResponseLevel(env, threat, level, circuitState);
+  return {
+    level: result.level,
+    levelName: responseLevelName(result.level),
+    circuitState: circuitState.state,
+    rotationId: result.rotationEvent?.id
+  };
+}
+__name(handleThreat, "handleThreat");
+var src_default = {
+  async fetch(request, env, _ctx) {
+    try {
+      if (request.method === "GET" && new URL(request.url).pathname === "/circuit") {
+        const state = await readCircuitState(env);
+        return new Response(
+          JSON.stringify({ ok: true, circuit: circuitSummary(state) }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (request.method === "GET") {
+        const url = new URL(request.url);
+        const rotationId = url.searchParams.get("rotation");
+        if (rotationId) {
+          const status = await getRotationStatus(env, rotationId);
+          return new Response(
+            JSON.stringify({ ok: true, rotation: status }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+      }
+      if (request.method === "POST") {
+        const url = new URL(request.url);
+        const pathname = url.pathname;
+        if (pathname === "/rotation/approve") {
+          const body2 = await request.json();
+          if (!body2.rotationId || !body2.approvedBy) {
+            return new Response(
+              JSON.stringify({ error: "Missing rotationId or approvedBy" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          const event = await approveRotation(env, body2.rotationId, body2.approvedBy);
+          return new Response(
+            JSON.stringify({ ok: true, rotation: event }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (pathname === "/retaliation/enable") {
+          const body2 = await request.json();
+          if (!body2.authorizationCode || !body2.enabledBy) {
+            return new Response(
+              JSON.stringify({ error: "Missing authorizationCode or enabledBy" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          const config = await enableRetaliation(
+            env,
+            body2.authorizationCode,
+            body2.intensity || "PASSIVE",
+            body2.enabledBy
+          );
+          return new Response(
+            JSON.stringify({ ok: true, retaliation: config }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (pathname === "/retaliation/disable") {
+          const body2 = await request.json();
+          const config = await disableRetaliation(env, body2.disabledBy || "operator");
+          return new Response(
+            JSON.stringify({ ok: true, retaliation: config }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (pathname === "/retaliation/audit-only") {
+          const body2 = await request.json();
+          const config = await setAuditOnly(env, body2.auditOnly, body2.setBy || "operator");
+          return new Response(
+            JSON.stringify({ ok: true, retaliation: config }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (pathname === "/false-positive") {
+          const body2 = await request.json();
+          if (!body2.threatId || typeof body2.wasFalsePositive !== "boolean") {
+            return new Response(
+              JSON.stringify({ error: "Missing threatId or wasFalsePositive" }),
+              { status: 400, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          await recordBlockResult(env, body2.wasFalsePositive, body2.threatId);
+          return new Response(
+            JSON.stringify({ ok: true, recorded: true }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+      }
+      if (request.method !== "POST") {
+        return new Response(JSON.stringify({ error: "Method not allowed" }), {
+          status: 405,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      const body = await request.json();
+      if (!body.id || typeof body.confidence !== "number" || !body.sourceIp || !body.category || !body.severity) {
+        return new Response(
+          JSON.stringify({ error: "Invalid threat detection payload" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      const threat = body;
+      const result = await handleThreat(env, threat);
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          threatId: threat.id,
+          responseLevel: result.level,
+          responseLevelName: result.levelName,
+          circuitState: result.circuitState,
+          rotationId: result.rotationId
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    } catch (err) {
+      try {
+        await logEvent(env, {
+          worker: WORKER_NAME5,
+          severity: "CRITICAL",
+          category: "respond_worker_error",
+          message: `Unhandled error in respond worker: ${err.message}`,
+          metadata: { stack: err.stack }
+        });
+      } catch (logErr) {
+        console.error("[TRIDENT-RESPOND] Fatal: logging failed:", logErr);
+      }
+      return new Response(
+        JSON.stringify({
+          error: "Internal error",
+          detail: err.message
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
+  }
+};
+export {
+  RESPONSE_LEVELS,
+  src_default as default,
+  determineResponseLevel,
+  responseLevelName
+};
+//# sourceMappingURL=index.js.map
+
+--80fef277a8c8185aeb062eeaf74d27046b149c2a824877580d5d06c41436--

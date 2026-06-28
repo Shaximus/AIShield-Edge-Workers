@@ -1,0 +1,96 @@
+--eb8a827875b396bd5a936853079e1054c326745c611410827b745a5560ef
+Content-Disposition: form-data; name="telephone-new.js"
+
+export class BrowserSession {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+  async fetch(request) {
+    return new Response(JSON.stringify({status:"session-active"}), {headers:{"Content-Type":"application/json"}});
+  }
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const key = url.searchParams.get("key") || request.headers.get("X-Tel-Key") || "";
+    
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, X-Tel-Key",
+      "Content-Type": "application/json"
+    };
+    
+    if (request.method === "OPTIONS") return new Response(null, {headers: cors});
+    
+    if (path === "/" || path === "/health") {
+      return j({status:"alive",service:"claudes-telephone",auth:"X-Tel-Key or ?key=",timestamp:new Date().toISOString()}, cors);
+    }
+    
+    if (key !== "reflexion-telephone-2026") {
+      return j({error:"Unauthorized. Use key=reflexion-telephone-2026 or X-Tel-Key header"}, cors, 401);
+    }
+
+    try {
+      if (path === "/browser") {
+        const action = url.searchParams.get("action") || "status";
+        const targetUrl = url.searchParams.get("url");
+        const browser = await env.BROWSER.launch();
+        const page = await browser.newPage();
+        await page.setViewport({width:1920,height:1080});
+        
+        const r = {action};
+
+        if (action === "navigate") {
+          await page.goto(targetUrl, {waitUntil:"networkidle2",timeout:30000});
+          r.title = await page.title();
+          r.url = targetUrl;
+        } else if (action === "screenshot") {
+          if (targetUrl) await page.goto(targetUrl, {waitUntil:"networkidle2",timeout:30000});
+          r.screenshot = await page.screenshot({encoding:"base64"});
+        } else if (action === "type") {
+          const sel = url.searchParams.get("selector");
+          const text = url.searchParams.get("text") || "";
+          await page.type(sel, text, {delay:50});
+          r.typed = {selector:sel,text};
+        } else if (action === "click") {
+          await page.click(url.searchParams.get("selector"));
+          r.clicked = url.searchParams.get("selector");
+        } else if (action === "evaluate") {
+          r.result = await page.evaluate((s) => eval(s), url.searchParams.get("script"));
+        } else if (action === "grok_generate") {
+          const prompt = url.searchParams.get("prompt");
+          await page.goto("https://grok.com", {waitUntil:"networkidle2",timeout:30000});
+          await new Promise(r2 => setTimeout(r2, 2000));
+          try { const a = await page.$("text=Allow All"); if(a) await a.click(); } catch(e){}
+          await new Promise(r2 => setTimeout(r2, 1000));
+          const ta = await page.$("textarea");
+          if (ta) {
+            await ta.type(prompt, {delay:30});
+            await page.keyboard.press("Enter");
+            await new Promise(r2 => setTimeout(r2, 25000));
+            const imgs = await page.$$eval("img[src*='generated']", el => el.map(i => i.src));
+            r.images = imgs;
+            r.screenshot = await page.screenshot({encoding:"base64"});
+          }
+        } else {
+          r.actions = "navigate,screenshot,type,click,evaluate,grok_generate";
+        }
+
+        await browser.close();
+        r.timestamp = new Date().toISOString();
+        return j(r, cors);
+      }
+      return j({error:"Use /browser"}, cors, 404);
+    } catch(e) {
+      return j({error:e.message}, cors, 500);
+    }
+  }
+};
+
+function j(d,h,s=200){return new Response(JSON.stringify(d,null,2),{status:s,headers:h});}
+
+--eb8a827875b396bd5a936853079e1054c326745c611410827b745a5560ef--

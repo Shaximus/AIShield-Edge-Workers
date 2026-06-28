@@ -1,0 +1,602 @@
+--215f544d9affeaf4425304aea17781b52430326655c5d03ad99b35ca19ec
+Content-Disposition: form-data; name="index.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// index.ts
+async function logError(env, module, severity, message, stack) {
+  try {
+    await env.AURIS_LOGS.prepare(
+      "INSERT INTO error_log (module, severity, message, stack, timestamp) VALUES (?, ?, ?, ?, ?)"
+    ).bind(module, severity, message, stack, Date.now()).run();
+  } catch {
+  }
+}
+__name(logError, "logError");
+var FeatureExtractor = class {
+  static {
+    __name(this, "FeatureExtractor");
+  }
+  /**
+   * Extract profile features for ML inference.
+   * Mirrors extract_profile_features from detection_framework_fixed.py
+   */
+  static extractProfileFeatures(user) {
+    const features = [];
+    let metrics = {};
+    const rawMetrics = user["public_metrics"];
+    if (typeof rawMetrics === "string") {
+      try {
+        metrics = JSON.parse(rawMetrics);
+      } catch {
+        metrics = {};
+      }
+    } else if (rawMetrics && typeof rawMetrics === "object") {
+      metrics = rawMetrics;
+    }
+    const followersCount = Number(metrics["followers_count"] ?? 0);
+    const followingCount = Number(metrics["following_count"] ?? 0);
+    const tweetCount = Number(metrics["tweet_count"] ?? 0);
+    const listedCount = Number(metrics["listed_count"] ?? 0);
+    features.push(Math.log1p(followersCount));
+    features.push(Math.log1p(followingCount));
+    features.push(Math.log1p(tweetCount));
+    features.push(Math.log1p(listedCount));
+    const followers = Math.max(1, followersCount + 1);
+    features.push(Math.min(100, followingCount / followers));
+    features.push(Math.min(10, listedCount / followers));
+    features.push(Math.min(100, tweetCount / followers));
+    features.push(user["verified"] ? 1 : 0);
+    features.push(user["protected"] ? 1 : 0);
+    features.push(user["description"] ? 1 : 0);
+    features.push(user["url"] ? 1 : 0);
+    features.push(user["location"] ? 1 : 0);
+    const username = String(user["username"] ?? "");
+    features.push(Math.min(50, username.length));
+    features.push(Math.min(20, [...username].filter((c) => /\d/.test(c)).length));
+    features.push(Math.min(10, username.split("_").length - 1));
+    const bio = String(user["description"] ?? "");
+    features.push(Math.min(500, bio.length));
+    features.push(Math.min(100, bio.split(/\s+/).filter(Boolean).length));
+    return features;
+  }
+  /**
+   * Extract tweet features from a user's recent tweets.
+   */
+  static extractTweetFeatures(tweets) {
+    if (!tweets || tweets.length === 0) {
+      return [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    }
+    const totalTweets = tweets.length;
+    let totalRetweets = 0;
+    let totalReplies = 0;
+    let totalLikes = 0;
+    let hasUrlCount = 0;
+    let hasMentionCount = 0;
+    let hasHashtagCount = 0;
+    let duplicateCount = 0;
+    const texts = /* @__PURE__ */ new Set();
+    for (const tweet of tweets) {
+      const publicMetrics = tweet["public_metrics"];
+      if (publicMetrics) {
+        totalRetweets += publicMetrics["retweet_count"] ?? 0;
+        totalReplies += publicMetrics["reply_count"] ?? 0;
+        totalLikes += publicMetrics["like_count"] ?? 0;
+      }
+      const text = String(tweet["text"] ?? "");
+      if (/https?:\/\//.test(text)) hasUrlCount++;
+      if (text.includes("@")) hasMentionCount++;
+      if (text.includes("#")) hasHashtagCount++;
+      const normalized = text.toLowerCase().trim();
+      if (texts.has(normalized)) {
+        duplicateCount++;
+      }
+      texts.add(normalized);
+    }
+    return [
+      Math.log1p(totalTweets),
+      totalRetweets / totalTweets,
+      totalReplies / totalTweets,
+      totalLikes / totalTweets,
+      hasUrlCount / totalTweets,
+      hasMentionCount / totalTweets,
+      hasHashtagCount / totalTweets,
+      duplicateCount / totalTweets,
+      Math.log1p(totalLikes),
+      Math.log1p(totalRetweets)
+    ];
+  }
+};
+var UltimateBotDetector = class {
+  static {
+    __name(this, "UltimateBotDetector");
+  }
+  /**
+   * Analyze heuristics to compute bot probability.
+   * COMPLETE PORT of analyze_heuristics from detection_framework_fixed.py
+   */
+  static analyzeHeuristics(profileData, tweets) {
+    const username = String(profileData["username"] ?? "unknown");
+    let metrics = {};
+    const rawMetrics = profileData["public_metrics"];
+    if (typeof rawMetrics === "string") {
+      try {
+        metrics = JSON.parse(rawMetrics);
+      } catch {
+        metrics = {};
+      }
+    } else if (rawMetrics && typeof rawMetrics === "object") {
+      metrics = rawMetrics;
+    }
+    const followers = Number(metrics["followers_count"] ?? 0);
+    const following = Number(metrics["following_count"] ?? 0);
+    const tweetsCount = Number(metrics["tweet_count"] ?? 0);
+    const listed = Number(metrics["listed_count"] ?? 0);
+    let botScore = 0;
+    if (followers === 0 && following > 100) {
+      botScore += 0.4;
+    } else if (followers > 0) {
+      const ratio = following / followers;
+      if (ratio > 20) {
+        botScore += 0.3;
+      } else if (ratio > 10) {
+        botScore += 0.2;
+      } else if (ratio > 5) {
+        botScore += 0.1;
+      }
+    }
+    if (!profileData["description"]) {
+      botScore += 0.15;
+    }
+    if (!profileData["location"]) {
+      botScore += 0.05;
+    }
+    if (!profileData["url"]) {
+      botScore += 0.05;
+    }
+    const usernameLower = username.toLowerCase();
+    const suspiciousPatterns = ["bot", "spam", "fake"];
+    if (suspiciousPatterns.some((p) => usernameLower.includes(p))) {
+      botScore += 0.3;
+    }
+    const digitCount = [...username].filter((c) => /\d/.test(c)).length;
+    if (digitCount >= 8) {
+      botScore += 0.25;
+    } else if (digitCount >= 6) {
+      botScore += 0.15;
+    } else if (digitCount >= 4) {
+      botScore += 0.05;
+    }
+    if (tweetsCount === 0) {
+      botScore += 0.1;
+    } else if (tweetsCount < 10 && followers < 10) {
+      botScore += 0.15;
+    }
+    const createdAt = profileData["created_at"];
+    if (createdAt) {
+      try {
+        const created = typeof createdAt === "string" ? new Date(createdAt.replace("Z", "+00:00")) : new Date(createdAt);
+        const ageDays = Math.floor((Date.now() - created.getTime()) / (1e3 * 60 * 60 * 24));
+        if (ageDays < 7) {
+          botScore += 0.2;
+        } else if (ageDays < 30) {
+          botScore += 0.1;
+        }
+      } catch {
+      }
+    }
+    if (tweets && tweets.length > 0) {
+      const totalTweets = tweets.length;
+      let totalRetweets = 0;
+      let duplicateCount = 0;
+      const texts = /* @__PURE__ */ new Set();
+      for (const tweet of tweets) {
+        const publicMetrics = tweet["public_metrics"];
+        if (publicMetrics) {
+          totalRetweets += publicMetrics["retweet_count"] ?? 0;
+        }
+        const text = String(tweet["text"] ?? "");
+        const normalized = text.toLowerCase().trim();
+        if (texts.has(normalized)) {
+          duplicateCount++;
+        }
+        texts.add(normalized);
+      }
+      const avgRetweets = totalRetweets / totalTweets;
+      if (avgRetweets > 10) {
+        botScore += 0.15;
+      } else if (avgRetweets > 5) {
+        botScore += 0.1;
+      }
+      const duplicateRatio = duplicateCount / totalTweets;
+      if (duplicateRatio > 0.5) {
+        botScore += 0.2;
+      } else if (duplicateRatio > 0.25) {
+        botScore += 0.1;
+      }
+    }
+    const botProbability = Math.min(1, botScore);
+    const isBot = botProbability >= 0.5;
+    let botType;
+    let threatLevel;
+    if (isBot) {
+      if (botProbability >= 0.8) {
+        botType = "SPAM_BOT" /* SPAM_BOT */;
+        threatLevel = 4 /* HIGH */;
+      } else {
+        botType = "AUTOMATED" /* AUTOMATED */;
+        threatLevel = 3 /* MEDIUM */;
+      }
+    } else {
+      botType = "LEGITIMATE" /* LEGITIMATE */;
+      threatLevel = 0 /* NONE */;
+    }
+    return {
+      username,
+      is_bot: isBot,
+      bot_score: botProbability * 10,
+      bot_type: botType,
+      threat_level: threatLevel,
+      confidence: isBot ? 0.7 : 0.6,
+      reasoning: `Heuristics: ${(botProbability * 100).toFixed(1)}% bot probability`,
+      ml_probability: botProbability,
+      final_score: botProbability * 10,
+      profile_data: profileData,
+      detection_time: Date.now()
+    };
+  }
+  /**
+   * Determine if the account passes humanity guardrails.
+   * Returns TRUE if OK to flag as bot (no veto triggered).
+   * Returns FALSE if a veto is triggered (account is likely human).
+   *
+   * COMPLETE PORT of passes_humanity_guardrails from detection_framework_fixed.py
+   */
+  static passesHumanityGuardrails(profileData, botProbability) {
+    const metrics = parseMetrics(profileData);
+    const followers = Number(metrics["followers_count"] ?? 0);
+    const following = Number(metrics["following_count"] ?? 0);
+    const tweetsCount = Number(metrics["tweet_count"] ?? 0);
+    const listed = Number(metrics["listed_count"] ?? 0);
+    if (profileData["verified"]) {
+      return false;
+    }
+    const createdAt = profileData["created_at"];
+    if (createdAt) {
+      try {
+        const created = typeof createdAt === "string" ? new Date(createdAt.replace("Z", "+00:00")) : new Date(createdAt);
+        const ageDays = Math.floor((Date.now() - created.getTime()) / (1e3 * 60 * 60 * 24));
+        if (ageDays >= 365 && tweetsCount >= 100) {
+          return false;
+        }
+      } catch {
+      }
+    }
+    if (listed >= 10) {
+      return false;
+    }
+    if (followers >= 300 && following / Math.max(1, followers) <= 2.5) {
+      return false;
+    }
+    const bio = String(profileData["description"] ?? "");
+    if (bio.length >= 40) {
+      const scamTerms = ["crypto", "nft", "drop your", "dm for", "click here", "free followers", "earn money"];
+      const hasScam = scamTerms.some((term) => bio.toLowerCase().includes(term));
+      if (!hasScam) {
+        return false;
+      }
+    }
+    return true;
+  }
+  /**
+   * Full detection pipeline: heuristics + guardrails + result classification.
+   */
+  static detect(profileData, tweets) {
+    let result = this.analyzeHeuristics(profileData, tweets);
+    if (result.is_bot) {
+      const passesGuardrails = this.passesHumanityGuardrails(profileData, result.ml_probability);
+      if (!passesGuardrails) {
+        result = {
+          ...result,
+          is_bot: false,
+          bot_type: "LEGITIMATE" /* LEGITIMATE */,
+          threat_level: 0 /* NONE */,
+          confidence: 0.5,
+          reasoning: `Heuristics: ${(result.ml_probability * 100).toFixed(1)}% bot probability \u2014 OVERRIDDEN by humanity guardrails`,
+          bot_score: Math.max(0, result.ml_probability * 10 - 3),
+          final_score: Math.max(0, result.ml_probability * 10 - 3)
+        };
+      }
+    }
+    const p = result.ml_probability;
+    if (p < 0.2) {
+      result = {
+        ...result,
+        is_bot: false,
+        bot_type: "LEGITIMATE" /* LEGITIMATE */,
+        threat_level: 0 /* NONE */,
+        reasoning: `${result.reasoning} | Band: CLEAR_HUMAN`
+      };
+    } else if (p >= 0.2 && p < 0.8) {
+      result = {
+        ...result,
+        reasoning: `${result.reasoning} | Band: GRAY_ZONE`,
+        threat_level: result.is_bot ? 2 /* LOW */ : 1 /* MINIMAL */
+      };
+    } else {
+      result = {
+        ...result,
+        reasoning: `${result.reasoning} | Band: HIGH_BOT`,
+        threat_level: result.is_bot ? 4 /* HIGH */ : 3 /* MEDIUM */
+      };
+    }
+    return result;
+  }
+};
+function parseMetrics(profileData) {
+  let metrics = {};
+  const rawMetrics = profileData["public_metrics"];
+  if (typeof rawMetrics === "string") {
+    try {
+      metrics = JSON.parse(rawMetrics);
+    } catch {
+      metrics = {};
+    }
+  } else if (rawMetrics && typeof rawMetrics === "object") {
+    metrics = rawMetrics;
+  }
+  return metrics;
+}
+__name(parseMetrics, "parseMetrics");
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type"
+    }
+  });
+}
+__name(jsonResponse, "jsonResponse");
+async function storeDetectionResult(env, result) {
+  try {
+    await env.VIGILANTE_DB.prepare(
+      `INSERT INTO detections
+        (username, is_bot, bot_score, bot_type, threat_level, confidence, reasoning, ml_probability, final_score, profile_data, detection_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      result.username,
+      result.is_bot ? 1 : 0,
+      result.bot_score,
+      result.bot_type,
+      result.threat_level,
+      result.confidence,
+      result.reasoning,
+      result.ml_probability,
+      result.final_score,
+      JSON.stringify(result.profile_data),
+      result.detection_time ?? Date.now()
+    ).run();
+  } catch (e) {
+    await logError(
+      env,
+      "vigilante-processor",
+      "WARN",
+      `Failed to store detection result: ${e.message}`,
+      e.stack ?? ""
+    );
+  }
+}
+__name(storeDetectionResult, "storeDetectionResult");
+async function handleDetect(request, env) {
+  try {
+    const body = await request.json();
+    if (!body.profile_data) {
+      return jsonResponse({ error: "Missing profile_data field" }, 400);
+    }
+    const result = UltimateBotDetector.detect(body.profile_data, body.tweets);
+    const storagePromise = storeDetectionResult(env, result);
+    await Promise.race([
+      storagePromise,
+      new Promise((resolve) => setTimeout(resolve, 2e3))
+    ]);
+    return jsonResponse({
+      success: true,
+      result,
+      features: {
+        profile: FeatureExtractor.extractProfileFeatures(body.profile_data),
+        tweets: FeatureExtractor.extractTweetFeatures(body.tweets)
+      }
+    });
+  } catch (e) {
+    await logError(
+      env,
+      "vigilante-processor",
+      "ERROR",
+      `Detect endpoint error: ${e.message}`,
+      e.stack ?? ""
+    );
+    throw e;
+  }
+}
+__name(handleDetect, "handleDetect");
+async function handleBatchDetect(request, env) {
+  try {
+    const body = await request.json();
+    if (!body.profiles || !Array.isArray(body.profiles)) {
+      return jsonResponse({ error: "Missing profiles array" }, 400);
+    }
+    const results = [];
+    for (const item of body.profiles) {
+      try {
+        const result = UltimateBotDetector.detect(item.profile_data, item.tweets);
+        storeDetectionResult(env, result).catch(() => {
+        });
+        results.push({
+          success: true,
+          result,
+          features: {
+            profile: FeatureExtractor.extractProfileFeatures(item.profile_data),
+            tweets: FeatureExtractor.extractTweetFeatures(item.tweets)
+          }
+        });
+      } catch (itemError) {
+        await logError(
+          env,
+          "vigilante-processor",
+          "WARN",
+          `Batch item error for ${item.profile_data?.["username"] ?? "unknown"}: ${itemError.message}`,
+          itemError.stack ?? ""
+        );
+        results.push({
+          success: false,
+          result: {
+            username: String(item.profile_data?.["username"] ?? "unknown"),
+            is_bot: false,
+            bot_score: 0,
+            bot_type: "UNKNOWN" /* UNKNOWN */,
+            threat_level: 0 /* NONE */,
+            confidence: 0,
+            reasoning: `Error during detection: ${itemError.message}`,
+            ml_probability: 0,
+            final_score: 0,
+            profile_data: item.profile_data ?? {},
+            detection_time: Date.now()
+          },
+          features: { profile: [], tweets: [] }
+        });
+      }
+    }
+    return jsonResponse({
+      success: true,
+      total: body.profiles.length,
+      processed: results.length,
+      bot_count: results.filter((r) => r.result.is_bot).length,
+      results
+    });
+  } catch (e) {
+    await logError(
+      env,
+      "vigilante-processor",
+      "ERROR",
+      `Batch detect endpoint error: ${e.message}`,
+      e.stack ?? ""
+    );
+    throw e;
+  }
+}
+__name(handleBatchDetect, "handleBatchDetect");
+async function handleHealth(env) {
+  try {
+    let dbStatus = "ok";
+    try {
+      await env.VIGILANTE_DB.prepare("SELECT 1").first();
+    } catch (dbError) {
+      dbStatus = "error";
+      await logError(
+        env,
+        "vigilante-processor",
+        "WARN",
+        `Health check \u2014 VIGILANTE_DB unavailable: ${dbError.message}`,
+        dbError.stack ?? ""
+      );
+    }
+    let logsStatus = "ok";
+    try {
+      await env.AURIS_LOGS.prepare("SELECT 1").first();
+    } catch (logsError) {
+      logsStatus = "error";
+      await logError(
+        env,
+        "vigilante-processor",
+        "WARN",
+        `Health check \u2014 AURIS_LOGS unavailable: ${logsError.message}`,
+        logsError.stack ?? ""
+      );
+    }
+    return jsonResponse({
+      status: "healthy",
+      service: "vigilante-processor",
+      version: "1.0.0",
+      timestamp: Date.now(),
+      dependencies: {
+        VIGILANTE_DB: dbStatus,
+        AURIS_LOGS: logsStatus
+      }
+    });
+  } catch (e) {
+    await logError(
+      env,
+      "vigilante-processor",
+      "ERROR",
+      `Health check error: ${e.message}`,
+      e.stack ?? ""
+    );
+    throw e;
+  }
+}
+__name(handleHealth, "handleHealth");
+var index_default = {
+  async fetch(request, env, _ctx) {
+    try {
+      const url = new URL(request.url);
+      const method = request.method;
+      if (method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type"
+          }
+        });
+      }
+      if (url.pathname === "/detect" && method === "POST") {
+        return await handleDetect(request, env);
+      }
+      if (url.pathname === "/detect/batch" && method === "POST") {
+        return await handleBatchDetect(request, env);
+      }
+      if (url.pathname === "/health" && method === "GET") {
+        return await handleHealth(env);
+      }
+      if (url.pathname === "/") {
+        return jsonResponse({
+          service: "vigilante-processor",
+          version: "1.0.0",
+          description: "Bot detection inference worker for the Vigilante Bot Detector SaaS",
+          endpoints: {
+            "POST /detect": "Run detection on a single profile",
+            "POST /detect/batch": "Run detection on a batch of profiles",
+            "GET /health": "Health check"
+          }
+        });
+      }
+      return jsonResponse({ error: "Not Found" }, 404);
+    } catch (e) {
+      try {
+        await logError(
+          env,
+          "vigilante-processor",
+          "CRITICAL",
+          `Unhandled error in fetch handler: ${e.message}`,
+          e.stack ?? ""
+        );
+      } catch {
+      }
+      return jsonResponse({
+        error: "Internal Server Error",
+        message: e.message
+      }, 500);
+    }
+  }
+};
+export {
+  index_default as default
+};
+//# sourceMappingURL=index.js.map
+
+--215f544d9affeaf4425304aea17781b52430326655c5d03ad99b35ca19ec--

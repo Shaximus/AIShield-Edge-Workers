@@ -1,0 +1,1729 @@
+--95326c3b6740f3074d0c48cddec321db84781fa0a140a54881b6ec4cb889
+Content-Disposition: form-data; name="router.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/_internal/utils.mjs
+// @__NO_SIDE_EFFECTS__
+function createNotImplementedError(name) {
+  return new Error(`[unenv] ${name} is not implemented yet!`);
+}
+__name(createNotImplementedError, "createNotImplementedError");
+// @__NO_SIDE_EFFECTS__
+function notImplemented(name) {
+  const fn = /* @__PURE__ */ __name(() => {
+    throw /* @__PURE__ */ createNotImplementedError(name);
+  }, "fn");
+  return Object.assign(fn, { __unenv__: true });
+}
+__name(notImplemented, "notImplemented");
+// @__NO_SIDE_EFFECTS__
+function notImplementedClass(name) {
+  return class {
+    __unenv__ = true;
+    constructor() {
+      throw new Error(`[unenv] ${name} is not implemented yet!`);
+    }
+  };
+}
+__name(notImplementedClass, "notImplementedClass");
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/perf_hooks/performance.mjs
+var _timeOrigin = globalThis.performance?.timeOrigin ?? Date.now();
+var _performanceNow = globalThis.performance?.now ? globalThis.performance.now.bind(globalThis.performance) : () => Date.now() - _timeOrigin;
+var nodeTiming = {
+  name: "node",
+  entryType: "node",
+  startTime: 0,
+  duration: 0,
+  nodeStart: 0,
+  v8Start: 0,
+  bootstrapComplete: 0,
+  environment: 0,
+  loopStart: 0,
+  loopExit: 0,
+  idleTime: 0,
+  uvMetricsInfo: {
+    loopCount: 0,
+    events: 0,
+    eventsWaiting: 0
+  },
+  detail: void 0,
+  toJSON() {
+    return this;
+  }
+};
+var PerformanceEntry = class {
+  static {
+    __name(this, "PerformanceEntry");
+  }
+  __unenv__ = true;
+  detail;
+  entryType = "event";
+  name;
+  startTime;
+  constructor(name, options) {
+    this.name = name;
+    this.startTime = options?.startTime || _performanceNow();
+    this.detail = options?.detail;
+  }
+  get duration() {
+    return _performanceNow() - this.startTime;
+  }
+  toJSON() {
+    return {
+      name: this.name,
+      entryType: this.entryType,
+      startTime: this.startTime,
+      duration: this.duration,
+      detail: this.detail
+    };
+  }
+};
+var PerformanceMark = class PerformanceMark2 extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceMark");
+  }
+  entryType = "mark";
+  constructor() {
+    super(...arguments);
+  }
+  get duration() {
+    return 0;
+  }
+};
+var PerformanceMeasure = class extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceMeasure");
+  }
+  entryType = "measure";
+};
+var PerformanceResourceTiming = class extends PerformanceEntry {
+  static {
+    __name(this, "PerformanceResourceTiming");
+  }
+  entryType = "resource";
+  serverTiming = [];
+  connectEnd = 0;
+  connectStart = 0;
+  decodedBodySize = 0;
+  domainLookupEnd = 0;
+  domainLookupStart = 0;
+  encodedBodySize = 0;
+  fetchStart = 0;
+  initiatorType = "";
+  name = "";
+  nextHopProtocol = "";
+  redirectEnd = 0;
+  redirectStart = 0;
+  requestStart = 0;
+  responseEnd = 0;
+  responseStart = 0;
+  secureConnectionStart = 0;
+  startTime = 0;
+  transferSize = 0;
+  workerStart = 0;
+  responseStatus = 0;
+};
+var PerformanceObserverEntryList = class {
+  static {
+    __name(this, "PerformanceObserverEntryList");
+  }
+  __unenv__ = true;
+  getEntries() {
+    return [];
+  }
+  getEntriesByName(_name, _type) {
+    return [];
+  }
+  getEntriesByType(type) {
+    return [];
+  }
+};
+var Performance = class {
+  static {
+    __name(this, "Performance");
+  }
+  __unenv__ = true;
+  timeOrigin = _timeOrigin;
+  eventCounts = /* @__PURE__ */ new Map();
+  _entries = [];
+  _resourceTimingBufferSize = 0;
+  navigation = void 0;
+  timing = void 0;
+  timerify(_fn, _options) {
+    throw createNotImplementedError("Performance.timerify");
+  }
+  get nodeTiming() {
+    return nodeTiming;
+  }
+  eventLoopUtilization() {
+    return {};
+  }
+  markResourceTiming() {
+    return new PerformanceResourceTiming("");
+  }
+  onresourcetimingbufferfull = null;
+  now() {
+    if (this.timeOrigin === _timeOrigin) {
+      return _performanceNow();
+    }
+    return Date.now() - this.timeOrigin;
+  }
+  clearMarks(markName) {
+    this._entries = markName ? this._entries.filter((e) => e.name !== markName) : this._entries.filter((e) => e.entryType !== "mark");
+  }
+  clearMeasures(measureName) {
+    this._entries = measureName ? this._entries.filter((e) => e.name !== measureName) : this._entries.filter((e) => e.entryType !== "measure");
+  }
+  clearResourceTimings() {
+    this._entries = this._entries.filter((e) => e.entryType !== "resource" || e.entryType !== "navigation");
+  }
+  getEntries() {
+    return this._entries;
+  }
+  getEntriesByName(name, type) {
+    return this._entries.filter((e) => e.name === name && (!type || e.entryType === type));
+  }
+  getEntriesByType(type) {
+    return this._entries.filter((e) => e.entryType === type);
+  }
+  mark(name, options) {
+    const entry = new PerformanceMark(name, options);
+    this._entries.push(entry);
+    return entry;
+  }
+  measure(measureName, startOrMeasureOptions, endMark) {
+    let start;
+    let end;
+    if (typeof startOrMeasureOptions === "string") {
+      start = this.getEntriesByName(startOrMeasureOptions, "mark")[0]?.startTime;
+      end = this.getEntriesByName(endMark, "mark")[0]?.startTime;
+    } else {
+      start = Number.parseFloat(startOrMeasureOptions?.start) || this.now();
+      end = Number.parseFloat(startOrMeasureOptions?.end) || this.now();
+    }
+    const entry = new PerformanceMeasure(measureName, {
+      startTime: start,
+      detail: {
+        start,
+        end
+      }
+    });
+    this._entries.push(entry);
+    return entry;
+  }
+  setResourceTimingBufferSize(maxSize) {
+    this._resourceTimingBufferSize = maxSize;
+  }
+  addEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.addEventListener");
+  }
+  removeEventListener(type, listener, options) {
+    throw createNotImplementedError("Performance.removeEventListener");
+  }
+  dispatchEvent(event) {
+    throw createNotImplementedError("Performance.dispatchEvent");
+  }
+  toJSON() {
+    return this;
+  }
+};
+var PerformanceObserver = class {
+  static {
+    __name(this, "PerformanceObserver");
+  }
+  __unenv__ = true;
+  static supportedEntryTypes = [];
+  _callback = null;
+  constructor(callback) {
+    this._callback = callback;
+  }
+  takeRecords() {
+    return [];
+  }
+  disconnect() {
+    throw createNotImplementedError("PerformanceObserver.disconnect");
+  }
+  observe(options) {
+    throw createNotImplementedError("PerformanceObserver.observe");
+  }
+  bind(fn) {
+    return fn;
+  }
+  runInAsyncScope(fn, thisArg, ...args) {
+    return fn.call(thisArg, ...args);
+  }
+  asyncId() {
+    return 0;
+  }
+  triggerAsyncId() {
+    return 0;
+  }
+  emitDestroy() {
+    return this;
+  }
+};
+var performance = globalThis.performance && "addEventListener" in globalThis.performance ? globalThis.performance : new Performance();
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/polyfill/performance.mjs
+if (!("__unenv__" in performance)) {
+  const proto = Performance.prototype;
+  for (const key of Object.getOwnPropertyNames(proto)) {
+    if (key !== "constructor" && !(key in performance)) {
+      const desc = Object.getOwnPropertyDescriptor(proto, key);
+      if (desc) {
+        Object.defineProperty(performance, key, desc);
+      }
+    }
+  }
+}
+globalThis.performance = performance;
+globalThis.Performance = Performance;
+globalThis.PerformanceEntry = PerformanceEntry;
+globalThis.PerformanceMark = PerformanceMark;
+globalThis.PerformanceMeasure = PerformanceMeasure;
+globalThis.PerformanceObserver = PerformanceObserver;
+globalThis.PerformanceObserverEntryList = PerformanceObserverEntryList;
+globalThis.PerformanceResourceTiming = PerformanceResourceTiming;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/console.mjs
+import { Writable } from "node:stream";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/mock/noop.mjs
+var noop_default = Object.assign(() => {
+}, { __unenv__: true });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/console.mjs
+var _console = globalThis.console;
+var _ignoreErrors = true;
+var _stderr = new Writable();
+var _stdout = new Writable();
+var log = _console?.log ?? noop_default;
+var info = _console?.info ?? log;
+var trace = _console?.trace ?? info;
+var debug = _console?.debug ?? log;
+var table = _console?.table ?? log;
+var error = _console?.error ?? log;
+var warn = _console?.warn ?? error;
+var createTask = _console?.createTask ?? /* @__PURE__ */ notImplemented("console.createTask");
+var clear = _console?.clear ?? noop_default;
+var count = _console?.count ?? noop_default;
+var countReset = _console?.countReset ?? noop_default;
+var dir = _console?.dir ?? noop_default;
+var dirxml = _console?.dirxml ?? noop_default;
+var group = _console?.group ?? noop_default;
+var groupEnd = _console?.groupEnd ?? noop_default;
+var groupCollapsed = _console?.groupCollapsed ?? noop_default;
+var profile = _console?.profile ?? noop_default;
+var profileEnd = _console?.profileEnd ?? noop_default;
+var time = _console?.time ?? noop_default;
+var timeEnd = _console?.timeEnd ?? noop_default;
+var timeLog = _console?.timeLog ?? noop_default;
+var timeStamp = _console?.timeStamp ?? noop_default;
+var Console = _console?.Console ?? /* @__PURE__ */ notImplementedClass("console.Console");
+var _times = /* @__PURE__ */ new Map();
+var _stdoutErrorHandler = noop_default;
+var _stderrErrorHandler = noop_default;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/node/console.mjs
+var workerdConsole = globalThis["console"];
+var {
+  assert,
+  clear: clear2,
+  // @ts-expect-error undocumented public API
+  context,
+  count: count2,
+  countReset: countReset2,
+  // @ts-expect-error undocumented public API
+  createTask: createTask2,
+  debug: debug2,
+  dir: dir2,
+  dirxml: dirxml2,
+  error: error2,
+  group: group2,
+  groupCollapsed: groupCollapsed2,
+  groupEnd: groupEnd2,
+  info: info2,
+  log: log2,
+  profile: profile2,
+  profileEnd: profileEnd2,
+  table: table2,
+  time: time2,
+  timeEnd: timeEnd2,
+  timeLog: timeLog2,
+  timeStamp: timeStamp2,
+  trace: trace2,
+  warn: warn2
+} = workerdConsole;
+Object.assign(workerdConsole, {
+  Console,
+  _ignoreErrors,
+  _stderr,
+  _stderrErrorHandler,
+  _stdout,
+  _stdoutErrorHandler,
+  _times
+});
+var console_default = workerdConsole;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-console
+globalThis.console = console_default;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/hrtime.mjs
+var hrtime = /* @__PURE__ */ Object.assign(/* @__PURE__ */ __name(function hrtime2(startTime) {
+  const now = Date.now();
+  const seconds = Math.trunc(now / 1e3);
+  const nanos = now % 1e3 * 1e6;
+  if (startTime) {
+    let diffSeconds = seconds - startTime[0];
+    let diffNanos = nanos - startTime[0];
+    if (diffNanos < 0) {
+      diffSeconds = diffSeconds - 1;
+      diffNanos = 1e9 + diffNanos;
+    }
+    return [diffSeconds, diffNanos];
+  }
+  return [seconds, nanos];
+}, "hrtime"), { bigint: /* @__PURE__ */ __name(function bigint() {
+  return BigInt(Date.now() * 1e6);
+}, "bigint") });
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+import { EventEmitter } from "node:events";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/tty/read-stream.mjs
+var ReadStream = class {
+  static {
+    __name(this, "ReadStream");
+  }
+  fd;
+  isRaw = false;
+  isTTY = false;
+  constructor(fd) {
+    this.fd = fd;
+  }
+  setRawMode(mode) {
+    this.isRaw = mode;
+    return this;
+  }
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/tty/write-stream.mjs
+var WriteStream = class {
+  static {
+    __name(this, "WriteStream");
+  }
+  fd;
+  columns = 80;
+  rows = 24;
+  isTTY = false;
+  constructor(fd) {
+    this.fd = fd;
+  }
+  clearLine(dir3, callback) {
+    callback && callback();
+    return false;
+  }
+  clearScreenDown(callback) {
+    callback && callback();
+    return false;
+  }
+  cursorTo(x, y, callback) {
+    callback && typeof callback === "function" && callback();
+    return false;
+  }
+  moveCursor(dx, dy, callback) {
+    callback && callback();
+    return false;
+  }
+  getColorDepth(env2) {
+    return 1;
+  }
+  hasColors(count3, env2) {
+    return false;
+  }
+  getWindowSize() {
+    return [this.columns, this.rows];
+  }
+  write(str, encoding, cb) {
+    if (str instanceof Uint8Array) {
+      str = new TextDecoder().decode(str);
+    }
+    try {
+      console.log(str);
+    } catch {
+    }
+    cb && typeof cb === "function" && cb();
+    return false;
+  }
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/node-version.mjs
+var NODE_VERSION = "22.14.0";
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/unenv/dist/runtime/node/internal/process/process.mjs
+var Process = class _Process extends EventEmitter {
+  static {
+    __name(this, "Process");
+  }
+  env;
+  hrtime;
+  nextTick;
+  constructor(impl) {
+    super();
+    this.env = impl.env;
+    this.hrtime = impl.hrtime;
+    this.nextTick = impl.nextTick;
+    for (const prop of [...Object.getOwnPropertyNames(_Process.prototype), ...Object.getOwnPropertyNames(EventEmitter.prototype)]) {
+      const value = this[prop];
+      if (typeof value === "function") {
+        this[prop] = value.bind(this);
+      }
+    }
+  }
+  // --- event emitter ---
+  emitWarning(warning, type, code) {
+    console.warn(`${code ? `[${code}] ` : ""}${type ? `${type}: ` : ""}${warning}`);
+  }
+  emit(...args) {
+    return super.emit(...args);
+  }
+  listeners(eventName) {
+    return super.listeners(eventName);
+  }
+  // --- stdio (lazy initializers) ---
+  #stdin;
+  #stdout;
+  #stderr;
+  get stdin() {
+    return this.#stdin ??= new ReadStream(0);
+  }
+  get stdout() {
+    return this.#stdout ??= new WriteStream(1);
+  }
+  get stderr() {
+    return this.#stderr ??= new WriteStream(2);
+  }
+  // --- cwd ---
+  #cwd = "/";
+  chdir(cwd2) {
+    this.#cwd = cwd2;
+  }
+  cwd() {
+    return this.#cwd;
+  }
+  // --- dummy props and getters ---
+  arch = "";
+  platform = "";
+  argv = [];
+  argv0 = "";
+  execArgv = [];
+  execPath = "";
+  title = "";
+  pid = 200;
+  ppid = 100;
+  get version() {
+    return `v${NODE_VERSION}`;
+  }
+  get versions() {
+    return { node: NODE_VERSION };
+  }
+  get allowedNodeEnvironmentFlags() {
+    return /* @__PURE__ */ new Set();
+  }
+  get sourceMapsEnabled() {
+    return false;
+  }
+  get debugPort() {
+    return 0;
+  }
+  get throwDeprecation() {
+    return false;
+  }
+  get traceDeprecation() {
+    return false;
+  }
+  get features() {
+    return {};
+  }
+  get release() {
+    return {};
+  }
+  get connected() {
+    return false;
+  }
+  get config() {
+    return {};
+  }
+  get moduleLoadList() {
+    return [];
+  }
+  constrainedMemory() {
+    return 0;
+  }
+  availableMemory() {
+    return 0;
+  }
+  uptime() {
+    return 0;
+  }
+  resourceUsage() {
+    return {};
+  }
+  // --- noop methods ---
+  ref() {
+  }
+  unref() {
+  }
+  // --- unimplemented methods ---
+  umask() {
+    throw createNotImplementedError("process.umask");
+  }
+  getBuiltinModule() {
+    return void 0;
+  }
+  getActiveResourcesInfo() {
+    throw createNotImplementedError("process.getActiveResourcesInfo");
+  }
+  exit() {
+    throw createNotImplementedError("process.exit");
+  }
+  reallyExit() {
+    throw createNotImplementedError("process.reallyExit");
+  }
+  kill() {
+    throw createNotImplementedError("process.kill");
+  }
+  abort() {
+    throw createNotImplementedError("process.abort");
+  }
+  dlopen() {
+    throw createNotImplementedError("process.dlopen");
+  }
+  setSourceMapsEnabled() {
+    throw createNotImplementedError("process.setSourceMapsEnabled");
+  }
+  loadEnvFile() {
+    throw createNotImplementedError("process.loadEnvFile");
+  }
+  disconnect() {
+    throw createNotImplementedError("process.disconnect");
+  }
+  cpuUsage() {
+    throw createNotImplementedError("process.cpuUsage");
+  }
+  setUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.setUncaughtExceptionCaptureCallback");
+  }
+  hasUncaughtExceptionCaptureCallback() {
+    throw createNotImplementedError("process.hasUncaughtExceptionCaptureCallback");
+  }
+  initgroups() {
+    throw createNotImplementedError("process.initgroups");
+  }
+  openStdin() {
+    throw createNotImplementedError("process.openStdin");
+  }
+  assert() {
+    throw createNotImplementedError("process.assert");
+  }
+  binding() {
+    throw createNotImplementedError("process.binding");
+  }
+  // --- attached interfaces ---
+  permission = { has: /* @__PURE__ */ notImplemented("process.permission.has") };
+  report = {
+    directory: "",
+    filename: "",
+    signal: "SIGUSR2",
+    compact: false,
+    reportOnFatalError: false,
+    reportOnSignal: false,
+    reportOnUncaughtException: false,
+    getReport: /* @__PURE__ */ notImplemented("process.report.getReport"),
+    writeReport: /* @__PURE__ */ notImplemented("process.report.writeReport")
+  };
+  finalization = {
+    register: /* @__PURE__ */ notImplemented("process.finalization.register"),
+    unregister: /* @__PURE__ */ notImplemented("process.finalization.unregister"),
+    registerBeforeExit: /* @__PURE__ */ notImplemented("process.finalization.registerBeforeExit")
+  };
+  memoryUsage = Object.assign(() => ({
+    arrayBuffers: 0,
+    rss: 0,
+    external: 0,
+    heapTotal: 0,
+    heapUsed: 0
+  }), { rss: /* @__PURE__ */ __name(() => 0, "rss") });
+  // --- undefined props ---
+  mainModule = void 0;
+  domain = void 0;
+  // optional
+  send = void 0;
+  exitCode = void 0;
+  channel = void 0;
+  getegid = void 0;
+  geteuid = void 0;
+  getgid = void 0;
+  getgroups = void 0;
+  getuid = void 0;
+  setegid = void 0;
+  seteuid = void 0;
+  setgid = void 0;
+  setgroups = void 0;
+  setuid = void 0;
+  // internals
+  _events = void 0;
+  _eventsCount = void 0;
+  _exiting = void 0;
+  _maxListeners = void 0;
+  _debugEnd = void 0;
+  _debugProcess = void 0;
+  _fatalException = void 0;
+  _getActiveHandles = void 0;
+  _getActiveRequests = void 0;
+  _kill = void 0;
+  _preload_modules = void 0;
+  _rawDebug = void 0;
+  _startProfilerIdleNotifier = void 0;
+  _stopProfilerIdleNotifier = void 0;
+  _tickCallback = void 0;
+  _disconnect = void 0;
+  _handleQueue = void 0;
+  _pendingMessage = void 0;
+  _channel = void 0;
+  _send = void 0;
+  _linkedBinding = void 0;
+};
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/node_modules/@cloudflare/unenv-preset/dist/runtime/node/process.mjs
+var globalProcess = globalThis["process"];
+var getBuiltinModule = globalProcess.getBuiltinModule;
+var workerdProcess = getBuiltinModule("node:process");
+var unenvProcess = new Process({
+  env: globalProcess.env,
+  hrtime,
+  // `nextTick` is available from workerd process v1
+  nextTick: workerdProcess.nextTick
+});
+var { exit, features, platform } = workerdProcess;
+var {
+  _channel,
+  _debugEnd,
+  _debugProcess,
+  _disconnect,
+  _events,
+  _eventsCount,
+  _exiting,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _handleQueue,
+  _kill,
+  _linkedBinding,
+  _maxListeners,
+  _pendingMessage,
+  _preload_modules,
+  _rawDebug,
+  _send,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  arch,
+  argv,
+  argv0,
+  assert: assert2,
+  availableMemory,
+  binding,
+  channel,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  disconnect,
+  dlopen,
+  domain,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  exitCode,
+  finalization,
+  getActiveResourcesInfo,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getMaxListeners,
+  getuid,
+  hasUncaughtExceptionCaptureCallback,
+  hrtime: hrtime3,
+  initgroups,
+  kill,
+  listenerCount,
+  listeners,
+  loadEnvFile,
+  mainModule,
+  memoryUsage,
+  moduleLoadList,
+  nextTick,
+  off,
+  on,
+  once,
+  openStdin,
+  permission,
+  pid,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  reallyExit,
+  ref,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  send,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  setuid,
+  setUncaughtExceptionCaptureCallback,
+  sourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  throwDeprecation,
+  title,
+  traceDeprecation,
+  umask,
+  unref,
+  uptime,
+  version,
+  versions
+} = unenvProcess;
+var _process = {
+  abort,
+  addListener,
+  allowedNodeEnvironmentFlags,
+  hasUncaughtExceptionCaptureCallback,
+  setUncaughtExceptionCaptureCallback,
+  loadEnvFile,
+  sourceMapsEnabled,
+  arch,
+  argv,
+  argv0,
+  chdir,
+  config,
+  connected,
+  constrainedMemory,
+  availableMemory,
+  cpuUsage,
+  cwd,
+  debugPort,
+  dlopen,
+  disconnect,
+  emit,
+  emitWarning,
+  env,
+  eventNames,
+  execArgv,
+  execPath,
+  exit,
+  finalization,
+  features,
+  getBuiltinModule,
+  getActiveResourcesInfo,
+  getMaxListeners,
+  hrtime: hrtime3,
+  kill,
+  listeners,
+  listenerCount,
+  memoryUsage,
+  nextTick,
+  on,
+  off,
+  once,
+  pid,
+  platform,
+  ppid,
+  prependListener,
+  prependOnceListener,
+  rawListeners,
+  release,
+  removeAllListeners,
+  removeListener,
+  report,
+  resourceUsage,
+  setMaxListeners,
+  setSourceMapsEnabled,
+  stderr,
+  stdin,
+  stdout,
+  title,
+  throwDeprecation,
+  traceDeprecation,
+  umask,
+  uptime,
+  version,
+  versions,
+  // @ts-expect-error old API
+  domain,
+  initgroups,
+  moduleLoadList,
+  reallyExit,
+  openStdin,
+  assert: assert2,
+  binding,
+  send,
+  exitCode,
+  channel,
+  getegid,
+  geteuid,
+  getgid,
+  getgroups,
+  getuid,
+  setegid,
+  seteuid,
+  setgid,
+  setgroups,
+  setuid,
+  permission,
+  mainModule,
+  _events,
+  _eventsCount,
+  _exiting,
+  _maxListeners,
+  _debugEnd,
+  _debugProcess,
+  _fatalException,
+  _getActiveHandles,
+  _getActiveRequests,
+  _kill,
+  _preload_modules,
+  _rawDebug,
+  _startProfilerIdleNotifier,
+  _stopProfilerIdleNotifier,
+  _tickCallback,
+  _disconnect,
+  _handleQueue,
+  _pendingMessage,
+  _channel,
+  _send,
+  _linkedBinding
+};
+var process_default = _process;
+
+// ../../../../../../home/kimi/.npm-global/lib/node_modules/wrangler/_virtual_unenv_global_polyfill-@cloudflare-unenv-preset-node-process
+globalThis.process = process_default;
+
+// src/logger.ts
+function summarize(obj, maxLen = 256) {
+  try {
+    const json = JSON.stringify(obj);
+    if (json.length <= maxLen) return json;
+    return json.slice(0, maxLen) + `...[truncated ${json.length - maxLen} chars]`;
+  } catch (e) {
+    console.error(`[router.logger.summarize] FAILED: JSON stringify error: ${e.message}`, {
+      error_type: e.constructor.name,
+      stack_trace: e.stack,
+      context: "Logger summarize JSON.stringify",
+      severity: "ERROR",
+      worker_name: "moe-router"
+    });
+    return "[unserializable]";
+  }
+}
+__name(summarize, "summarize");
+function summarizeRequest(req, maxLen = 256) {
+  const headersCount = req.headers && typeof req.headers === "object" ? Object.keys(req.headers).length : 0;
+  const out = {
+    method: req.method ?? "UNKNOWN",
+    url: req.url ?? "UNKNOWN",
+    headersCount,
+    hasBody: !!req.body
+  };
+  return summarize(out, maxLen);
+}
+__name(summarizeRequest, "summarizeRequest");
+function contentSignature(input) {
+  let hash = 0xcbf29ce484222325n;
+  const prime = 0x100000001b3n;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= BigInt(input.charCodeAt(i) & 255);
+    hash *= prime;
+    hash &= 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+__name(contentSignature, "contentSignature");
+var Logger = class _Logger {
+  static {
+    __name(this, "Logger");
+  }
+  module;
+  env;
+  sessionId;
+  constructor(module, env2, sessionId) {
+    this.module = module;
+    this.env = env2;
+    this.sessionId = sessionId ?? `sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+  /**
+   * Build a LogEntry and route it to console + D1.
+   */
+  log(severity, function_name, message, opts) {
+    const entry = {
+      timestamp: Date.now(),
+      module: this.module,
+      function_name,
+      severity,
+      message,
+      context: opts?.context,
+      session_id: opts?.session_id ?? this.sessionId,
+      stack_trace: opts?.stack_trace
+    };
+    const consoleLine = `[${entry.timestamp}] [${severity}] [${this.module}.${function_name}] ${entry.message}`;
+    switch (severity) {
+      case "DEBUG":
+        console.debug(consoleLine);
+        break;
+      case "INFO":
+        console.info(consoleLine);
+        break;
+      case "WARNING":
+        console.warn(consoleLine);
+        break;
+      case "ERROR":
+      case "CRITICAL":
+        console.error(consoleLine);
+        break;
+    }
+    const d1Promise = this.writeToD1(entry);
+    if (severity === "CRITICAL") {
+      d1Promise.catch((e) => {
+        console.error(`[${this.module}.Logger] CRITICAL D1 write failed: ${e instanceof Error ? e.message : String(e)}`);
+      });
+    } else {
+      d1Promise.catch((e) => {
+        console.error(`[${this.module}.Logger] FAILED: Non-critical D1 write error: ${e instanceof Error ? e.message : String(e)}`, {
+          error_type: e instanceof Error ? e.constructor.name : "Unknown",
+          stack_trace: e instanceof Error ? e.stack : void 0,
+          context: "Non-critical log D1 persistence",
+          severity: "ERROR",
+          worker_name: "moe-router"
+        });
+      });
+    }
+  }
+  /**
+   * Persist a LogEntry to the D1 AURIS_LOGS table.
+   */
+  async writeToD1(entry) {
+    const db = this.env.AURIS_LOGS;
+    if (!db) {
+      console.warn(`[${this.module}.Logger.writeToD1] AURIS_LOGS D1 binding not available; skipping DB write`);
+      return;
+    }
+    try {
+      await db.prepare(
+        `INSERT INTO AURIS_LOGS
+         (timestamp, module, function_name, severity, message, context, session_id, stack_trace)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      ).bind(
+        entry.timestamp,
+        entry.module,
+        entry.function_name,
+        entry.severity,
+        entry.message,
+        entry.context ?? null,
+        entry.session_id ?? null,
+        entry.stack_trace ?? null
+      ).run();
+    } catch (e) {
+      console.error(`[${this.module}.Logger.writeToD1] FAILED: ${e instanceof Error ? e.message : String(e)}`);
+      throw e;
+    }
+  }
+  debug(function_name, message, opts) {
+    this.log("DEBUG", function_name, message, opts);
+  }
+  info(function_name, message, opts) {
+    this.log("INFO", function_name, message, opts);
+  }
+  warn(function_name, message, opts) {
+    this.log("WARNING", function_name, message, opts);
+  }
+  error(function_name, message, opts) {
+    this.log("ERROR", function_name, message, { context: opts?.context, stack_trace: opts?.stack, session_id: opts?.session_id });
+  }
+  critical(function_name, message, opts) {
+    this.log("CRITICAL", function_name, message, { context: opts?.context, stack_trace: opts?.stack, session_id: opts?.session_id });
+  }
+  /**
+   * Create a child logger with the same env but a new session id (or keep existing).
+   */
+  child(newSessionId) {
+    return new _Logger(this.module, this.env, newSessionId ?? this.sessionId);
+  }
+};
+function createLogger(module, env2, sessionId) {
+  return new Logger(module, env2, sessionId);
+}
+__name(createLogger, "createLogger");
+
+// src/router.ts
+var CircuitBreaker = class {
+  static {
+    __name(this, "CircuitBreaker");
+  }
+  state = "CLOSED";
+  failureCount = 0;
+  successCount = 0;
+  lastFailureTime = 0;
+  name;
+  failureThreshold;
+  recoveryTimeoutMs;
+  halfOpenProbeCount;
+  logger;
+  constructor(name, logger, opts) {
+    this.name = name;
+    this.logger = logger;
+    this.failureThreshold = opts?.failureThreshold ?? 5;
+    this.recoveryTimeoutMs = opts?.recoveryTimeoutMs ?? 3e4;
+    this.halfOpenProbeCount = opts?.halfOpenProbeCount ?? 3;
+    this.logger.debug("CircuitBreaker.constructor", `[router.CircuitBreaker] ENTER args=${summarize({ name, failureThreshold: this.failureThreshold, recoveryTimeoutMs: this.recoveryTimeoutMs, halfOpenProbeCount: this.halfOpenProbeCount })}`);
+    this.logger.debug("CircuitBreaker.constructor", `[router.CircuitBreaker] EXIT result_type=CircuitBreaker instance created`);
+  }
+  getState() {
+    return this.state;
+  }
+  /**
+   * Check whether the circuit allows a request through.
+   * OPEN -> fast reject
+   * HALF_OPEN -> allow if under probe count
+   * CLOSED -> allow
+   */
+  canExecute() {
+    this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] ENTER args=${summarize({ state: this.state, name: this.name })}`);
+    const now = Date.now();
+    if (this.state === "OPEN") {
+      if (now - this.lastFailureTime > this.recoveryTimeoutMs) {
+        this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] BRANCH path=OPEN->HALF_OPEN because recoveryTimeoutMs elapsed=${now - this.lastFailureTime}ms`);
+        this.state = "HALF_OPEN";
+        this.successCount = 0;
+        this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] EXIT result_type=boolean elapsed=0ms`);
+        return true;
+      }
+      this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] BRANCH path=OPEN_REJECT because recoveryTimeoutMs not elapsed elapsed=${now - this.lastFailureTime}ms`);
+      this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] EXIT result_type=boolean elapsed=0ms`);
+      return false;
+    }
+    if (this.state === "HALF_OPEN") {
+      if (this.successCount < this.halfOpenProbeCount) {
+        this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] BRANCH path=HALF_OPEN_ALLOW because successCount=${this.successCount} < halfOpenProbeCount=${this.halfOpenProbeCount}`);
+        this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] EXIT result_type=boolean elapsed=0ms`);
+        return true;
+      }
+      this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] BRANCH path=HALF_OPEN_CLOSE because probes succeeded count=${this.successCount}`);
+      this.state = "CLOSED";
+      this.failureCount = 0;
+      this.successCount = 0;
+      this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] EXIT result_type=boolean elapsed=0ms`);
+      return true;
+    }
+    this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] BRANCH path=CLOSED_ALLOW because circuit is healthy`);
+    this.logger.debug("CircuitBreaker.canExecute", `[router.CircuitBreaker] EXIT result_type=boolean elapsed=0ms`);
+    return true;
+  }
+  /**
+   * Record a successful execution.
+   */
+  recordSuccess() {
+    this.logger.debug("CircuitBreaker.recordSuccess", `[router.CircuitBreaker] ENTER args=${summarize({ state: this.state, name: this.name })}`);
+    if (this.state === "HALF_OPEN") {
+      this.successCount += 1;
+      this.logger.debug("CircuitBreaker.recordSuccess", `[router.CircuitBreaker] BRANCH path=HALF_OPEN_INCREMENT because successCount=${this.successCount}`);
+      if (this.successCount >= this.halfOpenProbeCount) {
+        this.logger.debug("CircuitBreaker.recordSuccess", `[router.CircuitBreaker] BRANCH path=HALF_OPEN->CLOSED because probes reached threshold`);
+        this.state = "CLOSED";
+        this.failureCount = 0;
+        this.successCount = 0;
+      }
+    } else if (this.state === "CLOSED") {
+      this.failureCount = 0;
+      this.logger.debug("CircuitBreaker.recordSuccess", `[router.CircuitBreaker] BRANCH path=CLOSED_RESET because success resets failureCount`);
+    }
+    this.logger.debug("CircuitBreaker.recordSuccess", `[router.CircuitBreaker] EXIT result_type=void`);
+  }
+  /**
+   * Record a failed execution.
+   */
+  recordFailure() {
+    this.logger.debug("CircuitBreaker.recordFailure", `[router.CircuitBreaker] ENTER args=${summarize({ state: this.state, name: this.name })}`);
+    this.failureCount += 1;
+    this.lastFailureTime = Date.now();
+    this.logger.debug("CircuitBreaker.recordFailure", `[router.CircuitBreaker] BRANCH path=increment_failure because failureCount=${this.failureCount}`);
+    if (this.state === "HALF_OPEN") {
+      this.logger.debug("CircuitBreaker.recordFailure", `[router.CircuitBreaker] BRANCH path=HALF_OPEN->OPEN because failure during probing`);
+      this.state = "OPEN";
+      this.successCount = 0;
+    } else if (this.state === "CLOSED" && this.failureCount >= this.failureThreshold) {
+      this.logger.debug("CircuitBreaker.recordFailure", `[router.CircuitBreaker] BRANCH path=CLOSED->OPEN because failureCount=${this.failureCount} >= threshold=${this.failureThreshold}`);
+      this.state = "OPEN";
+    }
+    this.logger.debug("CircuitBreaker.recordFailure", `[router.CircuitBreaker] EXIT result_type=void`);
+  }
+};
+var RequestClassifier = class {
+  static {
+    __name(this, "RequestClassifier");
+  }
+  logger;
+  constructor(logger) {
+    this.logger = logger;
+    this.logger.debug("RequestClassifier.constructor", `[router.RequestClassifier] ENTER`);
+    this.logger.debug("RequestClassifier.constructor", `[router.RequestClassifier] EXIT`);
+  }
+  /**
+   * Classify an incoming request by type, content signature, and routing pattern.
+   */
+  async classify(request) {
+    this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] ENTER args=${summarizeRequest(request)}`);
+    const start = Date.now();
+    const bodyText = await this.extractBodyText(request);
+    const contentHash = contentSignature(bodyText);
+    const hasCodeBlocks = /```[a-zA-Z0-9]*\n/.test(bodyText);
+    const hasImageUrls = /https?:\/\/[^\s]+\.(?:png|jpg|jpeg|gif|webp)/i.test(bodyText);
+    const estimatedTokens = Math.ceil(bodyText.length / 4);
+    let requestType = "unknown";
+    if (hasCodeBlocks) {
+      requestType = "code";
+      this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] BRANCH path=code because hasCodeBlocks=true`);
+    } else if (hasImageUrls) {
+      requestType = "creative";
+      this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] BRANCH path=creative because hasImageUrls=true`);
+    } else if (/\b(analyze|analysis|compare|evaluate|summarize|extract)\b/i.test(bodyText)) {
+      requestType = "analysis";
+      this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] BRANCH path=analysis because keyword_match=true`);
+    } else if (/\b(chat|talk|conversation|hello|hi)\b/i.test(bodyText) || estimatedTokens < 150) {
+      requestType = "chat";
+      this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] BRANCH path=chat because keyword_match=true or short_prompt tokens=${estimatedTokens}`);
+    } else {
+      requestType = "chat";
+      this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] BRANCH path=chat_fallback because no stronger signal matched`);
+    }
+    const routingPatternKey = `pattern:${requestType}:${hasCodeBlocks ? "code" : "nocode"}:${hasImageUrls ? "img" : "noimg"}:${Math.floor(estimatedTokens / 256)}`;
+    const result = {
+      requestType,
+      contentHash,
+      estimatedTokens,
+      hasCodeBlocks,
+      hasImageUrls,
+      routingPatternKey
+    };
+    const elapsed = Date.now() - start;
+    this.logger.debug("RequestClassifier.classify", `[router.RequestClassifier] EXIT result_type=ClassificationResult elapsed=${elapsed}ms`);
+    return result;
+  }
+  async extractBodyText(request) {
+    this.logger.debug("RequestClassifier.extractBodyText", `[router.RequestClassifier] ENTER`);
+    try {
+      const cloned = request.clone();
+      const text = await cloned.text();
+      this.logger.debug("RequestClassifier.extractBodyText", `[router.RequestClassifier] EXIT result_type=string length=${text.length}`);
+      return text;
+    } catch (e) {
+      this.logger.error("RequestClassifier.extractBodyText", `[router.RequestClassifier] FAILED: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "Failed to read request body for classification"
+      });
+      throw e;
+    }
+  }
+};
+var RoutePredictor = class {
+  static {
+    __name(this, "RoutePredictor");
+  }
+  logger;
+  kv;
+  cacheTtlSeconds = 300;
+  confidenceThreshold = 0.6;
+  constructor(logger, kv) {
+    this.logger = logger;
+    this.kv = kv;
+    this.logger.debug("RoutePredictor.constructor", `[router.RoutePredictor] ENTER`);
+    this.logger.debug("RoutePredictor.constructor", `[router.RoutePredictor] EXIT`);
+  }
+  /**
+   * Predict the target worker and pre-warm list from a classification result.
+   * Falls back to baseline if KV is unavailable or confidence is too low.
+   */
+  async predict(classification) {
+    this.logger.debug("RoutePredictor.predict", `[router.RoutePredictor] ENTER args=${summarize(classification)}`);
+    const start = Date.now();
+    try {
+      const cached = await this.getCachedPrediction(classification.routingPatternKey);
+      if (cached) {
+        const elapsed2 = Date.now() - start;
+        this.logger.debug("RoutePredictor.predict", `[router.RoutePredictor] BRANCH path=cache_hit because key=${classification.routingPatternKey}`);
+        this.logger.debug("RoutePredictor.predict", `[router.RoutePredictor] EXIT result_type=RoutePrediction elapsed=${elapsed2}ms`);
+        return cached;
+      }
+    } catch (e) {
+      this.logger.error("RoutePredictor.predict", `[router.RoutePredictor] FAILED reading cache: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "KV read for routing prediction cache"
+      });
+    }
+    let prediction;
+    try {
+      prediction = await this.computePrediction(classification);
+    } catch (e) {
+      this.logger.error("RoutePredictor.predict", `[router.RoutePredictor] FAILED computing prediction: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "Compute prediction from KV embeddings"
+      });
+      prediction = {
+        target: "baseline",
+        preWarmIds: [],
+        confidence: 0,
+        fallbackToBaseline: true
+      };
+    }
+    if (prediction.confidence >= this.confidenceThreshold && !prediction.fallbackToBaseline) {
+      try {
+        await this.cachePrediction(classification.routingPatternKey, prediction);
+        this.logger.debug("RoutePredictor.predict", `[router.RoutePredictor] BRANCH path=cache_store because confidence=${prediction.confidence} >= threshold=${this.confidenceThreshold}`);
+      } catch (e) {
+        this.logger.error("RoutePredictor.predict", `[router.RoutePredictor] FAILED writing cache: ${e instanceof Error ? e.message : String(e)}`, {
+          stack: e instanceof Error ? e.stack : void 0,
+          context: "KV write for routing prediction cache"
+        });
+        throw e;
+      }
+    }
+    const elapsed = Date.now() - start;
+    this.logger.debug("RoutePredictor.predict", `[router.RoutePredictor] EXIT result_type=RoutePrediction elapsed=${elapsed}ms target=${prediction.target} confidence=${prediction.confidence}`);
+    return prediction;
+  }
+  /**
+   * Compute prediction by looking up KV routing embeddings.
+   */
+  async computePrediction(classification) {
+    this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] ENTER args=${summarize(classification)}`);
+    const embeddingKey = `embed:${classification.routingPatternKey}`;
+    this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] CALLING external=KV.get key=${embeddingKey}`);
+    let embedding = null;
+    try {
+      const raw = await this.kv.get(embeddingKey, "json");
+      if (raw && typeof raw === "object") {
+        embedding = raw;
+        this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] BRANCH path=kv_hit because embedding found for key=${embeddingKey}`);
+      } else {
+        this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] BRANCH path=kv_miss because no embedding for key=${embeddingKey}`);
+      }
+    } catch (e) {
+      this.logger.error("RoutePredictor.computePrediction", `[router.RoutePredictor] FAILED KV.get: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "KV embedding lookup"
+      });
+      throw e;
+    }
+    if (!embedding) {
+      const heuristic = this.heuristicPrediction(classification);
+      this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] BRANCH path=heuristic because no_embedding target=${heuristic.target}`);
+      this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] EXIT result_type=RoutePrediction`);
+      return heuristic;
+    }
+    const prediction = {
+      target: embedding.target,
+      preWarmIds: embedding.preWarmIds,
+      confidence: embedding.confidence,
+      fallbackToBaseline: embedding.confidence < this.confidenceThreshold
+    };
+    this.logger.debug("RoutePredictor.computePrediction", `[router.RoutePredictor] EXIT result_type=RoutePrediction target=${prediction.target} confidence=${prediction.confidence}`);
+    return prediction;
+  }
+  heuristicPrediction(classification) {
+    this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] ENTER args=${summarize(classification)}`);
+    const { requestType, estimatedTokens } = classification;
+    let target = "baseline";
+    let preWarmIds = [];
+    let confidence = 0.5;
+    if (requestType === "code") {
+      target = "draft";
+      preWarmIds = ["code-expert-0", "code-expert-1"];
+      confidence = 0.75;
+      this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=code->draft because requestType=code`);
+    } else if (requestType === "creative") {
+      target = "draft";
+      preWarmIds = ["creative-expert-0"];
+      confidence = 0.65;
+      this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=creative->draft because requestType=creative`);
+    } else if (requestType === "analysis") {
+      target = "draft";
+      preWarmIds = ["analysis-expert-0", "analysis-expert-1"];
+      confidence = 0.7;
+      this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=analysis->draft because requestType=analysis`);
+    } else if (requestType === "chat") {
+      if (estimatedTokens > 512) {
+        target = "draft";
+        preWarmIds = ["chat-expert-0"];
+        confidence = 0.6;
+        this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=chat->draft because long_chat tokens=${estimatedTokens}`);
+      } else {
+        target = "baseline";
+        preWarmIds = [];
+        confidence = 0.5;
+        this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=chat->baseline because short_chat tokens=${estimatedTokens}`);
+      }
+    } else {
+      target = "baseline";
+      this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] BRANCH path=unknown->baseline because requestType=unknown`);
+    }
+    const result = {
+      target,
+      preWarmIds,
+      confidence,
+      fallbackToBaseline: confidence < this.confidenceThreshold
+    };
+    this.logger.debug("RoutePredictor.heuristicPrediction", `[router.RoutePredictor] EXIT result_type=RoutePrediction target=${target} confidence=${confidence}`);
+    return result;
+  }
+  async getCachedPrediction(patternKey) {
+    this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] ENTER args=${summarize({ patternKey })}`);
+    const cacheKey = `cache:${patternKey}`;
+    this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] CALLING external=KV.get key=${cacheKey}`);
+    try {
+      const raw = await this.kv.get(cacheKey, "json");
+      if (!raw) {
+        this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] BRANCH path=cache_miss because no entry for key=${cacheKey}`);
+        this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] EXIT result_type=null`);
+        return null;
+      }
+      const now = Date.now();
+      const ageSeconds = (now - raw.ts) / 1e3;
+      if (ageSeconds > this.cacheTtlSeconds) {
+        this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] BRANCH path=cache_expired because age=${ageSeconds}s > ttl=${this.cacheTtlSeconds}s`);
+        this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] EXIT result_type=null`);
+        return null;
+      }
+      this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] BRANCH path=cache_valid because age=${ageSeconds}s <= ttl=${this.cacheTtlSeconds}s hitCount=${raw.hitCount}`);
+      this.logger.debug("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] EXIT result_type=RoutePrediction target=${raw.prediction.target}`);
+      return raw.prediction;
+    } catch (e) {
+      this.logger.error("RoutePredictor.getCachedPrediction", `[router.RoutePredictor] FAILED: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "KV cache read"
+      });
+      throw e;
+    }
+  }
+  async cachePrediction(patternKey, prediction) {
+    this.logger.debug("RoutePredictor.cachePrediction", `[router.RoutePredictor] ENTER args=${summarize({ patternKey, target: prediction.target })}`);
+    const cacheKey = `cache:${patternKey}`;
+    const entry = {
+      patternKey,
+      prediction,
+      ts: Date.now(),
+      hitCount: 1
+    };
+    this.logger.debug("RoutePredictor.cachePrediction", `[router.RoutePredictor] CALLING external=KV.put key=${cacheKey} ttl=${this.cacheTtlSeconds}`);
+    try {
+      await this.kv.put(cacheKey, JSON.stringify(entry), { expirationTtl: this.cacheTtlSeconds });
+    } catch (e) {
+      this.logger.error("RoutePredictor.cachePrediction", `[router.RoutePredictor] FAILED KV.put: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "KV cache write"
+      });
+      throw e;
+    }
+    this.logger.debug("RoutePredictor.cachePrediction", `[router.RoutePredictor] EXIT result_type=void`);
+  }
+  /**
+   * Pre-warm the indicated Durable Objects by sending a lightweight ping.
+   */
+  async preWarm(env2, ids) {
+    this.logger.debug("RoutePredictor.preWarm", `[router.RoutePredictor] ENTER args=${summarize({ count: ids.length, ids: ids.slice(0, 4) })}`);
+    const promises = ids.map(async (id) => {
+      this.logger.debug("RoutePredictor.preWarm", `[router.RoutePredictor] CALLING external=DO.get id=${id}`);
+      try {
+        const stub = env2.MOE_DRAFT.get(env2.MOE_DRAFT.idFromName(id));
+        const warmRequest = new Request("http://internal/warm", { method: "POST", body: JSON.stringify({ action: "warm" }) });
+        stub.fetch(warmRequest).catch((e) => {
+          this.logger.error("RoutePredictor.preWarm", `[router.RoutePredictor] FAILED DO warm for id=${id}: ${e instanceof Error ? e.message : String(e)}`, {
+            stack: e instanceof Error ? e.stack : void 0,
+            context: "Pre-warm Durable Object"
+          });
+        });
+      } catch (e) {
+        this.logger.error("RoutePredictor.preWarm", `[router.RoutePredictor] FAILED getting DO stub id=${id}: ${e instanceof Error ? e.message : String(e)}`, {
+          stack: e instanceof Error ? e.stack : void 0,
+          context: "Pre-warm Durable Object stub creation"
+        });
+      }
+    });
+    await Promise.all(promises);
+    this.logger.debug("RoutePredictor.preWarm", `[router.RoutePredictor] EXIT result_type=void warmed_count=${ids.length}`);
+  }
+};
+async function sendTelemetry(env2, logger, payload) {
+  logger.debug("sendTelemetry", `[router.sendTelemetry] ENTER args=${summarize({ event: payload.event, target: payload.prediction.target })}`);
+  const body = JSON.stringify(payload);
+  logger.debug("sendTelemetry", `[router.sendTelemetry] CALLING external=service:moe_telemetry payload_size=${body.length}`);
+  try {
+    const response = await env2.moe_telemetry.fetch(new Request("http://internal/telemetry", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body
+    }));
+    if (!response.ok) {
+      logger.warn("sendTelemetry", `[router.sendTelemetry] BRANCH path=telemetry_non_2xx because status=${response.status}`);
+    } else {
+      logger.debug("sendTelemetry", `[router.sendTelemetry] BRANCH path=telemetry_ok because status=${response.status}`);
+    }
+  } catch (e) {
+    logger.error("sendTelemetry", `[router.sendTelemetry] FAILED: ${e instanceof Error ? e.message : String(e)}`, {
+      stack: e instanceof Error ? e.stack : void 0,
+      context: "Telemetry submission to moe_telemetry"
+    });
+    throw e;
+  }
+  logger.debug("sendTelemetry", `[router.sendTelemetry] EXIT result_type=void`);
+}
+__name(sendTelemetry, "sendTelemetry");
+async function kvHealthCheck(kv, logger) {
+  logger.debug("kvHealthCheck", `[router.kvHealthCheck] ENTER`);
+  const probeKey = `health:${Date.now()}`;
+  const probeValue = "ok";
+  try {
+    logger.debug("kvHealthCheck", `[router.kvHealthCheck] CALLING external=KV.put key=${probeKey}`);
+    await kv.put(probeKey, probeValue, { expirationTtl: 60 });
+    logger.debug("kvHealthCheck", `[router.kvHealthCheck] CALLING external=KV.get key=${probeKey}`);
+    const read = await kv.get(probeKey);
+    if (read === probeValue) {
+      logger.debug("kvHealthCheck", `[router.kvHealthCheck] BRANCH path=healthy because readback matched`);
+      logger.debug("kvHealthCheck", `[router.kvHealthCheck] EXIT result_type=boolean`);
+      return true;
+    }
+    logger.debug("kvHealthCheck", `[router.kvHealthCheck] BRANCH path=unhealthy because readback mismatch read=${read}`);
+    logger.debug("kvHealthCheck", `[router.kvHealthCheck] EXIT result_type=boolean`);
+    return false;
+  } catch (e) {
+    logger.error("kvHealthCheck", `[router.kvHealthCheck] FAILED: ${e instanceof Error ? e.message : String(e)}`, {
+      stack: e instanceof Error ? e.stack : void 0,
+      context: "KV health check probe"
+    });
+    logger.debug("kvHealthCheck", `[router.kvHealthCheck] EXIT result_type=boolean`);
+    return false;
+  }
+}
+__name(kvHealthCheck, "kvHealthCheck");
+var circuitBreakers = /* @__PURE__ */ new Map();
+function getCircuitBreaker(name, logger) {
+  if (!circuitBreakers.has(name)) {
+    circuitBreakers.set(name, new CircuitBreaker(name, logger));
+  }
+  return circuitBreakers.get(name);
+}
+__name(getCircuitBreaker, "getCircuitBreaker");
+var router_default = {
+  async fetch(request, env2, ctx) {
+    const startTime = Date.now();
+    const logger = createLogger("router", env2);
+    logger.debug("fetch", `[router.fetch] ENTER args=${summarizeRequest(request)}`);
+    const url = new URL(request.url);
+    if (url.pathname === "/health") {
+      logger.debug("fetch", `[router.fetch] BRANCH path=health_endpoint because pathname=/health`);
+      try {
+        const kvHealthy2 = await kvHealthCheck(env2.MOE_ROUTES, logger);
+        const status = kvHealthy2 ? 200 : 503;
+        const body = JSON.stringify({ status: kvHealthy2 ? "ok" : "degraded", kv: kvHealthy2 });
+        logger.debug("fetch", `[router.fetch] EXIT result_type=Response elapsed=${Date.now() - startTime}ms status=${status}`);
+        return new Response(body, {
+          status,
+          headers: { "Content-Type": "application/json" }
+        });
+      } catch (e) {
+        logger.error("fetch", `[router.fetch] FAILED health check: ${e instanceof Error ? e.message : String(e)}`, {
+          stack: e instanceof Error ? e.stack : void 0,
+          context: "Health check endpoint"
+        });
+        logger.debug("fetch", `[router.fetch] EXIT result_type=Response elapsed=${Date.now() - startTime}ms status=500`);
+        return new Response(JSON.stringify({ status: "error" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    }
+    let kvHealthy = true;
+    try {
+      kvHealthy = await kvHealthCheck(env2.MOE_ROUTES, logger);
+    } catch (e) {
+      logger.error("fetch", `[router.fetch] FAILED KV health gate: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "KV health gate at request entry"
+      });
+      kvHealthy = false;
+    }
+    if (!kvHealthy) {
+      logger.warn("fetch", `[router.fetch] BRANCH path=kv_unhealthy_fail_open because kvHealthy=false`);
+      const fallbackTarget = "baseline";
+      return routeToWorker(request, env2, logger, fallbackTarget, startTime);
+    }
+    let classification;
+    try {
+      const classifier = new RequestClassifier(logger);
+      classification = await classifier.classify(request);
+    } catch (e) {
+      logger.error("fetch", `[router.fetch] FAILED classification: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "Request classification"
+      });
+      logger.warn("fetch", `[router.fetch] BRANCH path=classification_fail_open`);
+      return routeToWorker(request, env2, logger, "baseline", startTime);
+    }
+    const predictor = new RoutePredictor(logger, env2.MOE_ROUTES);
+    let prediction;
+    try {
+      prediction = await predictor.predict(classification);
+    } catch (e) {
+      logger.error("fetch", `[router.fetch] FAILED route prediction: ${e instanceof Error ? e.message : String(e)}`, {
+        stack: e instanceof Error ? e.stack : void 0,
+        context: "Route prediction"
+      });
+      logger.warn("fetch", `[router.fetch] BRANCH path=prediction_fail_open`);
+      prediction = { target: "baseline", preWarmIds: [], confidence: 0, fallbackToBaseline: true };
+    }
+    const cb = getCircuitBreaker(prediction.target, logger);
+    if (!cb.canExecute()) {
+      logger.warn("fetch", `[router.fetch] BRANCH path=circuit_open because target=${prediction.target} circuit=OPEN`);
+      prediction = { target: "baseline", preWarmIds: [], confidence: 0, fallbackToBaseline: true };
+    }
+    if (prediction.preWarmIds.length > 0) {
+      logger.debug("fetch", `[router.fetch] BRANCH path=prewarm_scheduled because ids=${prediction.preWarmIds.join(",")}`);
+      ctx.waitUntil(
+        predictor.preWarm(env2, prediction.preWarmIds).catch((e) => {
+          logger.error("fetch", `[router.fetch] FAILED preWarm: ${e instanceof Error ? e.message : String(e)}`, {
+            stack: e instanceof Error ? e.stack : void 0,
+            context: "Pre-warm Durable Objects"
+          });
+        })
+      );
+    }
+    const response = await routeToWorker(request, env2, logger, prediction.target, startTime);
+    if (response.ok || response.status < 500) {
+      cb.recordSuccess();
+    } else {
+      cb.recordFailure();
+    }
+    const telemetryPayload = {
+      event: "router_dispatch",
+      classification,
+      prediction,
+      routingDecision: prediction.target,
+      durationMs: Date.now() - startTime,
+      statusCode: response.status
+    };
+    ctx.waitUntil(
+      sendTelemetry(env2, logger, telemetryPayload).catch((e) => {
+        logger.error("fetch", `[router.fetch] FAILED telemetry: ${e instanceof Error ? e.message : String(e)}`, {
+          stack: e instanceof Error ? e.stack : void 0,
+          context: "Telemetry dispatch"
+        });
+      })
+    );
+    logger.debug("fetch", `[router.fetch] EXIT result_type=Response elapsed=${Date.now() - startTime}ms status=${response.status} target=${prediction.target}`);
+    return response;
+  }
+};
+async function routeToWorker(request, env2, logger, target, startTime) {
+  logger.debug("routeToWorker", `[router.routeToWorker] ENTER args=${summarize({ target, url: request.url })}`);
+  const elapsed = Date.now() - startTime;
+  let fetcher = null;
+  let internalUrl = "http://internal/";
+  switch (target) {
+    case "draft":
+      fetcher = env2.moe_draft;
+      internalUrl = "http://internal/draft";
+      logger.debug("routeToWorker", `[router.routeToWorker] BRANCH path=draft because target=draft`);
+      break;
+    case "verifier":
+      fetcher = env2.moe_verifier;
+      internalUrl = "http://internal/verify";
+      logger.debug("routeToWorker", `[router.routeToWorker] BRANCH path=verifier because target=verifier`);
+      break;
+    case "telemetry":
+      fetcher = env2.moe_telemetry;
+      internalUrl = "http://internal/telemetry";
+      logger.debug("routeToWorker", `[router.routeToWorker] BRANCH path=telemetry because target=telemetry`);
+      break;
+    case "admin":
+      fetcher = env2.moe_admin;
+      internalUrl = "http://internal/admin";
+      logger.debug("routeToWorker", `[router.routeToWorker] BRANCH path=admin because target=admin`);
+      break;
+    case "baseline":
+    default:
+      fetcher = env2.moe_draft;
+      internalUrl = "http://internal/baseline";
+      logger.debug("routeToWorker", `[router.routeToWorker] BRANCH path=baseline because target=${target} (default/fallback)`);
+      break;
+  }
+  if (!fetcher) {
+    const msg = `Service binding for target=${target} is not configured`;
+    logger.error("routeToWorker", `[router.routeToWorker] FAILED: ${msg}`, {
+      context: "Missing service binding"
+    });
+    logger.debug("routeToWorker", `[router.routeToWorker] EXIT result_type=Response elapsed=${Date.now() - startTime}ms status=502`);
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+  const routedRequest = new Request(internalUrl, request);
+  logger.debug("routeToWorker", `[router.routeToWorker] CALLING external=service:${target} payload_size=${request.headers.get("content-length") ?? "unknown"}`);
+  try {
+    const response = await fetcher.fetch(routedRequest);
+    const routeElapsed = Date.now() - startTime;
+    logger.debug("routeToWorker", `[router.routeToWorker] EXIT result_type=Response elapsed=${routeElapsed}ms status=${response.status} target=${target}`);
+    return response;
+  } catch (e) {
+    logger.error("routeToWorker", `[router.routeToWorker] FAILED service=${target}: ${e instanceof Error ? e.message : String(e)}`, {
+      stack: e instanceof Error ? e.stack : void 0,
+      context: "Service binding fetch"
+    });
+    const routeElapsed = Date.now() - startTime;
+    logger.debug("routeToWorker", `[router.routeToWorker] EXIT result_type=Response elapsed=${routeElapsed}ms status=502`);
+    return new Response(JSON.stringify({ error: `Upstream ${target} unreachable`, detail: e instanceof Error ? e.message : String(e) }), {
+      status: 502,
+      headers: { "Content-Type": "application/json" }
+    });
+  }
+}
+__name(routeToWorker, "routeToWorker");
+export {
+  CircuitBreaker,
+  RequestClassifier,
+  RoutePredictor,
+  router_default as default
+};
+//# sourceMappingURL=router.js.map
+
+--95326c3b6740f3074d0c48cddec321db84781fa0a140a54881b6ec4cb889--

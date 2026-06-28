@@ -1,0 +1,250 @@
+--91ac83f2d4b5169d767672735260c0b073eb9221a72e501e1ae0783ffb2f
+Content-Disposition: form-data; name="project-template-service.js"
+
+/**
+ * project-template-service
+ * Serves the complete Reflexion Shield Android project template.
+ * Endpoints:
+ *   GET  /template/download  - Download template as zip
+ *   GET  /template/info      - Template metadata JSON
+ *   POST /template/validate  - Validate an uploaded zip against checklist
+ */
+
+// R2 binding: env.TEMPLATE_BUCKET
+const TEMPLATE_KEY = "reflexion-shield-template-v3.zip";
+
+const TEMPLATE_INFO = {
+  name: "Reflexion Shield Android Template",
+  version: "3.0.0",
+  description: "Complete Android project with 6 tabs, API integration, license management",
+  files: 42,
+  size: 123635,
+  features: [
+    "Shield dashboard",
+    "Platform services",
+    "Infra browser",
+    "Guard security",
+    "License keys",
+    "Admin panel"
+  ],
+  build_command: "./gradlew assembleDebug",
+  min_sdk: 26,
+  target_sdk: 34
+};
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const cors = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization"
+    };
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: cors });
+    }
+    try {
+      if (path === "/template/download" && request.method === "GET") {
+        const bucket = env.TEMPLATE_BUCKET;
+        if (!bucket) {
+          return json({ error: "R2 bucket not configured" }, 500, cors);
+        }
+        const obj = await bucket.get(TEMPLATE_KEY);
+        if (!obj) {
+          return json({ error: "Template not found in R2" }, 404, cors);
+        }
+        return new Response(obj.body, {
+          status: 200,
+          headers: {
+            "Content-Type": "application/zip",
+            "Content-Disposition": `attachment; filename="reflexion-shield-template-v3.zip"`,
+            "Content-Length": String(obj.size || TEMPLATE_INFO.size),
+            ...cors
+          }
+        });
+      }
+      if (path === "/template/info" && request.method === "GET") {
+        return json(TEMPLATE_INFO, 200, cors);
+      }
+      if (path === "/template/validate" && request.method === "POST") {
+        return await handleValidate(request, cors);
+      }
+      if (path === "/" || path === "/template" || path === "/template/") {
+        return json({
+          service: "project-template-service",
+          version: "3.0.0",
+          endpoints: [
+            { method: "GET", path: "/template/download", desc: "Download template zip" },
+            { method: "GET", path: "/template/info", desc: "Template metadata" },
+            { method: "POST", path: "/template/validate", desc: "Validate uploaded zip" }
+          ]
+        }, 200, cors);
+      }
+      return json({ error: "Not found" }, 404, cors);
+    } catch (e) {
+      return json({ error: e.message }, 500, cors);
+    }
+  }
+};
+
+async function handleValidate(request, cors) {
+  const ct = request.headers.get("content-type") || "";
+  let zipBytes;
+  if (ct.includes("multipart/form-data")) {
+    const form = await request.formData();
+    const file = form.get("file");
+    if (!file) return json({ error: "Missing 'file' field" }, 400, cors);
+    zipBytes = new Uint8Array(await file.arrayBuffer());
+  } else if (ct.includes("application/octet-stream") || ct.includes("application/zip")) {
+    zipBytes = new Uint8Array(await request.arrayBuffer());
+  } else {
+    return json({ error: "Send raw zip or multipart with 'file' field" }, 400, cors);
+  }
+  const zip = parseZip(zipBytes);
+  const checks = [
+    { name: "gradlew exists and is real", fn: async (z) => {
+      if (!z.has("gradlew")) return false;
+      const d = z.read("gradlew");
+      if (!d) return false;
+      const a = new Uint8Array(d);
+      return !(a.length > 1 && a[0] === 0x50 && a[1] === 0x4B);
+    }},
+    { name: "gradle-wrapper.jar exists and non-empty", fn: (z) => { const f = z.read("gradle/wrapper/gradle-wrapper.jar"); return f && f.length > 1000; }},
+    { name: "gradle-wrapper.properties exists", fn: (z) => z.has("gradle/wrapper/gradle-wrapper.properties") },
+    { name: "settings.gradle exists", fn: (z) => z.has("settings.gradle") },
+    { name: "build.gradle (project) exists", fn: (z) => z.has("build.gradle") },
+    { name: "app/build.gradle exists", fn: (z) => z.has("app/build.gradle") },
+    { name: "AndroidManifest.xml exists", fn: (z) => z.has("app/src/main/AndroidManifest.xml") },
+    { name: "AndroidManifest.xml has INTERNET permission", fn: async (z) => { const c = await z.text("app/src/main/AndroidManifest.xml"); return c && c.includes("INTERNET"); } },
+    { name: "AndroidManifest.xml has ACCESS_NETWORK_STATE", fn: async (z) => { const c = await z.text("app/src/main/AndroidManifest.xml"); return c && c.includes("ACCESS_NETWORK_STATE"); } },
+    { name: "MainActivity.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/MainActivity.java") },
+    { name: "ShieldFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/ShieldFragment.java") },
+    { name: "PlatformFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/PlatformFragment.java") },
+    { name: "InfraFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/InfraFragment.java") },
+    { name: "GuardFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/GuardFragment.java") },
+    { name: "LicenseKeyFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/LicenseKeyFragment.java") },
+    { name: "ControlPanelFragment.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/ControlPanelFragment.java") },
+    { name: "ApiClient.java exists", fn: (z) => z.has("app/src/main/java/com/reflexion/shield/ApiClient.java") },
+    { name: "res/values/strings.xml exists", fn: (z) => z.has("app/src/main/res/values/strings.xml") },
+    { name: "res/values/colors.xml exists", fn: (z) => z.has("app/src/main/res/values/colors.xml") },
+    { name: "launcher icons are non-empty", fn: (z) => { const f = z.read("app/src/main/res/mipmap-hdpi/ic_launcher.png"); return f && f.length > 10; }}
+  ];
+  const results = [];
+  let passed = 0;
+  for (const check of checks) {
+    try {
+      const ok = await check.fn(zip);
+      const r = { check: check.name, status: ok ? "pass" : "fail" };
+      if (!ok) r.fix = fixFor(check.name);
+      results.push(r);
+      if (ok) passed++;
+    } catch (e) {
+      results.push({ check: check.name, status: "fail", error: e.message, fix: fixFor(check.name) });
+    }
+  }
+  return json({
+    valid: passed === checks.length,
+    summary: { passed, failed: checks.length - passed, total: checks.length },
+    checks: results
+  }, 200, cors);
+}
+
+function fixFor(name) {
+  const fixes = {
+    "gradlew exists and is real": "Add gradlew script with proper Gradle wrapper invocation",
+    "gradle-wrapper.jar exists and non-empty": "Download gradle-wrapper.jar from services.gradle.org",
+    "gradle-wrapper.properties exists": "Create gradle-wrapper.properties with distribution URL",
+    "settings.gradle exists": "Create settings.gradle with rootProject.name",
+    "build.gradle (project) exists": "Create project-level build.gradle with Android Gradle Plugin",
+    "app/build.gradle exists": "Create app/build.gradle with compileSdk and dependencies",
+    "AndroidManifest.xml exists": "Create AndroidManifest.xml with application tag and permissions",
+    "AndroidManifest.xml has INTERNET permission": 'Add <uses-permission android:name="android.permission.INTERNET" />',
+    "AndroidManifest.xml has ACCESS_NETWORK_STATE": 'Add <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+    "MainActivity.java exists": "Create MainActivity.java with onCreate and tab switching",
+    "ShieldFragment.java exists": "Create ShieldFragment.java for dashboard tab",
+    "PlatformFragment.java exists": "Create PlatformFragment.java for services tab",
+    "InfraFragment.java exists": "Create InfraFragment.java for infrastructure tab",
+    "GuardFragment.java exists": "Create GuardFragment.java for security tab",
+    "LicenseKeyFragment.java exists": "Create LicenseKeyFragment.java for license management tab",
+    "ControlPanelFragment.java exists": "Create ControlPanelFragment.java for admin tab",
+    "ApiClient.java exists": "Create ApiClient.java with HTTP/GraphQL methods",
+    "res/values/strings.xml exists": "Create strings.xml with app_name",
+    "res/values/colors.xml exists": "Create colors.xml with theme colors",
+    "launcher icons are non-empty": "Generate valid PNG icons in mipmap-*dpi folders"
+  };
+  return fixes[name] || "Manual inspection required";
+}
+
+function parseZip(bytes) {
+  const files = new Map();
+  const decoder = new TextDecoder();
+  for (let i = 0; i < bytes.length - 4; i++) {
+    if (bytes[i] === 0x50 && bytes[i+1] === 0x4B && bytes[i+2] === 0x03 && bytes[i+3] === 0x04) {
+      try {
+        const fnLen = bytes[i+26] | (bytes[i+27] << 8);
+        const efLen = bytes[i+28] | (bytes[i+29] << 8);
+        const compSize = (bytes[i+18] | (bytes[i+19] << 8) | (bytes[i+20] << 16) | (bytes[i+21] << 24)) >>> 0;
+        const compMethod = bytes[i+8] | (bytes[i+9] << 8);
+        const fnStart = i + 30;
+        const fnEnd = fnStart + fnLen;
+        const dataStart = fnEnd + efLen;
+        if (fnEnd > bytes.length || dataStart + compSize > bytes.length) continue;
+        const filename = decoder.decode(bytes.subarray(fnStart, fnEnd));
+        const data = bytes.subarray(dataStart, dataStart + compSize);
+        files.set(filename, { data, compMethod, compSize });
+      } catch (e) {}
+    }
+  }
+  return {
+    has: (name) => {
+      for (const key of files.keys()) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) return true;
+      }
+      return false;
+    },
+    read: (name) => {
+      for (const [key, val] of files) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) return val.data;
+      }
+      return null;
+    },
+    text: async (name) => {
+      for (const [key, val] of files) {
+        if (key === name || key.endsWith('/' + name) || key.replace(/^[^/]+\//, '') === name) {
+          if (val.compMethod === 8) return decoder.decode(await inflateAsync(val.data));
+          return decoder.decode(val.data);
+        }
+      }
+      return null;
+    }
+  };
+}
+
+async function inflateAsync(data) {
+  const ds = new DecompressionStream("deflate-raw");
+  const w = ds.writable.getWriter();
+  w.write(data);
+  w.close();
+  const chunks = [];
+  const reader = ds.readable.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const total = chunks.reduce((a, c) => a + c.length, 0);
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
+  return result;
+}
+
+function json(data, status, cors) {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json", ...cors }
+  });
+}
+
+--91ac83f2d4b5169d767672735260c0b073eb9221a72e501e1ae0783ffb2f--

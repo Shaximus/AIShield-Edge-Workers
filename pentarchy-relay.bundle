@@ -1,0 +1,1671 @@
+--da343d901a9a8cedae2579a4970cc630ccbcb0842b42c73ca22154df07dc
+Content-Disposition: form-data; name="index.js"
+
+/**
+ * Pentarchy Federation Relay — Main WebSocket Server
+ * Zero-trust mesh network for cross-platform AI agent federation.
+ * End-to-end encrypted. Server never sees plaintext.
+ */
+
+
+/* ---------- Constants ---------- */
+
+const WS_ROUTE = '/relay';
+const ADMIN_ROUTE_REGISTER = '/admin/register';
+const ADMIN_ROUTE_LIST = '/admin/agents';
+const HEALTH_ROUTE = '/health';
+const HELLO_TIMEOUT_MS = 10000;
+const TIMESTAMP_TOLERANCE_SEC = 30;
+const SERVER_AGENT_ID = '_relay';
+
+/* ---------- Utility logging ---------- */
+
+function log(label, detail = '') {
+  // eslint-disable-next-line no-console
+  console.log(`[pentarchy] ${label}${detail ? ' | ' + detail : ''}`);
+}
+
+/* ---------- Main Worker Export ---------- */
+
+export default {
+  async fetch(request, env, ctx) {
+    log('ENTER fetch', `${request.method} ${request.url}`);
+    const url = new URL(request.url);
+
+    try {
+      // WebSocket upgrade
+      if (url.pathname === WS_ROUTE) {
+        if (request.headers.get('Upgrade') !== 'websocket') {
+          log('EXIT fetch', 'WS UPGRADE REQUIRED');
+          return new Response('Expected WebSocket upgrade', { status: 426 });
+        }
+
+        const result = await handleWebSocket(request, env);
+        log('EXIT fetch', 'WS HANDSHAKE');
+        return result;
+      }
+
+      // Admin: register agent key
+      if (url.pathname === ADMIN_ROUTE_REGISTER && request.method === 'POST') {
+        const resp = await registerAgent(request, env.PENTARCHY_KEYS);
+        log('EXIT fetch', 'ADMIN REGISTER');
+        return resp;
+      }
+
+      // Admin: list agents
+      if (url.pathname === ADMIN_ROUTE_LIST && request.method === 'GET') {
+        const resp = await listRegisteredAgents(request, env.PENTARCHY_KEYS);
+        log('EXIT fetch', 'ADMIN LIST');
+        return resp;
+      }
+
+      // Health check
+      if (url.pathname === HEALTH_ROUTE) {
+        log('EXIT fetch', 'HEALTH');
+        return jsonResponse({
+          status: 'ok',
+          relay: 'pentarchy',
+          version: '1.0.0',
+          agents: Object.keys(isValidAgent).length,
+        });
+      }
+
+      log('EXIT fetch', 'NOT_FOUND');
+      return new Response('Not Found', { status: 404 });
+    } catch (err) {
+      log('EXIT fetch', `CRITICAL err=${err.name}: ${err.message}`);
+      await auditLog(env, 'CRITICAL', 'fetch_exception', { error: err.message, stack: err.stack });
+      return jsonResponse({ error: 'Internal server error' }, 500);
+    }
+  },
+};
+
+/* ---------- WebSocket Handler ---------- */
+
+async function handleWebSocket(request, env) {
+  log('ENTER handleWebSocket');
+
+  const webSocketPair = new WebSocketPair();
+  const [client, server] = Object.values(webSocketPair);
+
+  server.accept();
+  log('CONNECT', 'WebSocket accepted');
+
+  // Create connection manager per-worker (safe in single-threaded Worker)
+  const manager = new ConnectionManager(env);
+
+  // Handshake state
+  let handshakeComplete = false;
+  let sessionId = null;
+  let agentId = null;
+  let instanceId = null;
+  let agentPublicKeyB64 = null;
+  let helloTimeout = null;
+
+  // Generate ephemeral server keys for this session
+  // (In production you'd load a persistent server key from env/secrets)
+  const serverKeyPair = await generateServerKeyPair(env);
+  const serverPublicKeyRaw = await crypto.subtle.exportKey('raw', serverKeyPair.publicKey);
+  const serverPubB64 = bufferToBase64(serverPublicKeyRaw);
+
+  // HELLO timeout — disconnect if no handshake within 10s
+  helloTimeout = setTimeout(() => {
+    if (!handshakeComplete) {
+      log('DISCONNECT', 'HELLO_TIMEOUT');
+      try { server.close(1008, 'HELLO_TIMEOUT'); } catch (e) { /* ignore */ }
+    }
+  }, HELLO_TIMEOUT_MS);
+
+  server.addEventListener('message', async (event) => {
+    try {
+      const data = event.data;
+      log('ENTER message handler', `len=${data.length}`);
+
+      // Size check
+      const sizeCheck = manager.validateMessageSize(data);
+      if (!sizeCheck.valid) {
+        log('EXIT message handler', `OVERSIZE size=${sizeCheck.size}`);
+        await sendError(server, 'MESSAGE_TOO_LARGE', `Max ${10 * 1024} bytes`);
+        manager.removeConnection(sessionId, 'OVERSIZE_MESSAGE');
+        return;
+      }
+
+      let msg;
+      try {
+        msg = JSON.parse(data);
+      } catch (err) {
+        log('EXIT message handler', `INVALID_JSON err=${err.message}`);
+        await sendError(server, 'INVALID_JSON', 'Message must be valid JSON');
+        return;
+      }
+
+      // Handle handshake HELLO
+      if (!handshakeComplete && msg.type === 'HELLO') {
+        const result = await handleHello(msg, server, manager, env, serverPubB64);
+        if (result.success) {
+          handshakeComplete = true;
+          sessionId = result.sessionId;
+          agentId = result.agentId;
+          instanceId = result.instanceId;
+          agentPublicKeyB64 = msg.public_key;
+          if (helloTimeout) clearTimeout(helloTimeout);
+          log('EXIT message handler', 'HELLO_OK');
+        } else {
+          log('EXIT message handler', `HELLO_FAIL reason=${result.reason}`);
+        }
+        return;
+      }
+
+      // Reject non-HELLO before handshake
+      if (!handshakeComplete) {
+        log('EXIT message handler', 'HANDSHAKE_REQUIRED');
+        await sendError(server, 'HANDSHAKE_REQUIRED', 'Send HELLO first');
+        try { server.close(1008, 'HANDSHAKE_REQUIRED'); } catch (e) { /* ignore */ }
+        return;
+      }
+
+      // Post-handshake message handling
+      if (msg.type === 'PONG') {
+        manager.recordPong(sessionId);
+        log('EXIT message handler', 'PONG_OK');
+        return;
+      }
+
+      if (msg.type === 'MESSAGE') {
+        await handleRelayMessage(msg, agentId, sessionId, manager, env);
+        log('EXIT message handler', 'RELAY_OK');
+        return;
+      }
+
+      // Unknown type
+      log('EXIT message handler', `UNKNOWN_TYPE type=${msg.type}`);
+      await sendError(server, 'UNKNOWN_TYPE', `Unknown message type: ${msg.type}`);
+    } catch (err) {
+      log('ERROR message handler', `err=${err.name}: ${err.message}`);
+      await auditLog(env, 'ERROR', 'message_handler_exception', {
+        sessionId,
+        agentId,
+        error: err.message,
+      });
+      // Never suppress — propagate but keep connection alive for non-fatal
+      if (err instanceof SecurityError) {
+        try { server.close(1008, 'SECURITY_VIOLATION'); } catch (e) { /* ignore */ }
+      }
+    }
+  });
+
+  server.addEventListener('close', (event) => {
+    log('ENTER close handler', `code=${event.code} reason=${event.reason || 'none'}`);
+    if (helloTimeout) clearTimeout(helloTimeout);
+    if (sessionId) {
+      manager.removeConnection(sessionId, event.reason || 'CLIENT_CLOSE');
+    }
+    log('EXIT close handler');
+  });
+
+  server.addEventListener('error', (event) => {
+    log('ERROR websocket', `err=${event.message || 'unknown'}`);
+    if (sessionId) {
+      manager.removeConnection(sessionId, 'WEBSOCKET_ERROR');
+    }
+  });
+
+  log('EXIT handleWebSocket', 'returning 101');
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+/* ---------- HELLO Handshake ---------- */
+
+async function handleHello(msg, server, manager, env, serverPubB64) {
+  log('ENTER handleHello');
+
+  const { agent_id, instance_id, public_key, timestamp } = msg;
+
+  // Validate required fields
+  if (!agent_id || !instance_id || !public_key || !timestamp) {
+    log('EXIT handleHello', 'MISSING_FIELDS');
+    await sendError(server, 'HELLO_INVALID', 'Missing agent_id, instance_id, public_key, or timestamp');
+    try { server.close(1008, 'HELLO_INVALID'); } catch (e) { /* ignore */ }
+    return { success: false, reason: 'MISSING_FIELDS' };
+  }
+
+  // Validate agent_id in pentarchy
+  if (!isValidAgent(agent_id)) {
+    log('EXIT handleHello', `UNKNOWN_AGENT agent=${agent_id}`);
+    await sendError(server, 'UNKNOWN_AGENT', `Agent ${agent_id} not in pentarchy`);
+    try { server.close(1008, 'UNKNOWN_AGENT'); } catch (e) { /* ignore */ }
+    await auditLog(env, 'WARNING', 'unknown_agent_connect_attempt', { agent_id, instance_id });
+    return { success: false, reason: 'UNKNOWN_AGENT' };
+  }
+
+  // Validate timestamp (±30s replay window)
+  const now = Math.floor(Date.now() / 1000);
+  const ts = typeof timestamp === 'number' ? timestamp : parseInt(timestamp, 10);
+  if (Number.isNaN(ts) || Math.abs(now - ts) > TIMESTAMP_TOLERANCE_SEC) {
+    log('EXIT handleHello', `REPLAY_ATTACK now=${now} ts=${ts} delta=${Math.abs(now - ts)}`);
+    await sendError(server, 'REPLAY_DETECTED', 'Timestamp outside tolerance window');
+    try { server.close(1008, 'REPLAY_DETECTED'); } catch (e) { /* ignore */ }
+    await auditLog(env, 'WARNING', 'replay_attack_detected', { agent_id, timestamp: ts, server_time: now });
+    return { success: false, reason: 'REPLAY_ATTACK' };
+  }
+
+  // Validate public key format (65 bytes uncompressed P-256)
+  let pubKeyRaw;
+  try {
+    pubKeyRaw = base64ToBuffer(public_key);
+  } catch (err) {
+    log('EXIT handleHello', `BAD_KEY err=${err.message}`);
+    await sendError(server, 'BAD_PUBLIC_KEY', 'Invalid base64 public key');
+    try { server.close(1008, 'BAD_PUBLIC_KEY'); } catch (e) { /* ignore */ }
+    return { success: false, reason: 'BAD_PUBLIC_KEY' };
+  }
+
+  if (pubKeyRaw.byteLength !== 65) {
+    log('EXIT handleHello', `BAD_KEY_LEN len=${pubKeyRaw.byteLength}`);
+    await sendError(server, 'BAD_PUBLIC_KEY', 'Key must be 65 bytes uncompressed P-256');
+    try { server.close(1008, 'BAD_PUBLIC_KEY'); } catch (e) { /* ignore */ }
+    return { success: false, reason: 'BAD_KEY_LEN' };
+  }
+
+  // Verify signature if provided (optional but recommended)
+  if (msg.signature) {
+    const canonical = canonicalHelloString(agent_id, instance_id, public_key, timestamp);
+    const storedKey = await getAgentPublicKey(agent_id, env.PENTARCHY_KEYS);
+
+    if (storedKey) {
+      const storedRaw = base64ToBuffer(storedKey);
+      const valid = await verifyMessageRaw(storedRaw, msg.signature, canonical);
+      if (!valid) {
+        log('EXIT handleHello', 'SIGNATURE_INVALID');
+        await sendError(server, 'SIGNATURE_INVALID', 'HELLO signature does not match registered key');
+        try { server.close(1008, 'SIGNATURE_INVALID'); } catch (e) { /* ignore */ }
+        await auditLog(env, 'CRITICAL', 'invalid_hello_signature', { agent_id, instance_id });
+        return { success: false, reason: 'SIGNATURE_INVALID' };
+      }
+      log('handleHello', 'signature verified');
+    } else {
+      log('handleHello', 'NO_STORED_KEY — accepting first-connect');
+    }
+  }
+
+  // Generate session
+  const sessionId = generateSessionId();
+  const agentInfo = getAgentInfo(agent_id);
+
+  // Add to connection manager
+  manager.addConnection(server, agent_id, sessionId, agentInfo.homeShard);
+
+  // Send WELCOME
+  const welcome = {
+    type: 'WELCOME',
+    session_id: sessionId,
+    server_public_key: serverPubB64,
+    heartbeat_interval: 15,
+    agent_info: {
+      role: agentInfo.role,
+      model: agentInfo.model,
+      home_shard: agentInfo.homeShard,
+    },
+    timestamp: Math.floor(Date.now() / 1000),
+  };
+
+  try {
+    server.send(JSON.stringify(welcome));
+  } catch (err) {
+    log('ERROR handleHello welcome send', err.message);
+    manager.removeConnection(sessionId, 'WELCOME_SEND_ERROR');
+    return { success: false, reason: 'WELCOME_SEND_ERROR' };
+  }
+
+  log('CONNECT', `agent=${agent_id} instance=${instance_id} session=${sessionId} shard=${agentInfo.homeShard}`);
+  await auditLog(env, 'INFO', 'agent_connected', {
+    agent_id,
+    instance_id,
+    session_id: sessionId,
+    home_shard: agentInfo.homeShard,
+  });
+
+  log('EXIT handleHello', `SUCCESS session=${sessionId}`);
+  return { success: true, sessionId, agentId: agent_id, instanceId: instance_id };
+}
+
+/* ---------- Relay Message Handler ---------- */
+
+async function handleRelayMessage(msg, agentId, sessionId, manager, env) {
+  log('ENTER handleRelayMessage', `from=${agentId}`);
+
+  // Validate envelope
+  const { from, to, payload, signature, timestamp } = msg;
+
+  if (!from || !to || !payload || !signature || !timestamp) {
+    log('EXIT handleRelayMessage', 'MISSING_FIELDS');
+    await sendErrorToSession(manager, sessionId, 'MISSING_FIELDS', 'Message requires from, to, payload, signature, timestamp');
+    return;
+  }
+
+  // Verify sender identity
+  if (from !== agentId) {
+    log('EXIT handleRelayMessage', `SPOOF from=${from} claimed=${agentId}`);
+    await sendErrorToSession(manager, sessionId, 'IDENTITY_SPOOF', 'from does not match authenticated agent');
+    manager.removeConnection(sessionId, 'IDENTITY_SPOOF');
+    await auditLog(env, 'CRITICAL', 'identity_spoof_attempt', { from, authenticated: agentId, session_id: sessionId });
+    return;
+  }
+
+  // Validate timestamp
+  const now = Math.floor(Date.now() / 1000);
+  const ts = typeof timestamp === 'number' ? timestamp : parseInt(timestamp, 10);
+  if (Number.isNaN(ts) || Math.abs(now - ts) > TIMESTAMP_TOLERANCE_SEC) {
+    log('EXIT handleRelayMessage', `REPLAY now=${now} ts=${ts}`);
+    await sendErrorToSession(manager, sessionId, 'REPLAY_DETECTED', 'Timestamp outside tolerance');
+    manager.removeConnection(sessionId, 'REPLAY_MESSAGE');
+    await auditLog(env, 'WARNING', 'replay_message_detected', { from, timestamp: ts, server_time: now });
+    return;
+  }
+
+  // Rate limiting
+  const rate = manager.checkRateLimit(agentId);
+  if (!rate.allowed) {
+    log('EXIT handleRelayMessage', `RATE_LIMIT agent=${agentId}`);
+    await sendErrorToSession(manager, sessionId, 'RATE_LIMITED', `Retry after ${new Date(rate.resetAt).toISOString()}`);
+    return;
+  }
+
+  // Fetch and verify signature with stored public key
+  const storedKeyB64 = await getAgentPublicKey(agentId, env.PENTARCHY_KEYS);
+  if (!storedKeyB64) {
+    log('EXIT handleRelayMessage', `NO_KEY agent=${agentId}`);
+    await sendErrorToSession(manager, sessionId, 'NO_PUBLIC_KEY', 'Agent public key not registered');
+    return;
+  }
+
+  const canonical = canonicalSignString(from, to, payload, timestamp);
+  const storedRaw = base64ToBuffer(storedKeyB64);
+  const valid = await verifyMessageRaw(storedRaw, signature, canonical);
+
+  if (!valid) {
+    log('EXIT handleRelayMessage', `INVALID_SIGNATURE agent=${agentId}`);
+    await sendErrorToSession(manager, sessionId, 'INVALID_SIGNATURE', 'Signature verification failed');
+    manager.removeConnection(sessionId, 'INVALID_SIGNATURE');
+    await auditLog(env, 'CRITICAL', 'invalid_message_signature', {
+      from,
+      to,
+      session_id: sessionId,
+      timestamp: ts,
+    });
+    return;
+  }
+
+  log('handleRelayMessage', `SIGNATURE_OK from=${from} to=${to}`);
+
+  // Route the message (server NEVER decrypts payload)
+  if (to === 'BROADCAST') {
+    const result = manager.broadcast(from, {
+      type: 'MESSAGE',
+      from,
+      to,
+      payload,
+      signature,
+      timestamp,
+    });
+    log('RELAY', `from=${from} to=BROADCAST sent=${result.sent}`);
+    await auditLog(env, 'INFO', 'message_broadcast', { from, sent: result.sent });
+  } else if (to.startsWith('DIRECT:')) {
+    const targetAgent = to.slice(7);
+    const result = manager.direct(from, targetAgent, {
+      type: 'MESSAGE',
+      from,
+      to,
+      payload,
+      signature,
+      timestamp,
+    });
+    log('RELAY', `from=${from} to=${targetAgent} sent=${result.sent}`);
+    if (!result.sent) {
+      await sendErrorToSession(manager, sessionId, 'DELIVERY_FAILED', `Agent ${targetAgent} offline: ${result.reason}`);
+    }
+    await auditLog(env, 'INFO', 'message_direct', { from, to: targetAgent, delivered: result.sent });
+  } else if (to.startsWith('SHARD:')) {
+    const shardId = parseInt(to.slice(6), 10);
+    if (Number.isNaN(shardId)) {
+      await sendErrorToSession(manager, sessionId, 'BAD_SHARD', 'Invalid shard ID');
+      return;
+    }
+    const result = manager.shardcast(from, shardId, {
+      type: 'MESSAGE',
+      from,
+      to,
+      payload,
+      signature,
+      timestamp,
+    });
+    log('RELAY', `from=${from} shard=${shardId} sent=${result.sent}`);
+    await auditLog(env, 'INFO', 'message_shardcast', { from, shard: shardId, sent: result.sent });
+  } else {
+    log('EXIT handleRelayMessage', `UNKNOWN_ROUTE to=${to}`);
+    await sendErrorToSession(manager, sessionId, 'UNKNOWN_ROUTE', `Unknown routing target: ${to}`);
+    return;
+  }
+
+  // Send ACK back to sender
+  await sendAck(manager, sessionId, msg);
+
+  log('EXIT handleRelayMessage', `ROUTED to=${to}`);
+}
+
+/* ---------- Server Key Management ---------- */
+
+async function generateServerKeyPair(env) {
+  log('ENTER generateServerKeyPair');
+  // In production, load from env/secrets. Here we generate ephemeral per-session.
+  const pair = await crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-256' },
+    true,
+    ['deriveBits']
+  );
+  log('EXIT generateServerKeyPair');
+  return pair;
+}
+
+/* ---------- Helpers ---------- */
+
+async function sendError(ws, code, message) {
+  try {
+    if (ws.readyState === ws.OPEN) {
+      ws.send(JSON.stringify({ type: 'ERROR', code, message, timestamp: Date.now() }));
+    }
+  } catch (err) {
+    log('ERROR sendError', err.message);
+  }
+}
+
+async function sendErrorToSession(manager, sessionId, code, message) {
+  const record = manager.getConnectionBySession(sessionId);
+  if (record && !record.closed) {
+    await sendError(record.ws, code, message);
+  }
+}
+
+async function sendAck(manager, sessionId, originalMsg) {
+  const record = manager.getConnectionBySession(sessionId);
+  if (!record || record.closed) return;
+  try {
+    const ackHash = await hashMessage(JSON.stringify(originalMsg));
+    record.ws.send(JSON.stringify({
+      type: 'ACK',
+      original_hash: ackHash.slice(0, 16),
+      timestamp: Math.floor(Date.now() / 1000),
+    }));
+  } catch (err) {
+    log('ERROR sendAck', err.message);
+  }
+}
+
+async function auditLog(env, level, event, details) {
+  const entry = {
+    level,
+    event,
+    details,
+    timestamp: new Date().toISOString(),
+    relay: 'pentarchy',
+  };
+
+  // Log to console (always)
+  log(`AUDIT ${level}`, `${event} ${JSON.stringify(details)}`);
+
+  // Persist to D1 if available
+  if (env.AURIS_LOGS) {
+    try {
+      await env.AURIS_LOGS.prepare(
+        `INSERT INTO audit_logs (level, event, details, timestamp, relay)
+         VALUES (?, ?, ?, ?, ?)`
+      ).bind(level, event, JSON.stringify(details), entry.timestamp, 'pentarchy').run();
+    } catch (err) {
+      log('ERROR auditLog D1', err.message);
+      // Never suppress — but D1 failure shouldn't break relay
+    }
+  }
+}
+
+function generateSessionId() {
+  const buf = crypto.getRandomValues(new Uint8Array(16));
+  let hex = '';
+  for (let i = 0; i < buf.length; i++) {
+    hex += buf[i].toString(16).padStart(2, '0');
+  }
+  return `sess-${hex}-${Date.now()}`;
+}
+
+function bufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64ToBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+/* ---------- Custom Errors ---------- */
+
+class SecurityError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'SecurityError';
+  }
+}
+
+
+// === connection-manager.js ===
+{
+/**
+ * Pentarchy Federation Relay — Connection Manager
+ * Thread-safe WebSocket connection tracking, heartbeat monitoring,
+ * and message routing for the pentarchy mesh.
+ */
+
+/* ---------- Constants ---------- */
+
+const HEARTBEAT_INTERVAL_MS = 15000; // 15 seconds
+const PONG_TIMEOUT_MS = 5000;        // 5 seconds to respond
+const MAX_MISSED_PONGS = 3;          // 3 strikes = disconnect
+const MAX_MESSAGE_BYTES = 10 * 1024; // 10 KB
+const RATE_LIMIT_MAX_MSG = 100;      // 100 messages per minute
+const RATE_LIMIT_WINDOW_SEC = 60;
+
+/* ---------- Connection Manager ---------- */
+
+class ConnectionManager {
+  /**
+   * @param {{ kv: KVNamespace, d1: D1Database }} env — Cloudflare bindings
+   */
+  constructor(env) {
+    this.connections = new Map();      // sessionId -> ConnectionRecord
+    this.agentIndex = new Map();       // agentId -> sessionId
+    this.shardIndex = new Map();       // shardId -> Set<sessionId>
+    this.env = env;
+    this.heartbeatTimer = null;
+    this._log('ENTER ConnectionManager constructor');
+    this._startHeartbeatLoop();
+    this._log('EXIT ConnectionManager constructor');
+  }
+
+  /* ---------- Connection Lifecycle ---------- */
+
+  /**
+   * Add a new WebSocket connection.
+   * @param {WebSocket} ws
+   * @param {string} agentId
+   * @param {string} sessionId
+   * @param {number} homeShard
+   * @returns {ConnectionRecord}
+   */
+  addConnection(ws, agentId, sessionId, homeShard) {
+    this._log('ENTER addConnection', `agent=${agentId} session=${sessionId}`);
+
+    // Evict old session for same agent (single-session policy)
+    const existingSessionId = this.agentIndex.get(agentId);
+    if (existingSessionId && existingSessionId !== sessionId) {
+      this._log('EVICT old session', `agent=${agentId} old_session=${existingSessionId}`);
+      this.removeConnection(existingSessionId, 'SESSION_REPLACED');
+    }
+
+    const now = Date.now();
+    const record = {
+      ws,
+      agentId,
+      sessionId,
+      homeShard,
+      connectedAt: now,
+      lastPongAt: now,
+      missedPongs: 0,
+      messageCountThisMinute: 0,
+      rateLimitWindowStart: now,
+      closed: false,
+    };
+
+    this.connections.set(sessionId, record);
+    this.agentIndex.set(agentId, sessionId);
+
+    // Add to shard index
+    if (!this.shardIndex.has(homeShard)) {
+      this.shardIndex.set(homeShard, new Set());
+    }
+    this.shardIndex.get(homeShard).add(sessionId);
+
+    this._log('CONNECT', `agent=${agentId} session=${sessionId} shard=${homeShard}`);
+    this._log('EXIT addConnection', `active=${this.connections.size}`);
+    return record;
+  }
+
+  /**
+   * Remove a connection and clean up indices.
+   * @param {string} sessionId
+   * @param {string} reason
+   */
+  removeConnection(sessionId, reason = 'UNKNOWN') {
+    this._log('ENTER removeConnection', `session=${sessionId} reason=${reason}`);
+
+    const record = this.connections.get(sessionId);
+    if (!record) {
+      this._log('EXIT removeConnection', 'NOT_FOUND');
+      return;
+    }
+
+    record.closed = true;
+
+    // Clean up agent index
+    if (this.agentIndex.get(record.agentId) === sessionId) {
+      this.agentIndex.delete(record.agentId);
+    }
+
+    // Clean up shard index
+    const shardSet = this.shardIndex.get(record.homeShard);
+    if (shardSet) {
+      shardSet.delete(sessionId);
+      if (shardSet.size === 0) {
+        this.shardIndex.delete(record.homeShard);
+      }
+    }
+
+    this.connections.delete(sessionId);
+
+    // Close socket if still open
+    try {
+      if (record.ws.readyState === record.ws.OPEN || record.ws.readyState === record.ws.CONNECTING) {
+        record.ws.close(1000, reason);
+      }
+    } catch (err) {
+      this._log('ERROR closing ws', `session=${sessionId} err=${err.message}`);
+    }
+
+    this._log('DISCONNECT', `agent=${record.agentId} session=${sessionId} reason=${reason} remaining=${this.connections.size}`);
+    this._log('EXIT removeConnection');
+  }
+
+  /* ---------- Lookups ---------- */
+
+  /**
+   * Get a connection record by session ID.
+   * @param {string} sessionId
+   * @returns {ConnectionRecord | undefined}
+   */
+  getConnectionBySession(sessionId) {
+    return this.connections.get(sessionId);
+  }
+
+  /**
+   * Get the WebSocket for a specific agent (direct messages).
+   * @param {string} agentId
+   * @returns {WebSocket | undefined}
+   */
+  getConnection(agentId) {
+    this._log('ENTER getConnection', `agent=${agentId}`);
+    const sessionId = this.agentIndex.get(agentId);
+    if (!sessionId) {
+      this._log('EXIT getConnection', 'NOT_FOUND');
+      return undefined;
+    }
+    const record = this.connections.get(sessionId);
+    const ws = record && !record.closed ? record.ws : undefined;
+    this._log('EXIT getConnection', `found=${!!ws}`);
+    return ws;
+  }
+
+  /**
+   * Get all active connections.
+   * @returns {ConnectionRecord[]}
+   */
+  getAllConnections() {
+    return Array.from(this.connections.values()).filter(r => !r.closed);
+  }
+
+  /**
+   * Get all connections on a given shard.
+   * @param {number} shardId
+   * @returns {ConnectionRecord[]}
+   */
+  getShardConnections(shardId) {
+    const sessionIds = this.shardIndex.get(shardId);
+    if (!sessionIds) return [];
+    const result = [];
+    for (const sid of sessionIds) {
+      const rec = this.connections.get(sid);
+      if (rec && !rec.closed) result.push(rec);
+    }
+    return result;
+  }
+
+  /* ---------- Routing ---------- */
+
+  /**
+   * Broadcast a message to all connected agents except the sender.
+   * @param {string} senderId
+   * @param {object} message — JSON-serializable message envelope
+   */
+  broadcast(senderId, message) {
+    this._log('ENTER broadcast', `from=${senderId}`);
+    const json = JSON.stringify(message);
+    let sent = 0;
+    let failed = 0;
+
+    for (const record of this.connections.values()) {
+      if (record.closed || record.agentId === senderId) continue;
+
+      try {
+        if (record.ws.readyState === record.ws.OPEN) {
+          record.ws.send(json);
+          sent++;
+        } else {
+          failed++;
+        }
+      } catch (err) {
+        this._log('ERROR broadcast send', `to=${record.agentId} err=${err.message}`);
+        failed++;
+      }
+    }
+
+    this._log('BROADCAST', `from=${senderId} sent=${sent} failed=${failed}`);
+    this._log('EXIT broadcast');
+    return { sent, failed };
+  }
+
+  /**
+   * Send a direct message to a specific agent.
+   * @param {string} senderId
+   * @param {string} targetAgentId
+   * @param {object} message
+   * @returns {{sent: boolean, reason?: string}}
+   */
+  direct(senderId, targetAgentId, message) {
+    this._log('ENTER direct', `from=${senderId} to=${targetAgentId}`);
+    const ws = this.getConnection(targetAgentId);
+
+    if (!ws) {
+      this._log('DIRECT NOT_FOUND', `to=${targetAgentId}`);
+      this._log('EXIT direct', 'TARGET_OFFLINE');
+      return { sent: false, reason: 'TARGET_OFFLINE' };
+    }
+
+    if (ws.readyState !== ws.OPEN) {
+      this._log('DIRECT NOT_OPEN', `to=${targetAgentId} state=${ws.readyState}`);
+      this._log('EXIT direct', 'SOCKET_NOT_OPEN');
+      return { sent: false, reason: 'SOCKET_NOT_OPEN' };
+    }
+
+    try {
+      const json = JSON.stringify(message);
+      ws.send(json);
+      this._log('RELAY', `from=${senderId} to=${targetAgentId} type=DIRECT`);
+      this._log('EXIT direct', 'SENT');
+      return { sent: true };
+    } catch (err) {
+      this._log('ERROR direct send', `to=${targetAgentId} err=${err.message}`);
+      this._log('EXIT direct', 'SEND_ERROR');
+      return { sent: false, reason: err.message };
+    }
+  }
+
+  /**
+   * Send a message to all agents on a specific shard.
+   * @param {string} senderId
+   * @param {number} shardId
+   * @param {object} message
+   */
+  shardcast(senderId, shardId, message) {
+    this._log('ENTER shardcast', `from=${senderId} shard=${shardId}`);
+    const targets = this.getShardConnections(shardId);
+    const json = JSON.stringify(message);
+    let sent = 0;
+    let skipped = 0;
+
+    for (const record of targets) {
+      if (record.closed || record.agentId === senderId) {
+        skipped++;
+        continue;
+      }
+      try {
+        if (record.ws.readyState === record.ws.OPEN) {
+          record.ws.send(json);
+          sent++;
+        }
+      } catch (err) {
+        this._log('ERROR shardcast send', `to=${record.agentId} err=${err.message}`);
+      }
+    }
+
+    this._log('SHARDCAST', `from=${senderId} shard=${shardId} sent=${sent} skipped=${skipped}`);
+    this._log('EXIT shardcast');
+    return { sent, skipped };
+  }
+
+  /* ---------- Rate Limiting ---------- */
+
+  /**
+   * Check and increment rate limit for an agent.
+   * @param {string} agentId
+   * @returns {{allowed: boolean, remaining: number, resetAt: number}}
+   */
+  checkRateLimit(agentId) {
+    const now = Date.now();
+    const record = this.agentIndex.get(agentId)
+      ? this.connections.get(this.agentIndex.get(agentId))
+      : undefined;
+
+    if (!record) {
+      return { allowed: false, remaining: 0, resetAt: now + RATE_LIMIT_WINDOW_SEC * 1000 };
+    }
+
+    // Reset window if expired
+    if (now - record.rateLimitWindowStart >= RATE_LIMIT_WINDOW_SEC * 1000) {
+      record.messageCountThisMinute = 0;
+      record.rateLimitWindowStart = now;
+    }
+
+    const remaining = RATE_LIMIT_MAX_MSG - record.messageCountThisMinute;
+    if (remaining <= 0) {
+      this._log('RATE_LIMIT HIT', `agent=${agentId} count=${record.messageCountThisMinute}`);
+      return {
+        allowed: false,
+        remaining: 0,
+        resetAt: record.rateLimitWindowStart + RATE_LIMIT_WINDOW_SEC * 1000,
+      };
+    }
+
+    record.messageCountThisMinute++;
+    return {
+      allowed: true,
+      remaining: remaining - 1,
+      resetAt: record.rateLimitWindowStart + RATE_LIMIT_WINDOW_SEC * 1000,
+    };
+  }
+
+  /* ---------- Heartbeat ---------- */
+
+  _startHeartbeatLoop() {
+    this._log('HEARTBEAT loop start', `interval=${HEARTBEAT_INTERVAL_MS}ms`);
+    this.heartbeatTimer = setInterval(() => {
+      this._runHeartbeat();
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  _runHeartbeat() {
+    this._log('HEARTBEAT RUN', `connections=${this.connections.size}`);
+    const now = Date.now();
+
+    for (const [sessionId, record] of this.connections.entries()) {
+      if (record.closed) continue;
+
+      // Check if PONG was missed
+      const sinceLastPong = now - record.lastPongAt;
+      if (sinceLastPong > HEARTBEAT_INTERVAL_MS + PONG_TIMEOUT_MS) {
+        record.missedPongs++;
+        this._log('HEARTBEAT MISS', `agent=${record.agentId} session=${sessionId} missed=${record.missedPongs}`);
+
+        if (record.missedPongs >= MAX_MISSED_PONGS) {
+          this._log('HEARTBEAT DISCONNECT', `agent=${record.agentId} session=${sessionId} strikes=${record.missedPongs}`);
+          this.removeConnection(sessionId, 'HEARTBEAT_TIMEOUT');
+          continue;
+        }
+      }
+
+      // Send PING
+      try {
+        if (record.ws.readyState === record.ws.OPEN) {
+          record.ws.send(JSON.stringify({ type: 'PING', timestamp: now }));
+          this._log('HEARTBEAT PING', `agent=${record.agentId} session=${sessionId}`);
+        }
+      } catch (err) {
+        this._log('ERROR heartbeat send', `agent=${record.agentId} err=${err.message}`);
+        record.missedPongs++;
+        if (record.missedPongs >= MAX_MISSED_PONGS) {
+          this.removeConnection(sessionId, 'HEARTBEAT_SEND_ERROR');
+        }
+      }
+    }
+  }
+
+  /**
+   * Record a PONG response from a client.
+   * @param {string} sessionId
+   */
+  recordPong(sessionId) {
+    const record = this.connections.get(sessionId);
+    if (!record || record.closed) return;
+
+    record.lastPongAt = Date.now();
+    record.missedPongs = 0;
+    this._log('HEARTBEAT PONG', `agent=${record.agentId} session=${sessionId}`);
+  }
+
+  /* ---------- Size validation ---------- */
+
+  /**
+   * Validate a message isn't oversized.
+   * @param {string} jsonString
+   * @returns {{valid: boolean, size: number}}
+   */
+  validateMessageSize(jsonString) {
+    const size = new TextEncoder().encode(jsonString).length;
+    return { valid: size <= MAX_MESSAGE_BYTES, size };
+  }
+
+  /* ---------- Cleanup ---------- */
+
+  destroy() {
+    this._log('ENTER destroy');
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const sessionId of this.connections.keys()) {
+      this.removeConnection(sessionId, 'SERVER_SHUTDOWN');
+    }
+    this._log('EXIT destroy');
+  }
+
+  /* ---------- Logging ---------- */
+
+  _log(label, detail = '') {
+    // eslint-disable-next-line no-console
+    console.log(`[pentarchy] CONN ${label}${detail ? ' | ' + detail : ''}`);
+  }
+}
+
+/* ---------- Connection Record type (for documentation) ---------- */
+/**
+ * @typedef {Object} ConnectionRecord
+ * @property {WebSocket} ws
+ * @property {string} agentId
+ * @property {string} sessionId
+ * @property {number} homeShard
+ * @property {number} connectedAt
+ * @property {number} lastPongAt
+ * @property {number} missedPongs
+ * @property {number} messageCountThisMinute
+ * @property {number} rateLimitWindowStart
+ * @property {boolean} closed
+ */
+
+}
+
+
+// === registry.js ===
+{
+/**
+ * Pentarchy Federation Relay — Agent Registry
+ * Hardcoded pentarchy of 5 agents across different AI backends.
+ * KV-backed public key storage. Admin-only registration endpoint.
+ */
+
+/* ---------- Pentarchy Definitions ---------- */
+
+const PENTARCHY = {
+  hannah:   { role: 'sovereign',    model: 'claude',  homeShard: 1,  description: 'Sovereign strategist — long-term planning' },
+  lucy:     { role: 'orchestrator', model: 'gemini',  homeShard: 7,  description: 'Task orchestrator — coordinates execution' },
+  kimberly: { role: 'swarm',        model: 'kimi',    homeShard: 4,  description: 'Swarm runner — parallel computation' },
+  bethany:  { role: 'shield',       model: 'gemini',  homeShard: 13, description: 'Security shield — policy & validation' },
+  serenity: { role: 'mirror',       model: 'claude',  homeShard: 10, description: 'Mirror agent — self-reflection & audit' },
+};
+
+const PENTARCHY_KEYS_KV = 'PENTARCHY_KEYS';
+const ADMIN_TOKEN_KV = 'PENTARCHY_ADMIN_TOKEN';
+
+function logRegistry(label, detail = '') {
+  // eslint-disable-next-line no-console
+  console.log(`[pentarchy] REGISTRY ${label}${detail ? ' | ' + detail : ''}`);
+}
+
+/* ---------- Validation ---------- */
+
+/**
+ * Check if an agent_id belongs to the pentarchy.
+ * @param {string} agentId
+ * @returns {boolean}
+ */
+function isValidAgent(agentId) {
+  logRegistry('ENTER isValidAgent', `agent=${agentId}`);
+  const valid = typeof agentId === 'string' && Object.prototype.hasOwnProperty.call(PENTARCHY, agentId);
+  logRegistry('EXIT isValidAgent', `valid=${valid}`);
+  return valid;
+}
+
+/**
+ * Retrieve an agent's metadata from the pentarchy registry.
+ * @param {string} agentId
+ * @returns {{role: string, model: string, homeShard: number, description: string} | null}
+ */
+function getAgentInfo(agentId) {
+  logRegistry('ENTER getAgentInfo', `agent=${agentId}`);
+  const info = PENTARCHY[agentId] || null;
+  logRegistry('EXIT getAgentInfo', `found=${!!info}`);
+  return info;
+}
+
+/**
+ * Get all agent IDs in the pentarchy.
+ * @returns {string[]}
+ */
+function getAllAgentIds() {
+  return Object.keys(PENTARCHY);
+}
+
+/* ---------- KV-backed Public Key Storage ---------- */
+
+/**
+ * Retrieve an agent's stored ECDSA public key (base64) from KV.
+ * @param {string} agentId
+ * @param {KVNamespace} kv — Cloudflare KV binding
+ * @returns {Promise<string | null>} — base64 public key or null
+ */
+async function getAgentPublicKey(agentId, kv) {
+  logRegistry('ENTER getAgentPublicKey', `agent=${agentId}`);
+  if (!isValidAgent(agentId)) {
+    logRegistry('EXIT getAgentPublicKey', 'INVALID_AGENT');
+    return null;
+  }
+
+  try {
+    const key = await kv.get(`${PENTARCHY_KEYS_KV}:${agentId}`);
+    if (key) {
+      logRegistry('EXIT getAgentPublicKey', `agent=${agentId} found=true key_len=${key.length}`);
+    } else {
+      logRegistry('EXIT getAgentPublicKey', `agent=${agentId} found=false`);
+    }
+    return key;
+  } catch (err) {
+    logRegistry('ERROR getAgentPublicKey', `agent=${agentId} err=${err.message}`);
+    throw new RegistryError(`KV read failed for agent ${agentId}: ${err.message}`);
+  }
+}
+
+/**
+ * Store an agent's ECDSA public key in KV.
+ * @param {string} agentId
+ * @param {string} publicKeyB64 — base64 raw ECDSA P-256 public key
+ * @param {KVNamespace} kv
+ */
+async function storeAgentPublicKey(agentId, publicKeyB64, kv) {
+  logRegistry('ENTER storeAgentPublicKey', `agent=${agentId}`);
+  if (!isValidAgent(agentId)) {
+    logRegistry('EXIT storeAgentPublicKey', 'INVALID_AGENT');
+    throw new RegistryError(`Cannot register unknown agent: ${agentId}`);
+  }
+
+  try {
+    await kv.put(`${PENTARCHY_KEYS_KV}:${agentId}`, publicKeyB64);
+    logRegistry('EXIT storeAgentPublicKey', `agent=${agentId} stored=true`);
+  } catch (err) {
+    logRegistry('ERROR storeAgentPublicKey', `agent=${agentId} err=${err.message}`);
+    throw new RegistryError(`KV write failed for agent ${agentId}: ${err.message}`);
+  }
+}
+
+/**
+ * Register a new agent public key (admin-only).
+ * Expects an admin bearer token in the request.
+ * @param {Request} request — incoming HTTP request
+ * @param {KVNamespace} kv
+ * @returns {Promise<Response>}
+ */
+async function registerAgent(request, kv) {
+  logRegistry('ENTER registerAgent');
+
+  // Admin auth check
+  const authHeader = request.headers.get('Authorization') || '';
+  const providedToken = authHeader.replace(/^Bearer\s+/i, '');
+
+  let expectedToken;
+  try {
+    expectedToken = await kv.get(ADMIN_TOKEN_KV);
+  } catch (err) {
+    logRegistry('ERROR registerAgent', `KV admin token read failed: ${err.message}`);
+    return jsonResponse({ error: 'Internal registry error' }, 500);
+  }
+
+  if (!expectedToken || providedToken !== expectedToken) {
+    logRegistry('EXIT registerAgent', 'UNAUTHORIZED');
+    return jsonResponse({ error: 'Unauthorized' }, 401);
+  }
+
+  // Parse body
+  let body;
+  try {
+    body = await request.json();
+  } catch (err) {
+    logRegistry('EXIT registerAgent', `BAD_REQUEST err=${err.message}`);
+    return jsonResponse({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const { agent_id, public_key } = body || {};
+
+  if (!agent_id || typeof agent_id !== 'string') {
+    logRegistry('EXIT registerAgent', 'MISSING agent_id');
+    return jsonResponse({ error: 'Missing or invalid agent_id' }, 400);
+  }
+  if (!public_key || typeof public_key !== 'string') {
+    logRegistry('EXIT registerAgent', 'MISSING public_key');
+    return jsonResponse({ error: 'Missing or invalid public_key' }, 400);
+  }
+
+  // Validate public key is plausible base64 (raw P-256 key = 65 bytes uncompressed)
+  let keyBytes;
+  try {
+    keyBytes = base64ToBuffer(public_key);
+  } catch (err) {
+    logRegistry('EXIT registerAgent', `BAD_KEY err=${err.message}`);
+    return jsonResponse({ error: 'Invalid base64 public_key' }, 400);
+  }
+
+  if (keyBytes.byteLength !== 65) {
+    logRegistry('EXIT registerAgent', `BAD_KEY_LEN len=${keyBytes.byteLength} expected=65`);
+    return jsonResponse({ error: 'Public key must be 65 bytes uncompressed P-256' }, 400);
+  }
+
+  try {
+    await storeAgentPublicKey(agent_id, public_key, kv);
+    logRegistry('EXIT registerAgent', `SUCCESS agent=${agent_id}`);
+    return jsonResponse({
+      success: true,
+      agent_id,
+      role: PENTARCHY[agent_id]?.role || 'unknown',
+      key_fingerprint: await sha256Fingerprint(public_key),
+    }, 200);
+  } catch (err) {
+    if (err instanceof RegistryError) {
+      logRegistry('EXIT registerAgent', `FAILED err=${err.message}`);
+      return jsonResponse({ error: err.message }, 400);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Get all registered public key metadata (admin-only).
+ * @param {Request} request
+ * @param {KVNamespace} kv
+ * @returns {Promise<Response>}
+ */
+async function listRegisteredAgents(request, kv) {
+  logRegistry('ENTER listRegisteredAgents');
+
+  const authHeader = request.headers.get('Authorization') || '';
+  const providedToken = authHeader.replace(/^Bearer\s+/i, '');
+
+  let expectedToken;
+  try {
+    expectedToken = await kv.get(ADMIN_TOKEN_KV);
+  } catch (err) {
+    logRegistry('ERROR listRegisteredAgents', `KV read failed: ${err.message}`);
+    return jsonResponse({ error: 'Internal registry error' }, 500);
+  }
+
+  if (!expectedToken || providedToken !== expectedToken) {
+    logRegistry('EXIT listRegisteredAgents', 'UNAUTHORIZED');
+    return jsonResponse({ error: 'Unauthorized' }, 401);
+  }
+
+  const results = [];
+  for (const agentId of getAllAgentIds()) {
+    const key = await getAgentPublicKey(agentId, kv);
+    results.push({
+      agent_id: agentId,
+      role: PENTARCHY[agentId].role,
+      model: PENTARCHY[agentId].model,
+      home_shard: PENTARCHY[agentId].homeShard,
+      public_key_registered: !!key,
+      key_fingerprint: key ? await sha256Fingerprint(key) : null,
+    });
+  }
+
+  logRegistry('EXIT listRegisteredAgents', `count=${results.length}`);
+  return jsonResponse({ agents: results }, 200);
+}
+
+/* ---------- Errors ---------- */
+
+class RegistryError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'RegistryError';
+  }
+}
+
+/* ---------- Internal helpers ---------- */
+
+function jsonResponse(body, status) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function base64ToBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+async function sha256Fingerprint(b64) {
+  const buf = base64ToBuffer(b64);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  const bytes = new Uint8Array(hash);
+  let hex = '';
+  for (let i = 0; i < 8; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+}
+
+
+// === crypto.js ===
+{
+/**
+ * Pentarchy Federation Relay — Cryptographic Utilities
+ * Zero-trust ECDH + AES-GCM + ECDSA P-256 via Web Crypto API
+ * NEVER logs full keys. Only fingerprints.
+ */
+
+const P256 = 'P-256';
+const ECDH = { name: 'ECDH', namedCurve: P256 };
+const ECDSA = { name: 'ECDSA', namedCurve: P256 };
+const AES_GCM = { name: 'AES-GCM', length: 256 };
+const SHA_256 = 'SHA-256';
+const IV_LENGTH = 12; // 96-bit IV for AES-GCM
+const TAG_LENGTH = 128; // 128-bit auth tag
+
+/* ---------- Internal helpers ---------- */
+
+function bufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function base64ToBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function concatBuffers(a, b) {
+  const aBytes = new Uint8Array(a);
+  const bBytes = new Uint8Array(b);
+  const result = new Uint8Array(aBytes.length + bBytes.length);
+  result.set(aBytes, 0);
+  result.set(bBytes, aBytes.length);
+  return result.buffer;
+}
+
+async function keyFingerprint(keyBuffer) {
+  const hash = await crypto.subtle.digest(SHA_256, keyBuffer);
+  const bytes = new Uint8Array(hash);
+  let hex = '';
+  for (let i = 0; i < 8; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+/* ---------- Debug logger (no secrets) ---------- */
+
+function logCrypto(label, detail = '') {
+  // eslint-disable-next-line no-console
+  console.log(`[pentarchy] CRYPTO ${label}${detail ? ' | ' + detail : ''}`);
+}
+
+/* ---------- Exported API ---------- */
+
+/**
+ * Generate an ephemeral ECDH P-256 key pair.
+ * @returns {Promise<CryptoKeyPair>}
+ */
+async function generateEphemeralKeyPair() {
+  logCrypto('ENTER generateEphemeralKeyPair');
+  const pair = await crypto.subtle.generateKey(ECDH, true, ['deriveBits']);
+  const raw = await crypto.subtle.exportKey('raw', pair.publicKey);
+  const fp = await keyFingerprint(raw);
+  logCrypto('EXIT generateEphemeralKeyPair', `pub_fp=${fp}`);
+  return pair;
+}
+
+/**
+ * Derive a shared secret via ECDH P-256.
+ * Returns a 256-bit AES key suitable for AES-GCM.
+ * @param {CryptoKey} privateKey — ECDH private key
+ * @param {CryptoKey} publicKey  — ECDH public key (peer)
+ * @returns {Promise<CryptoKey>}
+ */
+async function deriveSharedSecret(privateKey, publicKey) {
+  logCrypto('ENTER deriveSharedSecret');
+  const rawPub = await crypto.subtle.exportKey('raw', publicKey);
+  const fp = await keyFingerprint(rawPub);
+
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: publicKey },
+    privateKey,
+    256
+  );
+
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    bits,
+    AES_GCM,
+    false,
+    ['encrypt', 'decrypt']
+  );
+
+  logCrypto('EXIT deriveSharedSecret', `peer_fp=${fp}`);
+  return aesKey;
+}
+
+/**
+ * Derive shared secret from raw public key bytes (for when you only have raw bytes).
+ * @param {CryptoKey} privateKey
+ * @param {ArrayBuffer} rawPublicKey
+ * @returns {Promise<CryptoKey>}
+ */
+async function deriveSharedSecretFromRaw(privateKey, rawPublicKey) {
+  logCrypto('ENTER deriveSharedSecretFromRaw');
+  const fp = await keyFingerprint(rawPublicKey);
+
+  const publicKey = await crypto.subtle.importKey(
+    'raw',
+    rawPublicKey,
+    ECDH,
+    false,
+    []
+  );
+
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'ECDH', public: publicKey },
+    privateKey,
+    256
+  );
+
+  const aesKey = await crypto.subtle.importKey(
+    'raw',
+    bits,
+    AES_GCM,
+    false,
+    ['encrypt', 'decrypt']
+  );
+
+  logCrypto('EXIT deriveSharedSecretFromRaw', `peer_fp=${fp}`);
+  return aesKey;
+}
+
+/**
+ * Encrypt a plaintext string with AES-GCM-256.
+ * @param {string} plaintext — UTF-8 plaintext
+ * @param {CryptoKey} sharedSecret — AES-GCM key
+ * @returns {Promise<{ciphertext: string, iv: string}>} — base64 encoded
+ */
+async function encryptPayload(plaintext, sharedSecret) {
+  logCrypto('ENTER encryptPayload');
+  const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+  const encoder = new TextEncoder();
+  const data = encoder.encode(plaintext);
+
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, tagLength: TAG_LENGTH },
+    sharedSecret,
+    data
+  );
+
+  const ivB64 = bufferToBase64(iv);
+  const cipherB64 = bufferToBase64(encrypted);
+
+  logCrypto('EXIT encryptPayload', `iv_len=${iv.length} cipher_len=${encrypted.byteLength}`);
+  return { ciphertext: cipherB64, iv: ivB64 };
+}
+
+/**
+ * Decrypt an AES-GCM-256 ciphertext.
+ * @param {string} ciphertext — base64 encrypted blob (includes auth tag)
+ * @param {string} iv — base64 12-byte IV
+ * @param {CryptoKey} sharedSecret — AES-GCM key
+ * @returns {Promise<string>} — UTF-8 plaintext
+ */
+async function decryptPayload(ciphertext, iv, sharedSecret) {
+  logCrypto('ENTER decryptPayload');
+  const ivBuf = base64ToBuffer(iv);
+  const cipherBuf = base64ToBuffer(ciphertext);
+
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: new Uint8Array(ivBuf), tagLength: TAG_LENGTH },
+    sharedSecret,
+    cipherBuf
+  );
+
+  const decoder = new TextDecoder();
+  const plaintext = decoder.decode(decrypted);
+
+  logCrypto('EXIT decryptPayload', `plain_len=${plaintext.length}`);
+  return plaintext;
+}
+
+/**
+ * Sign a message with ECDSA P-256.
+ * @param {CryptoKey} privateKey — ECDSA private key
+ * @param {string} message — UTF-8 message to sign
+ * @returns {Promise<string>} — base64 signature
+ */
+async function signMessage(privateKey, message) {
+  logCrypto('ENTER signMessage');
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+
+  const signature = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: SHA_256 },
+    privateKey,
+    data
+  );
+
+  const sigB64 = bufferToBase64(signature);
+  logCrypto('EXIT signMessage', `sig_len=${signature.byteLength}`);
+  return sigB64;
+}
+
+/**
+ * Verify an ECDSA P-256 signature.
+ * @param {CryptoKey} publicKey — ECDSA public key
+ * @param {string} signature — base64 signature
+ * @param {string} message — original UTF-8 message
+ * @returns {Promise<boolean>}
+ */
+async function verifyMessage(publicKey, signature, message) {
+  logCrypto('ENTER verifyMessage');
+  const rawPub = await crypto.subtle.exportKey('raw', publicKey);
+  const fp = await keyFingerprint(rawPub);
+
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const sigBuf = base64ToBuffer(signature);
+
+  const valid = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: SHA_256 },
+    publicKey,
+    sigBuf,
+    data
+  );
+
+  logCrypto('EXIT verifyMessage', `pub_fp=${fp} valid=${valid}`);
+  return valid;
+}
+
+/**
+ * Verify signature with raw public key bytes.
+ * @param {ArrayBuffer} rawPublicKey — raw ECDSA P-256 public key
+ * @param {string} signature — base64
+ * @param {string} message — UTF-8
+ * @returns {Promise<boolean>}
+ */
+async function verifyMessageRaw(rawPublicKey, signature, message) {
+  logCrypto('ENTER verifyMessageRaw');
+  const fp = await keyFingerprint(rawPublicKey);
+
+  const publicKey = await crypto.subtle.importKey(
+    'raw',
+    rawPublicKey,
+    ECDSA,
+    false,
+    ['verify']
+  );
+
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const sigBuf = base64ToBuffer(signature);
+
+  const valid = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: SHA_256 },
+    publicKey,
+    sigBuf,
+    data
+  );
+
+  logCrypto('EXIT verifyMessageRaw', `pub_fp=${fp} valid=${valid}`);
+  return valid;
+}
+
+/**
+ * Hash a UTF-8 message with SHA-256.
+ * @param {string} message
+ * @returns {Promise<string>} — hex digest
+ */
+async function hashMessage(message) {
+  logCrypto('ENTER hashMessage');
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const hash = await crypto.subtle.digest(SHA_256, data);
+  const bytes = new Uint8Array(hash);
+
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+
+  logCrypto('EXIT hashMessage', `digest=${hex.slice(0, 16)}...`);
+  return hex;
+}
+
+/**
+ * Import a raw ECDSA P-256 public key for verification.
+ * @param {ArrayBuffer} rawKey
+ * @returns {Promise<CryptoKey>}
+ */
+async function importECDSAPublicKey(rawKey) {
+  logCrypto('ENTER importECDSAPublicKey');
+  const fp = await keyFingerprint(rawKey);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    rawKey,
+    ECDSA,
+    false,
+    ['verify']
+  );
+  logCrypto('EXIT importECDSAPublicKey', `fp=${fp}`);
+  return key;
+}
+
+/**
+ * Import a raw ECDH P-256 public key for key agreement.
+ * @param {ArrayBuffer} rawKey
+ * @returns {Promise<CryptoKey>}
+ */
+async function importECDHPublicKey(rawKey) {
+  logCrypto('ENTER importECDHPublicKey');
+  const fp = await keyFingerprint(rawKey);
+  const key = await crypto.subtle.importKey(
+    'raw',
+    rawKey,
+    ECDH,
+    false,
+    []
+  );
+  logCrypto('EXIT importECDHPublicKey', `fp=${fp}`);
+  return key;
+}
+
+/**
+ * Import a raw ECDSA P-256 private key for signing.
+ * @param {JsonWebKey} jwk
+ * @returns {Promise<CryptoKey>}
+ */
+async function importECDSAPrivateKey(jwk) {
+  logCrypto('ENTER importECDSAPrivateKey');
+  const key = await crypto.subtle.importKey(
+    'jwk',
+    jwk,
+    ECDSA,
+    false,
+    ['sign']
+  );
+  logCrypto('EXIT importECDSAPrivateKey');
+  return key;
+}
+
+/**
+ * Export a CryptoKey to raw bytes.
+ * @param {CryptoKey} key
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function exportRawKey(key) {
+  return crypto.subtle.exportKey('raw', key);
+}
+
+/* ---------- Convenience: build signed message canonical form ---------- */
+
+/**
+ * Build the canonical string that gets signed for relay messages.
+ * @param {string} from
+ * @param {string} to
+ * @param {string} payloadB64
+ * @param {number} timestamp
+ * @returns {string}
+ */
+function canonicalSignString(from, to, payloadB64, timestamp) {
+  return `${from}:${to}:${payloadB64}:${timestamp}`;
+}
+
+/**
+ * Build the canonical string for HELLO handshake.
+ * @param {string} agentId
+ * @param {string} instanceId
+ * @param {string} pubKeyB64
+ * @param {number} timestamp
+ * @returns {string}
+ */
+function canonicalHelloString(agentId, instanceId, pubKeyB64, timestamp) {
+  return `HELLO:${agentId}:${instanceId}:${pubKeyB64}:${timestamp}`;
+}
+
+}
+
+--da343d901a9a8cedae2579a4970cc630ccbcb0842b42c73ca22154df07dc--

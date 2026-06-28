@@ -1,0 +1,872 @@
+--3c1c11ad68ed23cb836650183373c8a67c50e9f74a2fe9028e15ce88e11f
+Content-Disposition: form-data; name="draft.js"
+
+var __defProp = Object.defineProperty;
+var __name = (target, value) => __defProp(target, "name", { value, configurable: true });
+
+// src/logger.ts
+var DraftLogger = class {
+  static {
+    __name(this, "DraftLogger");
+  }
+  db;
+  workerName = "moe-draft";
+  requestId;
+  inMemoryBuffer = [];
+  bufferMaxSize = 128;
+  constructor(db, requestId) {
+    this.db = db;
+    this.requestId = requestId;
+  }
+  /**
+   * Write a log entry synchronously to the in-memory buffer.
+   * Flush is best-effort and async so we never block the hot path.
+   */
+  log(level, stage, message, payload) {
+    const entry = {
+      timestamp: Date.now(),
+      worker: this.workerName,
+      level,
+      stage,
+      message,
+      payload,
+      requestId: this.requestId
+    };
+    this.inMemoryBuffer.push(entry);
+    this.emitConsole(entry);
+    if (this.inMemoryBuffer.length >= this.bufferMaxSize) {
+      this.flush().catch((e) => {
+        console.error(`[draft.DraftLogger] FAILED: background flush error: ${e.message}`, {
+          error_type: e.constructor.name,
+          stack_trace: e.stack,
+          context: "Background log flush to D1",
+          severity: "ERROR",
+          worker_name: "moe-draft"
+        });
+      });
+    }
+  }
+  debug(stage, message, payload) {
+    this.log("DEBUG", stage, message, payload);
+  }
+  info(stage, message, payload) {
+    this.log("INFO", stage, message, payload);
+  }
+  warn(stage, message, payload) {
+    this.log("WARN", stage, message, payload);
+  }
+  error(stage, message, payload) {
+    this.log("ERROR", stage, message, payload);
+  }
+  /**
+   * Flush all buffered entries to D1.  Retries once on failure.
+   */
+  async flush() {
+    if (this.inMemoryBuffer.length === 0) return;
+    const batch = this.inMemoryBuffer.splice(0, this.inMemoryBuffer.length);
+    const stmt = this.db.prepare(
+      `INSERT INTO AURIS_LOGS (timestamp, worker, level, stage, message, payload, request_id)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`
+    );
+    try {
+      await this.db.batch(
+        batch.map(
+          (e) => stmt.bind(
+            e.timestamp,
+            e.worker,
+            e.level,
+            e.stage,
+            e.message,
+            e.payload ? JSON.stringify(e.payload) : null,
+            e.requestId ?? null
+          )
+        )
+      );
+    } catch (firstErr) {
+      try {
+        await this.db.batch(
+          batch.map(
+            (e) => stmt.bind(
+              e.timestamp,
+              e.worker,
+              e.level,
+              e.stage,
+              e.message,
+              e.payload ? JSON.stringify(e.payload) : null,
+              e.requestId ?? null
+            )
+          )
+        );
+      } catch (retryErr) {
+        console.error("[DraftLogger] D1 flush failed after retry:", retryErr);
+        for (const e of batch) {
+          console.error(JSON.stringify(e));
+        }
+      }
+    }
+  }
+  /**
+   * Emit to Cloudflare Workers console for real-time tail.
+   */
+  emitConsole(entry) {
+    const line = `[${entry.timestamp}] [${entry.level}] [${entry.stage}] ${entry.message}`;
+    switch (entry.level) {
+      case "ERROR":
+        console.error(line, entry.payload ?? "");
+        break;
+      case "WARN":
+        console.warn(line, entry.payload ?? "");
+        break;
+      case "DEBUG":
+        console.debug(line, entry.payload ?? "");
+        break;
+      default:
+        console.log(line, entry.payload ?? "");
+    }
+  }
+};
+
+// src/cache.ts
+var KVCacheManager = class _KVCacheManager {
+  static {
+    __name(this, "KVCacheManager");
+  }
+  hot;
+  warm;
+  embeddingService;
+  logger;
+  constructor(hot, warm, embeddingService, logger) {
+    this.hot = hot;
+    this.warm = warm;
+    this.embeddingService = embeddingService;
+    this.logger = logger;
+    this.logger.debug("cache", "[KVCacheManager.constructor] ENTER");
+    this.logger.debug("cache", "[KVCacheManager.constructor] EXIT");
+  }
+  /**
+   * Build a cache key from prompt + context fingerprint.
+   */
+  static async buildKey(prompt, contextFingerprint) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(prompt.slice(0, 256) + "::" + contextFingerprint);
+    const digest = await crypto.subtle.digest("SHA-256", data);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  /**
+   * Tiered lookup: hot → warm → cold (service binding).
+   * Returns the first hit along with latency and tier metadata.
+   */
+  async lookup(prompt, contextFingerprint) {
+    this.logger.debug("cache", "[KVCacheManager.lookup] ENTER", { promptLen: prompt.length, contextFingerprint });
+    const keyHash = await _KVCacheManager.buildKey(prompt, contextFingerprint);
+    const t0 = performance.now();
+    this.logger.debug("cache", "[KVCacheManager.lookup] CALLING target=KV_HOT.get", { keyHash });
+    try {
+      const hotRaw = await this.hot.getWithMetadata(keyHash);
+      if (hotRaw.value) {
+        this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=hot_hit reason=entry_found_in_hot_tier");
+        const entry = hotRaw.value;
+        const latency2 = Math.round(performance.now() - t0);
+        entry.hitCount = (entry.hitCount || 0) + 1;
+        this.hot.put(keyHash, JSON.stringify(entry), { expirationTtl: 86400 }).catch((e) => {
+          this.logger.warn("cache", "[KVCacheManager.lookup] hot_put_error", {
+            keyHash,
+            error: e.message,
+            error_type: e.constructor.name
+          });
+        });
+        this.logger.info("cache", "[KVCacheManager.lookup] lookup_hit", {
+          tier: "hot",
+          keyHash,
+          latencyMs: latency2,
+          hitCount: entry.hitCount
+        });
+        this.logger.debug("cache", "[KVCacheManager.lookup] EXIT", { tier: "hot", latencyMs: latency2 });
+        return { tier: "hot", latencyMs: latency2, entry, keyHash };
+      } else {
+        this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=hot_miss reason=no_entry_in_hot_tier");
+      }
+    } catch (e) {
+      this.logger.warn("cache", "[KVCacheManager.lookup] hot_lookup_error", { keyHash, error: String(e) });
+      this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=hot_error reason=exception", { error: String(e) });
+    }
+    this.logger.debug("cache", "[KVCacheManager.lookup] CALLING target=KV_WARM.get", { keyHash });
+    try {
+      const warmRaw = await this.warm.getWithMetadata(keyHash);
+      if (warmRaw.value) {
+        this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=warm_hit reason=entry_found_in_warm_tier");
+        const entry = warmRaw.value;
+        const latency2 = Math.round(performance.now() - t0);
+        entry.hitCount = (entry.hitCount || 0) + 1;
+        this.promoteToHot(keyHash, entry).catch((e) => {
+          this.logger.warn("cache", "[KVCacheManager.lookup] promote_to_hot_error", {
+            keyHash,
+            error: e.message,
+            error_type: e.constructor.name
+          });
+        });
+        this.logger.info("cache", "[KVCacheManager.lookup] lookup_hit", {
+          tier: "warm",
+          keyHash,
+          latencyMs: latency2,
+          hitCount: entry.hitCount
+        });
+        this.logger.debug("cache", "[KVCacheManager.lookup] EXIT", { tier: "warm", latencyMs: latency2 });
+        return { tier: "warm", latencyMs: latency2, entry, keyHash };
+      } else {
+        this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=warm_miss reason=no_entry_in_warm_tier");
+      }
+    } catch (e) {
+      this.logger.warn("cache", "[KVCacheManager.lookup] warm_lookup_error", { keyHash, error: String(e) });
+      this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=warm_error reason=exception", { error: String(e) });
+    }
+    if (this.embeddingService) {
+      this.logger.debug("cache", "[KVCacheManager.lookup] CALLING target=embedding_service", { keyHash, tier: "cold" });
+      try {
+        const coldRes = await this.embeddingService.fetch(
+          new Request("http://internal/embedding", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, contextFingerprint, keyHash })
+          })
+        );
+        if (coldRes.ok) {
+          this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=cold_hit reason=entry_from_embedding_service");
+          const coldPayload = await coldRes.json();
+          const latency2 = Math.round(performance.now() - t0);
+          coldPayload.hitCount = 1;
+          this.warm.put(keyHash, JSON.stringify(coldPayload), { expirationTtl: 3600 }).catch((e) => {
+            this.logger.warn("cache", "[KVCacheManager.lookup] warm_put_error", {
+              keyHash,
+              error: e.message,
+              error_type: e.constructor.name
+            });
+          });
+          this.logger.info("cache", "[KVCacheManager.lookup] lookup_hit", {
+            tier: "cold",
+            keyHash,
+            latencyMs: latency2,
+            modelName: coldPayload.modelName
+          });
+          this.logger.debug("cache", "[KVCacheManager.lookup] EXIT", { tier: "cold", latencyMs: latency2 });
+          return { tier: "cold", latencyMs: latency2, entry: coldPayload, keyHash };
+        } else {
+          this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=cold_miss reason=embedding_service_non_200", { status: coldRes.status });
+        }
+      } catch (e) {
+        this.logger.warn("cache", "[KVCacheManager.lookup] cold_lookup_error", { keyHash, error: String(e) });
+        this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=cold_error reason=exception", { error: String(e) });
+      }
+    } else {
+      this.logger.debug("cache", "[KVCacheManager.lookup] BRANCH path=cold_skip reason=no_embedding_service");
+    }
+    const latency = Math.round(performance.now() - t0);
+    this.logger.info("cache", "[KVCacheManager.lookup] lookup_miss", { tier: "miss", keyHash, latencyMs: latency });
+    this.logger.debug("cache", "[KVCacheManager.lookup] EXIT", { tier: "miss", latencyMs: latency });
+    return { tier: "miss", latencyMs: latency, entry: null, keyHash };
+  }
+  /**
+   * Store a newly generated draft result into the cache.
+   * Writes to hot if confidence is high, warm otherwise.
+   */
+  async store(keyHash, entry, tierPreference = "warm") {
+    this.logger.debug("cache", "[KVCacheManager.store] ENTER", { keyHash, tierPreference, confidence: entry.confidence });
+    const t0 = performance.now();
+    const payload = JSON.stringify(entry);
+    try {
+      if (tierPreference === "hot" && entry.confidence >= 0.85) {
+        this.logger.debug("cache", "[KVCacheManager.store] BRANCH path=store_hot reason=high_confidence", { confidence: entry.confidence });
+        await this.hot.put(keyHash, payload, { expirationTtl: 86400 });
+        this.logger.debug("cache", "[KVCacheManager.store] store_hot", { keyHash, confidence: entry.confidence, latencyMs: Math.round(performance.now() - t0) });
+      } else {
+        this.logger.debug("cache", "[KVCacheManager.store] BRANCH path=store_warm reason=standard_tier", { confidence: entry.confidence });
+        await this.warm.put(keyHash, payload, { expirationTtl: 3600 });
+        this.logger.debug("cache", "[KVCacheManager.store] store_warm", { keyHash, confidence: entry.confidence, latencyMs: Math.round(performance.now() - t0) });
+      }
+    } catch (e) {
+      this.logger.error("cache", "[KVCacheManager.store] store_error", { keyHash, error: String(e) });
+    }
+    this.logger.debug("cache", "[KVCacheManager.store] EXIT", { keyHash, tierPreference });
+  }
+  /**
+   * Best-effort promotion from warm to hot.
+   */
+  async promoteToHot(keyHash, entry) {
+    this.logger.debug("cache", "[KVCacheManager.promoteToHot] ENTER", { keyHash, hitCount: entry.hitCount });
+    try {
+      await this.hot.put(keyHash, JSON.stringify(entry), { expirationTtl: 86400 });
+      this.logger.debug("cache", "[KVCacheManager.promoteToHot] promote_to_hot", { keyHash, hitCount: entry.hitCount });
+    } catch (e) {
+      this.logger.warn("cache", "[KVCacheManager.promoteToHot] promote_failed", { keyHash, error: String(e) });
+    }
+    this.logger.debug("cache", "[KVCacheManager.promoteToHot] EXIT", { keyHash });
+  }
+};
+
+// src/draft.ts
+var DEFAULT_SPECULATIVE_K = 7;
+var DEFAULT_MAX_TOKENS = 256;
+var DEFAULT_TEMPERATURE = 0.3;
+var DEFAULT_TOP_P = 0.9;
+var CONFIDENCE_THRESHOLD_HIGH = 0.9;
+var CONFIDENCE_THRESHOLD_LOW = 0.55;
+var CONFIDENCE_THRESHOLD_MIN = 0.3;
+var MODEL_CHAIN = [
+  "@cf/meta/llama-3.3-70b-instruct",
+  "@cf/meta/llama-3.1-8b-instruct",
+  "@cf/meta/llama-2-7b-chat-int8"
+];
+var ConfidenceScorer = class {
+  static {
+    __name(this, "ConfidenceScorer");
+  }
+  logger;
+  constructor(logger) {
+    this.logger = logger;
+    this.logger.debug("confidence", "[ConfidenceScorer.constructor] ENTER");
+    this.logger.debug("confidence", "[ConfidenceScorer.constructor] EXIT");
+  }
+  /**
+   * Score a batch of draft tokens using heuristics + optional model perplexity proxy.
+   * Returns a scalar in [0, 1].
+   *
+   * Heuristics (fast, no extra model call):
+   *   1. Token entropy proxy: mean log-prob from Workers AI response.
+   *   2. Repetition penalty: penalise repeated n-grams.
+   *   3. Length normalisation: longer drafts get slight boost (up to cap).
+   *   4. Structural check: first token capitalised / punctuation at end.
+   */
+  score(draftTokens, responseMeta) {
+    this.logger.debug("confidence", "[ConfidenceScorer.score] ENTER", { tokenCount: draftTokens.length, hasLogProbs: !!responseMeta?.logProbs });
+    const t0 = performance.now();
+    if (draftTokens.length === 0) {
+      this.logger.debug("confidence", "[ConfidenceScorer.score] BRANCH path=empty_tokens reason=no_tokens_to_score");
+      this.logger.debug("confidence", "[ConfidenceScorer.score] EXIT", { rawScore: 0, threshold: CONFIDENCE_THRESHOLD_LOW, decision: "fallback" });
+      return 0;
+    }
+    const joined = draftTokens.join("");
+    let logProbScore = 0.5;
+    if (responseMeta?.logProbs && responseMeta.logProbs.length > 0) {
+      const meanLogProb = responseMeta.logProbs.reduce((a, b) => a + b, 0) / responseMeta.logProbs.length;
+      logProbScore = 1 / (1 + Math.exp(-meanLogProb * 2));
+      this.logger.debug("confidence", "[ConfidenceScorer.score] BRANCH path=logprob_proxy reason=logprobs_available", { meanLogProb, logProbScore });
+    } else {
+      this.logger.debug("confidence", "[ConfidenceScorer.score] BRANCH path=no_logprobs reason=logprobs_unavailable using_default=0.5");
+    }
+    const ngrams = /* @__PURE__ */ new Set();
+    let repeatCount = 0;
+    for (let i = 0; i <= draftTokens.length - 3; i++) {
+      const tri = draftTokens.slice(i, i + 3).join("");
+      if (ngrams.has(tri)) repeatCount++;
+      ngrams.add(tri);
+    }
+    const repeatPenalty = Math.max(0, 1 - repeatCount / Math.max(1, draftTokens.length));
+    const lengthBoost = Math.min(1, draftTokens.length / DEFAULT_SPECULATIVE_K) * 0.1;
+    let structureScore = 0.5;
+    const firstChar = joined.trim().charAt(0);
+    const lastChar = joined.trim().slice(-1);
+    if (/[A-Z]/.test(firstChar)) structureScore += 0.1;
+    if (/[.?!]/.test(lastChar)) structureScore += 0.1;
+    if (joined.includes("\n")) structureScore += 0.05;
+    structureScore = Math.min(1, structureScore);
+    const rawScore = logProbScore * 0.4 + repeatPenalty * 0.35 + structureScore * 0.15 + lengthBoost;
+    const clamped = Math.max(0, Math.min(1, rawScore));
+    const elapsed = Math.round(performance.now() - t0);
+    const decision = clamped >= CONFIDENCE_THRESHOLD_HIGH ? "accept" : clamped < CONFIDENCE_THRESHOLD_LOW ? "fallback" : "pending";
+    this.logger.info("confidence", "[ConfidenceScorer.score] EXIT", {
+      rawScore: Number(clamped.toFixed(4)),
+      threshold: CONFIDENCE_THRESHOLD_LOW,
+      decision,
+      heuristics: { logProbScore, repeatPenalty, structureScore, lengthBoost },
+      latencyMs: elapsed
+    });
+    return clamped;
+  }
+  decide(confidence) {
+    this.logger.debug("confidence", "[ConfidenceScorer.decide] ENTER", { confidence, thresholdHigh: CONFIDENCE_THRESHOLD_HIGH, thresholdLow: CONFIDENCE_THRESHOLD_LOW, thresholdMin: CONFIDENCE_THRESHOLD_MIN });
+    if (confidence >= CONFIDENCE_THRESHOLD_HIGH) {
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] BRANCH path=accept reason=confidence_above_high_threshold");
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] EXIT", { decision: "accept" });
+      return "accept";
+    }
+    if (confidence < CONFIDENCE_THRESHOLD_MIN) {
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] BRANCH path=reject reason=confidence_below_min_threshold");
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] EXIT", { decision: "reject" });
+      return "reject";
+    }
+    if (confidence < CONFIDENCE_THRESHOLD_LOW) {
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] BRANCH path=verify reason=confidence_below_low_threshold");
+      this.logger.debug("confidence", "[ConfidenceScorer.decide] EXIT", { decision: "verify" });
+      return "verify";
+    }
+    this.logger.debug("confidence", "[ConfidenceScorer.decide] BRANCH path=accept_mid reason=mid_band_accepted_for_latency");
+    this.logger.debug("confidence", "[ConfidenceScorer.decide] EXIT", { decision: "accept" });
+    return "accept";
+  }
+};
+var SpeculativeDraft = class {
+  static {
+    __name(this, "SpeculativeDraft");
+  }
+  ai;
+  cache;
+  logger;
+  scorer;
+  verifierService;
+  embeddingService;
+  constructor(ai, cache, logger, verifierService, embeddingService) {
+    this.logger = logger;
+    this.logger.debug("lifecycle", "[SpeculativeDraft.constructor] ENTER", { hasVerifier: !!verifierService, hasEmbedding: !!embeddingService });
+    this.ai = ai;
+    this.cache = cache;
+    this.scorer = new ConfidenceScorer(logger);
+    this.verifierService = verifierService;
+    this.embeddingService = embeddingService;
+    this.logger.debug("lifecycle", "[SpeculativeDraft.constructor] EXIT");
+  }
+  /**
+   * Main entry: generate a speculative draft for the given prompt.
+   *
+   * Pipeline:
+   *   1. Cache lookup (hot → warm → cold).
+   *   2. If cache miss → run draft model chain.
+   *   3. Score confidence.
+   *   4. If high confidence → return draft + routing hints.
+   *   5. If low confidence → route to verifier (moe-verifier service binding).
+   *   6. Store result in appropriate cache tier.
+   */
+  async generate(req, requestId) {
+    this.logger.debug("lifecycle", "[SpeculativeDraft.generate] ENTER", { requestId, promptLen: req.prompt?.length, speculativeK: req.speculativeK ?? DEFAULT_SPECULATIVE_K });
+    const tStart = performance.now();
+    const k = req.speculativeK ?? DEFAULT_SPECULATIVE_K;
+    const prompt = req.prompt;
+    const context = req.context ?? "";
+    const fingerprint = this.makeFingerprint(prompt, context);
+    this.logger.info("lifecycle", "[SpeculativeDraft.generate] generate_start", {
+      requestId,
+      promptLen: prompt.length,
+      contextLen: context.length,
+      maxTokens: req.maxTokens ?? DEFAULT_MAX_TOKENS,
+      speculativeK: k
+    });
+    this.logger.debug("cache", "[SpeculativeDraft.generate] CALLING target=KVCacheManager.lookup");
+    let cacheResult = null;
+    if (req.useCache !== false) {
+      cacheResult = await this.cache.lookup(prompt, fingerprint);
+      this.logger.debug("cache", "[SpeculativeDraft.generate] BRANCH path=cache_lookup_done", { tier: cacheResult?.tier ?? "miss" });
+    } else {
+      this.logger.debug("cache", "[SpeculativeDraft.generate] BRANCH path=cache_disabled reason=useCache=false");
+    }
+    if (cacheResult && cacheResult.entry && req.useCache !== false) {
+      this.logger.debug("cache", "[SpeculativeDraft.generate] BRANCH path=cache_hit reason=entry_found");
+      const entry = cacheResult.entry;
+      const decision2 = this.scorer.decide(entry.confidence);
+      const latency = Math.round(performance.now() - tStart);
+      this.logger.info("lifecycle", "[SpeculativeDraft.generate] generate_cache_hit", {
+        requestId,
+        tier: cacheResult.tier,
+        confidence: entry.confidence,
+        decision: decision2,
+        latencyMs: latency
+      });
+      const routingHints2 = await this.fetchRoutingHints(prompt, context);
+      this.logger.debug("lifecycle", "[SpeculativeDraft.generate] EXIT", { requestId, accepted: decision2 === "accept", confidence: entry.confidence, tier: cacheResult.tier });
+      return {
+        draftTokens: entry.draftTokens,
+        accepted: decision2 === "accept",
+        confidence: entry.confidence,
+        modelUsed: entry.modelName ?? "cache",
+        tokensGenerated: entry.draftTokens.length,
+        latencyMs: latency,
+        cacheHit: cacheResult.tier,
+        routingHints: routingHints2,
+        fallbackReason: decision2 !== "accept" ? `cache_decision_${decision2}` : void 0,
+        requestId
+      };
+    }
+    this.logger.debug("inference", "[SpeculativeDraft.generate] BRANCH path=cache_miss reason=no_cache_entry");
+    this.logger.debug("inference", "[SpeculativeDraft.generate] CALLING target=runDraftInference");
+    const inference = await this.runDraftInference(prompt, context, req);
+    this.logger.debug("inference", "[SpeculativeDraft.generate] inference_complete", { modelUsed: inference.modelUsed, textLen: inference.text.length });
+    const draftTokens = this.tokeniseRoughly(inference.text, k);
+    this.logger.debug("confidence", "[SpeculativeDraft.generate] CALLING target=ConfidenceScorer.score");
+    const confidence = this.scorer.score(draftTokens, {
+      response: inference.text,
+      logProbs: inference.logProbs
+    });
+    this.logger.debug("confidence", "[SpeculativeDraft.generate] CALLING target=ConfidenceScorer.decide");
+    const decision = this.scorer.decide(confidence);
+    this.logger.info("confidence", "[SpeculativeDraft.generate] decision", {
+      requestId,
+      confidence: Number(confidence.toFixed(4)),
+      decision,
+      thresholdHigh: CONFIDENCE_THRESHOLD_HIGH,
+      thresholdLow: CONFIDENCE_THRESHOLD_LOW
+    });
+    let finalTokens = draftTokens;
+    let accepted = decision === "accept";
+    let fallbackReason;
+    if (decision === "verify" || decision === "reject") {
+      this.logger.debug("fallback", "[SpeculativeDraft.generate] BRANCH path=verifier_fallback reason=decision_requires_verification", { decision });
+      this.logger.debug("fallback", "[SpeculativeDraft.generate] CALLING target=callVerifier");
+      const verifierResult = await this.callVerifier({
+        prompt,
+        context,
+        draftTokens,
+        maxTokens: req.maxTokens,
+        temperature: req.temperature
+      });
+      finalTokens = this.tokeniseRoughly(verifierResult, k);
+      accepted = true;
+      fallbackReason = `draft_${decision}_verifier_used`;
+      this.logger.info("fallback", "[SpeculativeDraft.generate] verifier_returned", {
+        requestId,
+        verifierTokens: finalTokens.length,
+        originalDecision: decision
+      });
+    } else {
+      this.logger.debug("fallback", "[SpeculativeDraft.generate] BRANCH path=no_fallback reason=decision_accepted", { decision });
+    }
+    this.logger.debug("routing", "[SpeculativeDraft.generate] CALLING target=fetchRoutingHints");
+    const routingHints = await this.fetchRoutingHints(prompt, context);
+    const keyHash = cacheResult?.keyHash ?? await KVCacheManager.buildKey(prompt, fingerprint);
+    const cacheEntry = {
+      embedding: routingHints ?? [],
+      draftTokens: finalTokens,
+      confidence,
+      timestamp: Date.now(),
+      hitCount: 0,
+      modelName: inference.modelUsed
+    };
+    this.logger.debug("cache", "[SpeculativeDraft.generate] CALLING target=KVCacheManager.store", { tier: confidence >= CONFIDENCE_THRESHOLD_HIGH ? "hot" : "warm" });
+    await this.cache.store(
+      keyHash,
+      cacheEntry,
+      confidence >= CONFIDENCE_THRESHOLD_HIGH ? "hot" : "warm"
+    );
+    const totalLatency = Math.round(performance.now() - tStart);
+    this.logger.info("lifecycle", "[SpeculativeDraft.generate] generate_end", {
+      requestId,
+      tokensGenerated: finalTokens.length,
+      confidence: Number(confidence.toFixed(4)),
+      accepted,
+      modelUsed: inference.modelUsed,
+      latencyMs: totalLatency,
+      fallbackReason
+    });
+    this.logger.debug("lifecycle", "[SpeculativeDraft.generate] EXIT", { requestId, accepted, confidence, modelUsed: inference.modelUsed, latencyMs: totalLatency });
+    return {
+      draftTokens: finalTokens,
+      accepted,
+      confidence,
+      modelUsed: inference.modelUsed,
+      tokensGenerated: finalTokens.length,
+      latencyMs: totalLatency,
+      cacheHit: cacheResult?.tier ?? "miss",
+      routingHints,
+      fallbackReason,
+      requestId
+    };
+  }
+  // -----------------------------------------------------------------------
+  // Private helpers
+  // -----------------------------------------------------------------------
+  /**
+   * Run the draft model chain until one succeeds.
+   * Returns text + per-token log probs proxy + model name.
+   */
+  async runDraftInference(prompt, context, req) {
+    this.logger.debug("inference", "[SpeculativeDraft.runDraftInference] ENTER", { promptLen: prompt.length, contextLen: context.length });
+    const fullPrompt = context ? `${context}
+
+${prompt}` : prompt;
+    const maxTokens = req.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const temperature = req.temperature ?? DEFAULT_TEMPERATURE;
+    const topP = req.topP ?? DEFAULT_TOP_P;
+    for (const modelName of MODEL_CHAIN) {
+      const t0 = performance.now();
+      this.logger.info("inference", "[SpeculativeDraft.runDraftInference] CALLING target=WorkersAI.run", {
+        model: modelName,
+        inputTokens: this.estimateTokens(fullPrompt),
+        maxTokens,
+        temperature,
+        topP
+      });
+      try {
+        const result = await this.ai.run(modelName, {
+          prompt: fullPrompt,
+          max_tokens: maxTokens,
+          temperature,
+          top_p: topP
+          // Workers AI may not return logprobs for all models; we gracefully degrade.
+        });
+        const latency = Math.round(performance.now() - t0);
+        const text = typeof result === "string" ? result : result?.response ?? "";
+        const outputTokens = this.estimateTokens(text);
+        this.logger.info("inference", "[SpeculativeDraft.runDraftInference] ai_run_end", {
+          model: modelName,
+          inputTokens: this.estimateTokens(fullPrompt),
+          outputTokens,
+          latencyMs: latency,
+          status: "success"
+        });
+        this.logger.debug("inference", "[SpeculativeDraft.runDraftInference] EXIT", { modelUsed: modelName, textLen: text.length });
+        const logProbs = this.approximateLogProbs(text);
+        return { text, logProbs, modelUsed: modelName };
+      } catch (err) {
+        const latency = Math.round(performance.now() - t0);
+        this.logger.warn("inference", "[SpeculativeDraft.runDraftInference] ai_run_error", {
+          model: modelName,
+          latencyMs: latency,
+          error: String(err)
+        });
+        this.logger.debug("inference", "[SpeculativeDraft.runDraftInference] BRANCH path=model_retry reason=model_failed", { failedModel: modelName, error: String(err) });
+      }
+    }
+    this.logger.error("inference", "[SpeculativeDraft.runDraftInference] ai_run_all_failed", { modelsTried: MODEL_CHAIN });
+    this.logger.debug("inference", "[SpeculativeDraft.runDraftInference] EXIT", { modelUsed: "fallback_empty", textLen: 0 });
+    return { text: "", logProbs: [], modelUsed: "fallback_empty" };
+  }
+  /**
+   * Call the verifier worker via service binding for ground-truth generation.
+   */
+  async callVerifier(req) {
+    this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] ENTER", { promptLen: req.prompt.length, draftTokensLen: req.draftTokens.length });
+    if (!this.verifierService) {
+      this.logger.warn("fallback", "[SpeculativeDraft.callVerifier] BRANCH path=verifier_unavailable reason=no_service_binding");
+      this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] EXIT", { result: "fallback_to_draft_tokens" });
+      return req.draftTokens.join("");
+    }
+    const t0 = performance.now();
+    this.logger.info("fallback", "[SpeculativeDraft.callVerifier] CALLING target=moe-verifier", {
+      promptLen: req.prompt.length,
+      draftTokensLen: req.draftTokens.length
+    });
+    try {
+      const res = await this.verifierService.fetch(
+        new Request("http://internal/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(req)
+        })
+      );
+      const text = await res.text();
+      const latency = Math.round(performance.now() - t0);
+      this.logger.info("fallback", "[SpeculativeDraft.callVerifier] verifier_call_end", {
+        status: res.status,
+        latencyMs: latency,
+        responseLen: text.length
+      });
+      if (!res.ok) {
+        this.logger.warn("fallback", "[SpeculativeDraft.callVerifier] BRANCH path=verifier_non_200 reason=upstream_error", { status: res.status, bodyPreview: text.slice(0, 200) });
+        this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] EXIT", { result: "fallback_to_draft_tokens" });
+        return req.draftTokens.join("");
+      }
+      this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] BRANCH path=verifier_success reason=upstream_ok");
+      this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] EXIT", { result: "verifier_text", responseLen: text.length });
+      return text;
+    } catch (err) {
+      const latency = Math.round(performance.now() - t0);
+      this.logger.error("fallback", "[SpeculativeDraft.callVerifier] verifier_call_error", { latencyMs: latency, error: String(err) });
+      this.logger.debug("fallback", "[SpeculativeDraft.callVerifier] EXIT", { result: "fallback_to_draft_tokens" });
+      return req.draftTokens.join("");
+    }
+  }
+  /**
+   * Fetch routing hints (embedding-based expert prefetch) from the embedding worker.
+   */
+  async fetchRoutingHints(prompt, context) {
+    this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] ENTER", { promptLen: prompt.length, contextLen: context.length });
+    if (!this.embeddingService) {
+      this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] BRANCH path=embedding_service_unavailable reason=no_service_binding");
+      this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] EXIT", { result: "undefined" });
+      return void 0;
+    }
+    const t0 = performance.now();
+    this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] CALLING target=moe-embedding");
+    try {
+      const res = await this.embeddingService.fetch(
+        new Request("http://internal/hints", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ prompt, context })
+        })
+      );
+      const latency = Math.round(performance.now() - t0);
+      if (res.ok) {
+        const payload = await res.json();
+        this.logger.info("routing", "[SpeculativeDraft.fetchRoutingHints] hints_fetch_end", {
+          latencyMs: latency,
+          hintCount: payload.hints?.length ?? 0
+        });
+        this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] BRANCH path=hints_success reason=embedding_ok");
+        this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] EXIT", { hintCount: payload.hints?.length ?? 0 });
+        return payload.hints;
+      } else {
+        this.logger.warn("routing", "[SpeculativeDraft.fetchRoutingHints] hints_fetch_non_200", { status: res.status, latencyMs: latency });
+        this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] BRANCH path=hints_error reason=non_200_response");
+        this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] EXIT", { result: "undefined" });
+        return void 0;
+      }
+    } catch (err) {
+      this.logger.warn("routing", "[SpeculativeDraft.fetchRoutingHints] hints_fetch_error", { error: String(err) });
+      this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] BRANCH path=hints_exception reason=fetch_failed");
+      this.logger.debug("routing", "[SpeculativeDraft.fetchRoutingHints] EXIT", { result: "undefined" });
+      return void 0;
+    }
+  }
+  /**
+   * Very rough token estimate: ~4 chars per token for English text.
+   */
+  estimateTokens(text) {
+    this.logger.debug("inference", "[SpeculativeDraft.estimateTokens] ENTER", { textLen: text.length });
+    const result = Math.ceil(text.length / 4);
+    this.logger.debug("inference", "[SpeculativeDraft.estimateTokens] EXIT", { result });
+    return result;
+  }
+  /**
+   * Approximate log-prob proxy from text statistics.
+   */
+  approximateLogProbs(text) {
+    this.logger.debug("inference", "[SpeculativeDraft.approximateLogProbs] ENTER", { textLen: text.length });
+    const words = text.split(/\s+/).filter(Boolean);
+    const result = words.map((w) => {
+      const len = w.length;
+      const punct = /[.?!,;:]/.test(w) ? 0.2 : 0;
+      const cap = /^[A-Z]/.test(w) ? 0.1 : 0;
+      return -0.05 * len + punct + cap;
+    });
+    this.logger.debug("inference", "[SpeculativeDraft.approximateLogProbs] EXIT", { wordCount: words.length });
+    return result;
+  }
+  /**
+   * Rough tokenisation: split on whitespace and punctuation, cap at K tokens.
+   */
+  tokeniseRoughly(text, maxTokens) {
+    this.logger.debug("inference", "[SpeculativeDraft.tokeniseRoughly] ENTER", { textLen: text.length, maxTokens });
+    if (!text) {
+      this.logger.debug("inference", "[SpeculativeDraft.tokeniseRoughly] BRANCH path=empty_text");
+      this.logger.debug("inference", "[SpeculativeDraft.tokeniseRoughly] EXIT", { result: "[]" });
+      return [];
+    }
+    const tokens = text.replace(/([.?!,;:\n])/g, " $1 ").split(/\s+/).filter((t) => t.length > 0).slice(0, maxTokens);
+    this.logger.debug("inference", "[SpeculativeDraft.tokeniseRoughly] EXIT", { tokenCount: tokens.length });
+    return tokens;
+  }
+  /**
+   * Build a deterministic context fingerprint for cache keys.
+   */
+  makeFingerprint(prompt, context) {
+    this.logger.debug("cache", "[SpeculativeDraft.makeFingerprint] ENTER", { promptLen: prompt.length, contextLen: context.length });
+    const combined = (context + prompt).slice(0, 512);
+    let hash = 0;
+    for (let i = 0; i < combined.length; i++) {
+      const char = combined.charCodeAt(i);
+      hash = (hash << 5) - hash + char | 0;
+    }
+    const result = Math.abs(hash).toString(36).padStart(8, "0");
+    this.logger.debug("cache", "[SpeculativeDraft.makeFingerprint] EXIT", { fingerprint: result });
+    return result;
+  }
+};
+var draft_default = {
+  async fetch(request, env, _ctx) {
+    const requestId = crypto.randomUUID();
+    const url = new URL(request.url);
+    if (request.method !== "POST" || !url.pathname.startsWith("/draft")) {
+      return new Response(
+        JSON.stringify({ error: "Method not allowed. POST to /draft", requestId }),
+        { status: 405, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    const logger = new DraftLogger(env.AURIS_LOGS, requestId);
+    logger.debug("lifecycle", "[draft.fetch] ENTER", { url: request.url, method: request.method, pathname: url.pathname });
+    const t0 = performance.now();
+    try {
+      logger.debug("lifecycle", "[draft.fetch] CALLING target=request.json");
+      const body = await request.json();
+      logger.info("lifecycle", "[draft.fetch] fetch_handler", {
+        requestId,
+        path: url.pathname,
+        promptPreview: body.prompt?.slice(0, 80),
+        hasContext: !!body.context
+      });
+      if (!body.prompt || body.prompt.trim().length === 0) {
+        logger.warn("lifecycle", "[draft.fetch] BRANCH path=bad_request reason=missing_prompt");
+        await logger.flush();
+        logger.debug("lifecycle", "[draft.fetch] EXIT", { result: "400_bad_request" });
+        return new Response(
+          JSON.stringify({ error: "Missing prompt", requestId }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      logger.debug("lifecycle", "[draft.fetch] BRANCH path=validation_ok");
+      logger.debug("lifecycle", "[draft.fetch] CALLING target=KVCacheManager.constructor");
+      const cache = new KVCacheManager(
+        env.MOE_HOT,
+        env.MOE_WARM,
+        env.MOE_EMBEDDING,
+        logger
+      );
+      logger.debug("lifecycle", "[draft.fetch] CALLING target=SpeculativeDraft.constructor");
+      const draft = new SpeculativeDraft(
+        env.AI,
+        cache,
+        logger,
+        env.MOE_VERIFIER,
+        env.MOE_EMBEDDING
+      );
+      logger.debug("lifecycle", "[draft.fetch] CALLING target=SpeculativeDraft.generate");
+      const result = await draft.generate(body, requestId);
+      await logger.flush();
+      const totalElapsed = Math.round(performance.now() - t0);
+      logger.info("lifecycle", "[draft.fetch] fetch_handler_end", {
+        requestId,
+        totalLatencyMs: totalElapsed,
+        accepted: result.accepted,
+        confidence: result.confidence
+      });
+      logger.debug("lifecycle", "[draft.fetch] EXIT", { requestId, accepted: result.accepted, confidence: result.confidence, latencyMs: totalElapsed });
+      return new Response(JSON.stringify(result), {
+        status: 200,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Request-Id": requestId,
+          "X-Draft-Latency-Ms": String(result.latencyMs),
+          "X-Draft-Confidence": String(result.confidence),
+          "X-Draft-Accepted": String(result.accepted)
+        }
+      });
+    } catch (err) {
+      const elapsed = Math.round(performance.now() - t0);
+      logger.error("lifecycle", "[draft.fetch] fetch_handler_exception", {
+        requestId,
+        elapsedMs: elapsed,
+        error: String(err),
+        stack: err instanceof Error ? err.stack : void 0
+      });
+      await logger.flush();
+      logger.debug("lifecycle", "[draft.fetch] EXIT", { result: "500_error", elapsedMs: elapsed });
+      return new Response(
+        JSON.stringify({
+          error: "Internal draft worker error",
+          detail: err instanceof Error ? err.message : String(err),
+          requestId,
+          elapsedMs: elapsed
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json", "X-Request-Id": requestId }
+        }
+      );
+    }
+  }
+};
+export {
+  ConfidenceScorer,
+  SpeculativeDraft,
+  draft_default as default
+};
+//# sourceMappingURL=draft.js.map
+
+--3c1c11ad68ed23cb836650183373c8a67c50e9f74a2fe9028e15ce88e11f--
